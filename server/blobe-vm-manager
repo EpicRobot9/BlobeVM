@@ -1,0 +1,574 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# BlobeVM Manager CLI
+# Commands:
+#   list
+#   create <name>
+#   start <name>
+#   stop <name>
+#   delete <name>
+#   rename <old> <new>        # move instance and switch URL to new name
+#   set-host <name> <fqdn>    # override host (domain mode): e.g., vm1.example.com
+#   clear-host <name>         # remove host override and return to name.<domain>
+#   set-path <name> </prefix> # override path (no-domain mode), e.g., /desk/1
+#   clear-path <name>         # remove path override and return to /vm/<name>
+#   nuke                      # uninstall everything created by server/install.sh
+#   set-host-interactive <name>  # prompts & prints IPs, then asks for host
+#   set-base-path </base>         # set global base path (default /vm)
+#   clear-base-path               # revert global base path to /vm
+#   set-limits <name> <cpu> <mem>  # set CPU (e.g. 0.5 or 2) and memory (e.g. 1g, 512m)
+#   clear-limits <name>            # remove resource limits
+# - Creates per-instance containers on network "proxy"
+# - Routes via Traefik using either subdomain (if BLOBEVM_DOMAIN set) or path prefix
+# - Prints the VM URL on create/start
+
+STATE_DIR=/opt/blobe-vm
+INST_DIR="$STATE_DIR/instances"
+ENV_FILE="$STATE_DIR/.env"
+
+if [[ -f "$ENV_FILE" ]]; then
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+fi
+
+usage() {
+  cat >&2 <<USAGE
+Usage: blobe-vm-manager <command> [args]
+
+Commands:
+  list
+  create <name>
+  start <name>
+  stop <name>
+  delete <name>
+  rename <old> <new>
+  set-host <name> <fqdn>
+  clear-host <name>
+  set-path <name> </prefix>
+  clear-path <name>
+USAGE
+  exit 1
+}
+
+ensure_instance_dir() {
+  mkdir -p "$INST_DIR"
+}
+
+instance_exists() {
+  local name="$1"
+  [[ -d "$INST_DIR/$name" ]]
+}
+
+container_name() {
+  local name="$1"
+  echo "blobevm_${name}"
+}
+
+vm_url() {
+  local name="$1"
+  local host_override path_override
+  host_override="$(get_meta "$name" host_override || true)"
+  path_override="$(get_meta "$name" path_override || true)"
+  local base_path="${BASE_PATH:-/vm}"
+  [[ "$base_path" != /* ]] && base_path="/$base_path"
+  base_path="${base_path%/}"
+  # If a host override exists, prefer host-based URL even in no-domain mode
+  if [[ -n "$host_override" ]]; then
+    local scheme="http"
+    [[ "${ENABLE_TLS:-0}" -eq 1 ]] && scheme="https"
+    echo "${scheme}://${host_override}/"
+    return
+  fi
+  if [[ -n "${BLOBEVM_DOMAIN:-}" ]]; then
+    local scheme="http"
+    [[ "${ENABLE_TLS:-0}" -eq 1 ]] && scheme="https"
+    echo "${scheme}://${name}.${BLOBEVM_DOMAIN}/"
+  else
+    local ip
+    ip="$(hostname -I | awk '{print $1}')"
+    local pfx
+    if [[ -n "$path_override" ]]; then
+      pfx="$path_override"
+    else
+      pfx="${base_path}/${name}/"
+    fi
+    # Ensure path has leading and trailing slash
+    [[ "$pfx" != /* ]] && pfx="/$pfx"
+    [[ "$pfx" != */ ]] && pfx="$pfx/"
+    echo "http://$ip${pfx}"
+  fi
+}
+
+common_labels() {
+  local name="$1"
+  local host_override path_override
+  host_override="$(get_meta "$name" host_override || true)"
+  path_override="$(get_meta "$name" path_override || true)"
+  local redirect_labels=()
+  if [[ "${FORCE_HTTPS:-0}" -eq 1 && "${ENABLE_TLS:-0}" -eq 1 ]]; then
+    redirect_labels+=("--label=traefik.http.middlewares.${name}-https-redirect.redirectscheme.scheme=https")
+  fi
+  if [[ -n "$host_override" ]]; then
+    local host
+    host="$host_override"
+    # Dual routing: host + path always available
+    local base_path="${BASE_PATH:-/vm}"; [[ "$base_path" != /* ]] && base_path="/$base_path"; base_path="${base_path%/}"
+    local prefix_path
+    local path_override
+    path_override="$(get_meta "$name" path_override || true)"
+    if [[ -n "$path_override" ]]; then
+      prefix_path="$path_override"
+    else
+      prefix_path="${base_path}/${name}"
+    fi
+    [[ "$prefix_path" != /* ]] && prefix_path="/$prefix_path"
+    prefix_path="${prefix_path%/}"
+    echo \
+      "--label=traefik.enable=true" \
+      "--label=traefik.http.routers.${name}.rule=Host(\`$host\`)" \
+      "--label=traefik.http.routers.${name}.entrypoints=web" \
+      "--label=traefik.http.services.${name}.loadbalancer.server.port=3000" \
+      "--label=traefik.http.routers.${name}-path.rule=PathPrefix(\`$prefix_path\`)" \
+      "--label=traefik.http.routers.${name}-path.entrypoints=web" \
+      "--label=traefik.http.services.${name}-path.loadbalancer.server.port=3000"
+      ${redirect_labels[@]:-}
+    if [[ "${ENABLE_TLS:-0}" -eq 1 ]]; then
+      echo \
+        "--label=traefik.http.routers.${name}-secure.rule=Host(\`$host\`)" \
+        "--label=traefik.http.routers.${name}-secure.entrypoints=websecure" \
+        "--label=traefik.http.routers.${name}-secure.tls=true" \
+        "--label=traefik.http.routers.${name}-secure.tls.certresolver=myresolver" \
+        "--label=traefik.http.services.${name}.loadbalancer.server.port=3000"
+      echo \
+        "--label=traefik.http.routers.${name}-path-secure.rule=PathPrefix(\`$prefix_path\`)" \
+        "--label=traefik.http.routers.${name}-path-secure.entrypoints=websecure" \
+        "--label=traefik.http.routers.${name}-path-secure.tls=true" \
+        "--label=traefik.http.routers.${name}-path-secure.tls.certresolver=myresolver" \
+        "--label=traefik.http.services.${name}-path-secure.loadbalancer.server.port=3000"
+    fi
+  elif [[ -n "${BLOBEVM_DOMAIN:-}" ]]; then
+    local host
+    host="${name}.${BLOBEVM_DOMAIN}"
+    local base_path="${BASE_PATH:-/vm}"; [[ "$base_path" != /* ]] && base_path="/$base_path"; base_path="${base_path%/}"
+    local prefix_path="${base_path}/${name}"; [[ "$prefix_path" != /* ]] && prefix_path="/$prefix_path"; prefix_path="${prefix_path%/}"
+    echo \
+      "--label=traefik.enable=true" \
+      "--label=traefik.http.routers.${name}.rule=Host(\`$host\`)" \
+      "--label=traefik.http.routers.${name}.entrypoints=web" \
+      "--label=traefik.http.services.${name}.loadbalancer.server.port=3000" \
+      "--label=traefik.http.routers.${name}-path.rule=PathPrefix(\`$prefix_path\`)" \
+      "--label=traefik.http.routers.${name}-path.entrypoints=web" \
+      "--label=traefik.http.services.${name}-path.loadbalancer.server.port=3000"
+      ${redirect_labels[@]:-}
+    if [[ "${ENABLE_TLS:-0}" -eq 1 ]]; then
+      echo \
+        "--label=traefik.http.routers.${name}-secure.rule=Host(\`$host\`)" \
+        "--label=traefik.http.routers.${name}-secure.entrypoints=websecure" \
+        "--label=traefik.http.routers.${name}-secure.tls=true" \
+        "--label=traefik.http.routers.${name}-secure.tls.certresolver=myresolver" \
+        "--label=traefik.http.services.${name}.loadbalancer.server.port=3000"
+      echo \
+        "--label=traefik.http.routers.${name}-path-secure.rule=PathPrefix(\`$prefix_path\`)" \
+        "--label=traefik.http.routers.${name}-path-secure.entrypoints=websecure" \
+        "--label=traefik.http.routers.${name}-path-secure.tls=true" \
+        "--label=traefik.http.routers.${name}-path-secure.tls.certresolver=myresolver" \
+        "--label=traefik.http.services.${name}-path-secure.loadbalancer.server.port=3000"
+    fi
+  else
+    # Path-based routing when no domain present
+    local prefix
+    if [[ -n "$path_override" ]]; then
+      prefix="$path_override"
+    else
+      local base_path="${BASE_PATH:-/vm}"; [[ "$base_path" != /* ]] && base_path="/$base_path"; base_path="${base_path%/}"
+      prefix="${base_path}/${name}"
+    fi
+    # Ensure leading slash, no trailing slash for rule
+    [[ "$prefix" != /* ]] && prefix="/$prefix"
+    prefix="${prefix%/}"
+    echo \
+      "--label=traefik.enable=true" \
+      "--label=traefik.http.routers.${name}.rule=PathPrefix(\`$prefix\`)" \
+      "--label=traefik.http.routers.${name}.entrypoints=web" \
+      "--label=traefik.http.services.${name}.loadbalancer.server.port=3000" \
+      ${redirect_labels[@]:-}
+  fi
+}
+
+run_container() {
+  local name="$1"
+  local cname
+  cname="$(container_name "$name")"
+  local save_dir="$INST_DIR/$name/config"
+  mkdir -p "$save_dir"
+
+  local kvm_args=()
+  if [[ "${ENABLE_KVM:-0}" -eq 1 && -e /dev/kvm ]]; then
+    kvm_args=("--device=/dev/kvm" "--security-opt" "seccomp=unconfined")
+  else
+    kvm_args=("--security-opt" "seccomp=unconfined")
+  fi
+
+  local subfolder="/"
+  if [[ -z "${BLOBEVM_DOMAIN:-}" || -n "$(get_meta "$name" path_override || true)" || -n "$(get_meta "$name" host_override || true)" ]]; then
+    local pfx
+    pfx="$(get_meta "$name" path_override || true)"
+    local base_path="${BASE_PATH:-/vm}"; [[ "$base_path" != /* ]] && base_path="/$base_path"; base_path="${base_path%/}"
+    if [[ -n "$pfx" ]]; then
+      [[ "$pfx" != /* ]] && pfx="/$pfx"
+      [[ "$pfx" != */ ]] && pfx="$pfx/"
+      subfolder="$pfx"
+    else
+      subfolder="${base_path}/${name}/"
+    fi
+    [[ "$subfolder" != /* ]] && subfolder="/$subfolder"
+  fi
+
+  docker run -d \
+    --name "$cname" \
+    --restart unless-stopped \
+    $(limits_flags "$name") \
+    -e PUID="$(id -u)" -e PGID="$(id -g)" \
+  docker run -d \
+    --name "$cname" \
+    --restart unless-stopped \
+    $(limits_flags "$name") \
+    -e PUID="$(id -u)" -e PGID="$(id -g)" \
+    -e TZ=Etc/UTC \
+    -e SUBFOLDER="$subfolder" \
+    -e TITLE="BlobeVM - ${name}" \
+    --shm-size="2gb" \
+    -v "$save_dir":/config \
+    --network proxy \
+    ${kvm_args[@]} \
+    $(common_labels "$name") \
+    "${BLOBEVM_IMAGE:-blobevm:latest}" \
+    >/dev/null
+cmd_set_limits() {
+  local name="$1" cpu="$2" mem="$3"
+  [[ -z "$name" || -z "$cpu" || -z "$mem" ]] && usage
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  set_meta "$name" cpu_limit "$cpu"
+  set_meta "$name" mem_limit "$mem"
+  recreate_container "$name"
+  echo "Limits set for '$name' -> CPU: $cpu, Memory: $mem"
+}
+
+cmd_clear_limits() {
+  local name="$1"; [[ -z "$name" ]] && usage
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  del_meta "$name" cpu_limit || true
+  del_meta "$name" mem_limit || true
+  recreate_container "$name"
+  echo "Limits cleared for '$name'"
+}
+    -v "$save_dir":/config \
+    --network proxy \
+    ${kvm_args[@]} \
+    $(common_labels "$name") \
+    "${BLOBEVM_IMAGE:-blobevm:latest}" \
+    >/dev/null
+}
+
+cmd_list() {
+  ensure_instance_dir
+  echo "Instances:"
+  shopt -s nullglob
+  for d in "$INST_DIR"/*; do
+    if [[ -d "$d" ]]; then
+      local name
+      name="$(basename "$d")"
+      local cname
+      cname="$(container_name "$name")"
+      local st
+      st=$(docker ps --format '{{.Names}} {{.Status}}' | awk -v n="$cname" '$1==n{print $0}')
+      [[ -z "$st" ]] && st="${cname} (stopped)"
+      echo "- $name -> ${st} -> $(vm_url "$name")"
+    fi
+  done
+}
+
+cmd_create() {
+  local name="${1:-}"; [[ -z "$name" ]] && usage
+  ensure_instance_dir
+  if instance_exists "$name"; then
+    echo "Instance '$name' already exists." >&2
+    exit 1
+  fi
+  mkdir -p "$INST_DIR/$name"
+  # Preseed default config if available and target dir empty
+  local save_dir="$INST_DIR/$name/config"
+  mkdir -p "$save_dir"
+  if [[ -n "${REPO_DIR:-}" && -d "${REPO_DIR}/root/config" ]] && [[ -z "$(ls -A "$save_dir" 2>/dev/null)" ]]; then
+    cp -a "${REPO_DIR}/root/config/." "$save_dir/" 2>/dev/null || true
+  fi
+  run_container "$name"
+  echo "Created VM '$name' at: $(vm_url "$name")"
+}
+
+cmd_start() {
+  local name="${1:-}"; [[ -z "$name" ]] && usage
+  ensure_instance_dir
+  local cname
+  cname="$(container_name "$name")"
+  if docker ps -a --format '{{.Names}}' | grep -qx "$cname"; then
+    docker start "$cname" >/dev/null
+    echo "Started '$name': $(vm_url "$name")"
+  else
+    echo "No container for '$name'. Creating..."
+    run_container "$name"
+    echo "Started '$name': $(vm_url "$name")"
+  fi
+}
+
+cmd_stop() {
+  local name="${1:-}"; [[ -z "$name" ]] && usage
+  local cname
+  cname="$(container_name "$name")"
+  if docker ps -a --format '{{.Names}}' | grep -qx "$cname"; then
+    docker stop "$cname" >/dev/null || true
+    echo "Stopped '$name'"
+  else
+    echo "Instance '$name' not found." >&2
+    exit 1
+  fi
+}
+
+cmd_delete() {
+  local name="${1:-}"; [[ -z "$name" ]] && usage
+  local cname
+  cname="$(container_name "$name")"
+  if docker ps -a --format '{{.Names}}' | grep -qx "$cname"; then
+    docker rm -f "$cname" >/dev/null || true
+  fi
+  rm -rf "$INST_DIR/$name"
+  echo "Deleted '$name'"
+}
+
+# --- metadata helpers ---
+meta_file() { echo "$INST_DIR/$1/instance.json"; }
+
+get_meta() {
+  local name="$1" key="$2"
+  local mf
+  mf="$(meta_file "$name")"
+  [[ -f "$mf" ]] || return 0
+  jq -r --arg k "$key" 'if has($k) then .[$k] else empty end' "$mf"
+}
+
+set_meta() {
+  local name="$1" key="$2" val="$3"
+  local mf tmp
+  mf="$(meta_file "$name")"
+  mkdir -p "$(dirname "$mf")"
+  if [[ -f "$mf" ]]; then
+    tmp="$(mktemp)"
+    jq --arg k "$key" --arg v "$val" '.[$k]=$v' "$mf" > "$tmp" && mv "$tmp" "$mf"
+  else
+    printf '{"%s":"%s"}\n' "$key" "$val" > "$mf"
+  fi
+}
+
+del_meta() {
+  local name="$1" key="$2"
+  local mf tmp
+  mf="$(meta_file "$name")"
+  [[ -f "$mf" ]] || return 0
+  tmp="$(mktemp)"
+  jq --arg k "$key" 'del(.[$k])' "$mf" > "$tmp" && mv "$tmp" "$mf"
+}
+
+recreate_container() {
+  local name="$1"
+  local cname
+  cname="$(container_name "$name")"
+  if docker ps -a --format '{{.Names}}' | grep -qx "$cname"; then
+    docker rm -f "$cname" >/dev/null || true
+  fi
+  run_container "$name"
+}
+
+cmd_rename() {
+  local old="${1:-}" new="${2:-}"
+  [[ -z "$old" || -z "$new" ]] && usage
+  [[ "$old" == "$new" ]] && { echo "Old and new names are the same." >&2; exit 1; }
+  ensure_instance_dir
+  instance_exists "$old" || { echo "Instance '$old' does not exist." >&2; exit 1; }
+  if instance_exists "$new"; then
+    echo "Target instance name '$new' already exists." >&2
+    exit 1
+  fi
+  # Remove old container if present
+  local oldc
+  oldc="$(container_name "$old")"
+  if docker ps -a --format '{{.Names}}' | grep -qx "$oldc"; then
+    docker rm -f "$oldc" >/dev/null || true
+  fi
+  # Move instance directory
+  mv "$INST_DIR/$old" "$INST_DIR/$new"
+  # If no explicit path override exists (path mode), URL path will change automatically
+  # Host override (domain mode) will keep using custom host if set
+  run_container "$new"
+  echo "Renamed '$old' -> '$new'"
+  echo "New URL: $(vm_url "$new")"
+}
+
+cmd_set_host() {
+  local name="${1:-}" host="${2:-}"
+  [[ -z "$name" || -z "$host" ]] && usage
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  set_meta "$name" host_override "$host"
+  recreate_container "$name"
+  echo "Updated host for '$name' -> $(vm_url "$name")"
+}
+
+cmd_clear_host() {
+  local name="${1:-}"
+  [[ -z "$name" ]] && usage
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  del_meta "$name" host_override || true
+  recreate_container "$name"
+  echo "Cleared host override for '$name' -> $(vm_url "$name")"
+}
+
+cmd_set_path() {
+  local name="${1:-}" prefix="${2:-}"
+  [[ -z "$name" || -z "$prefix" ]] && usage
+  [[ -z "${BLOBEVM_DOMAIN:-}" ]] || { echo "set-path is only for no-domain/path mode." >&2; exit 1; }
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  # Normalize to leading slash, trailing slash preserved via SUBFOLDER
+  [[ "$prefix" != /* ]] && prefix="/$prefix"
+  set_meta "$name" path_override "$prefix"
+  recreate_container "$name"
+  echo "Updated path for '$name' -> $(vm_url "$name")"
+}
+
+cmd_clear_path() {
+cmd_set_host_interactive() {
+  local name="${1:-}"; [[ -z "$name" ]] && usage
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  echo "Detected IP addresses:"
+  ip -o -4 addr show | awk '{print "  "$2": "$4}'
+  local pub
+  pub=$(curl -fsS ifconfig.me || true)
+  [[ -n "$pub" ]] && echo "  public: $pub"
+  echo "Enter the DNS hostname (e.g., myvm.example.com or myvm.ddns.net) that you pointed to this server:"
+  read -rp "Hostname: " host
+  [[ -z "$host" ]] && { echo "No hostname entered." >&2; exit 1; }
+  set_meta "$name" host_override "$host"
+  recreate_container "$name"
+  echo "Updated host for '$name' -> $(vm_url "$name")"
+  echo "NOTE: Ensure DNS A record resolves to this server and port 80 is reachable for HTTPS issuance if enabled."
+}
+
+cmd_set_base_path() {
+  local base="${1:-}"; [[ -z "$base" ]] && usage
+  [[ "$base" != /* ]] && base="/$base"
+  base="${base%/}"
+  BASE_PATH="$base"
+  # Update global .env
+  if [[ -f /opt/blobe-vm/.env ]]; then
+    sed -i -E "s|^BASE_PATH=.*|BASE_PATH=$BASE_PATH|" /opt/blobe-vm/.env || echo "BASE_PATH=$BASE_PATH" >> /opt/blobe-vm/.env
+  fi
+  echo "Base path set to $BASE_PATH. Recreating running containers..."
+  for d in "$INST_DIR"/*; do
+    [[ -d "$d" ]] || continue
+    local n; n="$(basename "$d")"
+    recreate_container "$n"
+  done
+}
+
+cmd_clear_base_path() {
+  BASE_PATH="/vm"
+  if [[ -f /opt/blobe-vm/.env ]]; then
+    sed -i -E "s|^BASE_PATH=.*|BASE_PATH=/vm|" /opt/blobe-vm/.env || echo "BASE_PATH=/vm" >> /opt/blobe-vm/.env
+  fi
+  echo "Base path reset to /vm. Recreating running containers..."
+  for d in "$INST_DIR"/*; do
+    [[ -d "$d" ]] || continue
+    local n; n="$(basename "$d")"
+    recreate_container "$n"
+  done
+}
+  local name="${1:-}"
+  [[ -z "$name" ]] && usage
+  [[ -z "${BLOBEVM_DOMAIN:-}" ]] || { echo "clear-path is only for no-domain/path mode." >&2; exit 1; }
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  del_meta "$name" path_override || true
+  recreate_container "$name"
+  echo "Cleared path override for '$name' -> $(vm_url "$name")"
+}
+
+main() {
+  local cmd="${1:-}"; shift || true
+  case "$cmd" in
+    list)   cmd_list "$@" ;;
+    create) cmd_create "$@" ;;
+    start)  cmd_start "$@" ;;
+    stop)   cmd_stop "$@" ;;
+    delete) cmd_delete "$@" ;;
+    rename) cmd_rename "$@" ;;
+    set-host) cmd_set_host "$@" ;;
+    clear-host) cmd_clear_host "$@" ;;
+    set-path) cmd_set_path "$@" ;;
+    clear-path) cmd_clear_path "$@" ;;
+    nuke)   cmd_nuke "$@" ;;
+    set-host-interactive) cmd_set_host_interactive "$@" ;;
+    set-base-path) cmd_set_base_path "$@" ;;
+    clear-base-path) cmd_clear_base_path "$@" ;;
+  set-limits) cmd_set_limits "$@" ;;
+  clear-limits) cmd_clear_limits "$@" ;;
+    *) usage ;;
+  esac
+}
+
+cmd_nuke() {
+  echo "This will remove ALL BlobeVM instances, Traefik stack, data, images, and the manager binary."
+  read -rp "Type 'NUKE' to confirm: " confirm
+  if [[ "$confirm" != "NUKE" ]]; then
+    echo "Aborted."
+    exit 1
+  fi
+
+  echo "Stopping and removing instance containers..."
+  shopt -s nullglob
+  local cname
+  for cname in $(docker ps -a --format '{{.Names}}' | grep -E '^blobevm_' || true); do
+    docker rm -f "$cname" >/dev/null 2>&1 || true
+  done
+
+  echo "Removing Traefik stack..."
+  if [[ -f /opt/blobe-vm/traefik/docker-compose.yml ]]; then
+    (cd /opt/blobe-vm/traefik && docker compose down --remove-orphans) || true
+  fi
+
+  echo "Removing docker image 'blobevm:latest'..."
+  docker rmi -f blobevm:latest >/dev/null 2>&1 || true
+
+  echo "Removing proxy network if empty..."
+  if docker network inspect proxy >/dev/null 2>&1; then
+    # Only remove if no containers attached
+    local attached
+    attached=$(docker network inspect proxy -f '{{ len .Containers }}') || attached=1
+    if [[ "$attached" == "0" ]]; then
+      docker network rm proxy >/dev/null 2>&1 || true
+    fi
+  fi
+
+  echo "Removing data directory /opt/blobe-vm ..."
+  rm -rf /opt/blobe-vm
+
+  echo "Removing manager binary /usr/local/bin/blobe-vm-manager ..."
+  rm -f /usr/local/bin/blobe-vm-manager
+
+  echo "Done. System cleaned."
+}
+
+main "$@"
