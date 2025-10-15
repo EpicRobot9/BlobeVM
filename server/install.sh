@@ -687,6 +687,8 @@ main() {
       BASE_PATH=${BASE_PATH:-/vm}
     else
       prompt_config
+      # User chose to reconfigure: clear any previously loaded derived values so we re-detect ports/TLS
+      unset HTTP_PORT HTTPS_PORT TLS_ENABLED
     fi
   else
     prompt_config
@@ -716,6 +718,13 @@ main() {
     maybe_create_first_vm
   fi
   print_success
+  echo
+  echo "Current VMs:"
+  if command -v blobe-vm-manager >/dev/null 2>&1; then
+    blobe-vm-manager list || true
+  else
+    echo "  (manager not found in PATH)"
+  fi
 }
 
 main "$@"

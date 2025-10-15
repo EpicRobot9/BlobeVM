@@ -29,3 +29,8 @@ cd /
 rm -rf "$TMP_DIR"
 
 echo "Done. Use 'blobe-vm-manager create <name>' to make your first VM."
+if command -v blobe-vm-manager >/dev/null 2>&1; then
+  echo
+  echo "Current VMs:"
+  blobe-vm-manager list || true
+fi
