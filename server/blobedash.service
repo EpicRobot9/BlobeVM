@@ -1,0 +1,15 @@
+[Unit]
+Description=BlobeVM Dashboard (direct mode)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/env bash /opt/blobe-vm/server/blobedash-ensure.sh
+ExecReload=/usr/bin/env bash /opt/blobe-vm/server/blobedash-ensure.sh
+ExecStop=/usr/bin/docker rm -f blobedash
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

@@ -79,6 +79,10 @@ Commands:
   clear-path <name>
   port <name>                # direct mode: print assigned port
   set-port <name> <port>     # direct mode: set fixed port and recreate
+  url <name>                 # print the VM URL
+  open <name>                # try to open the VM URL using a local browser
+  dashboard-url              # print the dashboard URL
+  open-dashboard             # try to open the dashboard URL
 USAGE
   exit 1
 }
@@ -647,6 +651,66 @@ cmd_set_base_path() {
   done
 }
 
+# --- URL helpers ---
+dashboard_url() {
+  local ip http_port https_port https_suffix http_suffix
+  ip="$(hostname -I | awk '{print $1}')"
+  http_port="${HTTP_PORT:-80}"; https_port="${HTTPS_PORT:-443}"
+  http_suffix=""; https_suffix=""
+  [[ "$http_port" != "80" ]] && http_suffix=":"$http_port
+  [[ "$https_port" != "443" ]] && https_suffix=":"$https_port
+  if [[ "${NO_TRAEFIK}" -eq 1 ]]; then
+    if [[ -n "${DASHBOARD_PORT:-}" ]]; then
+      echo "http://${ip}:${DASHBOARD_PORT}/dashboard"; return
+    fi
+    echo "(dashboard disabled or unknown port)"; return
+  fi
+  if [[ -n "${BLOBEVM_DOMAIN:-}" ]]; then
+    if [[ "${ENABLE_TLS:-0}" -eq 1 ]]; then
+      echo "https://dashboard.${BLOBEVM_DOMAIN}${https_suffix}/"; return
+    else
+      echo "http://dashboard.${BLOBEVM_DOMAIN}${http_suffix}/"; return
+    fi
+  else
+    echo "http://${ip}${http_suffix}/dashboard"; return
+  fi
+}
+
+open_browser() {
+  local url="$1"
+  if [[ -n "${BROWSER:-}" ]]; then
+    "${BROWSER}" "$url" >/dev/null 2>&1 && return 0
+  fi
+  if command -v xdg-open >/dev/null 2>&1; then xdg-open "$url" >/dev/null 2>&1 && return 0; fi
+  if command -v sensible-browser >/dev/null 2>&1; then sensible-browser "$url" >/dev/null 2>&1 && return 0; fi
+  if command -v gio >/dev/null 2>&1; then gio open "$url" >/dev/null 2>&1 && return 0; fi
+  return 1
+}
+
+cmd_url() {
+  local name="${1:-}"; [[ -z "$name" ]] && usage
+  echo "$(vm_url "$name")"
+}
+
+cmd_open() {
+  local name="${1:-}"; [[ -z "$name" ]] && usage
+  local url
+  url="$(vm_url "$name")"
+  echo "$url"
+  open_browser "$url" || echo "Note: couldn't auto-open a browser on this host."
+}
+
+cmd_dashboard_url() {
+  dashboard_url
+}
+
+cmd_open_dashboard() {
+  local url
+  url="$(dashboard_url)"
+  echo "$url"
+  open_browser "$url" || echo "Note: couldn't auto-open a browser on this host."
+}
+
 cmd_clear_base_path() {
   BASE_PATH="/vm"
   if [[ -f /opt/blobe-vm/.env ]]; then
@@ -676,6 +740,10 @@ main() {
     clear-path) cmd_clear_path "$@" ;;
     port)   cmd_port "$@" ;;
     set-port) cmd_set_port "$@" ;;
+    url)    cmd_url "$@" ;;
+    open)   cmd_open "$@" ;;
+    dashboard-url) cmd_dashboard_url "$@" ;;
+    open-dashboard) cmd_open_dashboard "$@" ;;
     nuke)   cmd_nuke "$@" ;;
     set-host-interactive) cmd_set_host_interactive "$@" ;;
     set-base-path) cmd_set_base_path "$@" ;;

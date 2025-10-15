@@ -60,6 +60,12 @@ blobe-vm-manager list-ports          # Show VM -> port mapping
 blobe-vm-manager port alpha          # Show the port for a specific VM
 blobe-vm-manager set-port alpha 20123# Set a fixed port and recreate the container
 
+# Quick URL helpers
+blobe-vm-manager url alpha           # Print URL for the VM
+blobe-vm-manager open alpha          # Attempt to open URL in a browser
+blobe-vm-manager dashboard-url       # Print dashboard URL
+blobe-vm-manager open-dashboard      # Attempt to open dashboard in a browser
+
 # Create a VM named "alpha"
 blobe-vm-manager create alpha
 
@@ -215,6 +221,16 @@ blobe-vm-manager clear-limits <vm>       # Remove limits
 - Remove after install: `cd /opt/blobe-vm/traefik && docker compose rm -sf dashboard`
 
 Direct mode (no Traefik): If enabled, the dashboard runs as a standalone container on a free high port. The installer prints the URL. You can stop/start it via `docker stop blobedash` / `docker start blobedash`.
+
+Direct mode with systemd (auto-manage dashboard):
+- The installer installs a systemd unit `blobedash.service` that ensures the dashboard container exists and runs on a free high port.
+- Manage it via:
+```
+sudo systemctl start blobedash
+sudo systemctl status blobedash
+sudo systemctl restart blobedash   # re-evaluates/assigns port if needed
+sudo systemctl stop blobedash
+```
 
 ### Full uninstall
 ```

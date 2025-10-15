@@ -932,6 +932,14 @@ install_manager() {
   if [[ -f "$REPO_DIR/dashboard/app.py" ]]; then
     cp -f "$REPO_DIR/dashboard/app.py" /opt/blobe-vm/dashboard/app.py
   fi
+  # Install dashboard service assets
+  mkdir -p /opt/blobe-vm/server
+  if [[ -f "$REPO_DIR/server/blobedash-ensure.sh" ]]; then
+    install -Dm755 "$REPO_DIR/server/blobedash-ensure.sh" /opt/blobe-vm/server/blobedash-ensure.sh
+  fi
+  if [[ -f "$REPO_DIR/server/blobedash.service" ]]; then
+    install -Dm644 "$REPO_DIR/server/blobedash.service" /etc/systemd/system/blobedash.service
+  fi
   local base_path="${BASE_PATH:-/vm}"
   # Helper to single-quote values safely for shell
   sh_q() { printf "'%s'" "$(printf %s "$1" | sed "s/'/'\''/g")"; }
@@ -1106,7 +1114,15 @@ main() {
   install_manager
   # Direct mode dashboard
   if [[ "${NO_TRAEFIK:-0}" -eq 1 ]]; then
-    deploy_dashboard_direct || true
+    # Ensure systemd unit is installed and enabled
+    if [[ -f /etc/systemd/system/blobedash.service ]]; then
+      systemctl daemon-reload || true
+      systemctl enable blobedash.service || true
+      systemctl start blobedash.service || true
+    else
+      # Fallback to one-shot docker run if systemd missing for any reason
+      deploy_dashboard_direct || true
+    fi
     # Re-write .env to include DASHBOARD_PORT if assigned
     install_manager
   fi
