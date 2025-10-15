@@ -129,50 +129,168 @@ ensure_network() {
   fi
 }
 
+# --- Port helpers and interactive resolution ---
+# Return 0 if port is in use
+port_in_use() {
+  local p="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn | awk '{print $4}' | grep -E "(^|:)${p}$" >/dev/null 2>&1
+  else
+    netstat -ltn 2>/dev/null | awk '{print $4}' | grep -E "(^|:)${p}$" >/dev/null 2>&1
+  fi
+}
+
+# Print processes listening on a port (best-effort)
+print_port_owners() {
+  local p="$1"
+  echo "Processes on port ${p}:"
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnp | awk -v P=":${p}$" '$4 ~ P {print $0}' | sed 's/^/  /'
+  else
+    netstat -ltnp 2>/dev/null | awk -v P=":${p} " '$4 ~ P {print $0}' | sed 's/^/  /'
+  fi
+}
+
+# Extract PIDs bound to a port (best-effort)
+port_pids() {
+  local p="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnp | awk -v P=":${p}$" '$4 ~ P {print $0}' |
+      sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | sort -u
+  else
+    netstat -ltnp 2>/dev/null | awk -v P=":${p} " '$4 ~ P {print $7}' |
+      sed -n 's|/.*||p' | sort -u
+  fi
+}
+
+# Attempt to gracefully stop known services, else kill PIDs
+free_port_by_killing() {
+  local p="$1"
+  local pids; pids=$(port_pids "$p")
+  [[ -n "$pids" ]] || return 0
+  echo "Attempting to free port ${p}..."
+  local pid
+  for pid in $pids; do
+    local comm cmd svc
+    comm=$(tr -d '\0' < "/proc/${pid}/comm" 2>/dev/null || true)
+    cmd=$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)
+    svc=""
+    case "${comm:-$cmd}" in
+      *nginx*) svc=nginx ;;
+      *apache2*|*httpd*) svc=apache2 ;;
+      *caddy*) svc=caddy ;;
+      *traefik*) svc=traefik ;;
+      *haproxy*) svc=haproxy ;;
+      *dockerd*|*docker-proxy*) svc="" ;;
+    esac
+    if command -v systemctl >/dev/null 2>&1 && [[ -n "$svc" ]]; then
+      if systemctl list-unit-files | grep -q "^${svc}\.service"; then
+        echo "Stopping service ${svc} (pid ${pid})..."
+        systemctl stop "$svc" || true
+      fi
+    fi
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "Sending SIGTERM to pid ${pid}..."
+      kill "$pid" 2>/dev/null || true
+      sleep 1
+    fi
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "Sending SIGKILL to pid ${pid}..."
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  done
+  # wait until freed (up to 10 tries)
+  local i=0
+  while (( i < 10 )); do
+    if ! port_in_use "$p"; then return 0; fi
+    sleep 0.5; i=$((i+1))
+  done
+  return 1
+}
+
+# Find first free TCP port from a starting point, up to N attempts
+find_free_port() {
+  local start="$1"; local attempts="${2:-200}"; local p="$start"; local i=0
+  while (( i < attempts )); do
+    if ! port_in_use "$p"; then echo "$p"; return 0; fi
+    p=$((p+1)); i=$((i+1))
+  done
+  return 1
+}
+
+# When a desired port is busy, ask user to kill or switch
+resolve_busy_port_interactive() {
+  local label="$1" desired="$2" fallback_start="$3"
+  echo "=== ${label} port ${desired} is currently in use ==="
+  print_port_owners "$desired"
+  echo
+  echo "Options:"
+  echo "  1) Kill the process(es) using port ${desired} and use ${desired}"
+  echo "  2) Switch to another port automatically (start from ${fallback_start})"
+  echo "  3) Enter a custom port"
+  local choice
+  while true; do
+    read -rp "Choose [1/2/3]: " choice || true
+    case "$choice" in
+      1)
+        if free_port_by_killing "$desired"; then
+          echo "$desired"
+          return 0
+        else
+          echo "Failed to free port ${desired}." >&2
+        fi
+        ;;
+      2)
+        local alt
+        alt=$(find_free_port "$fallback_start" 200 || true)
+        if [[ -n "$alt" ]]; then
+          echo "$alt"
+          return 0
+        else
+          echo "No free alternative port found starting at ${fallback_start}." >&2
+        fi
+        ;;
+      3)
+        local custom
+        read -rp "Enter port number: " custom || true
+        if [[ "$custom" =~ ^[0-9]+$ && "$custom" -ge 1 && "$custom" -le 65535 ]]; then
+          if port_in_use "$custom"; then
+            echo "Port ${custom} is also in use. Try again." >&2
+          else
+            echo "$custom"
+            return 0
+          fi
+        else
+          echo "Invalid port. Try again." >&2
+        fi
+        ;;
+      *) echo "Please enter 1, 2, or 3." ;;
+    esac
+  done
+}
+
 detect_ports() {
-  # Choose host ports for Traefik, falling back if 80/443 are in use
+  # Choose host ports for Traefik, prompting to kill or switch when 80/443 are in use
   HTTP_PORT=80
   HTTPS_PORT=443
-  # Helper to test if a port is in use
-  port_in_use() {
-    local p="$1"
-    if command -v ss >/dev/null 2>&1; then
-      ss -ltn | awk '{print $4}' | grep -E "(^|:)${p}$" >/dev/null 2>&1
-    else
-      netstat -ltn 2>/dev/null | awk '{print $4}' | grep -E "(^|:)${p}$" >/dev/null 2>&1
-    fi
-  }
-  # Find first free TCP port from a starting point, up to N attempts
-  find_free_port() {
-    local start="$1"; local attempts="${2:-50}"; local p="$start"; local i=0
-    while (( i < attempts )); do
-      if ! port_in_use "$p"; then echo "$p"; return 0; fi
-      p=$((p+1)); i=$((i+1))
-    done
-    return 1
-  }
   if port_in_use 80; then
-    local alt
-    alt=$(find_free_port 8080 200 || true)
-    if [[ -n "$alt" ]]; then
-      echo "Port 80 is in use on the host. Will bind Traefik HTTP to ${alt} instead." >&2
-      HTTP_PORT="$alt"
+    local chosen
+    chosen=$(resolve_busy_port_interactive "HTTP" 80 8080)
+    HTTP_PORT="$chosen"
+    if [[ "$HTTP_PORT" != "80" ]]; then
+      echo "Port 80 is busy; using HTTP port ${HTTP_PORT}." >&2
     else
-      echo "Port 80 is in use and no free alternative port found starting at 8080." >&2
-      echo "You will need to free a port for Traefik HTTP." >&2
-      HTTP_PORT=8080
+      echo "Using HTTP port 80." >&2
     fi
   fi
-  # For HTTPS mapping, still pick a free alternative even if TLS may not be enabled yet
   if port_in_use 443; then
-    local alt
-    alt=$(find_free_port 8443 200 || true)
-    if [[ -n "$alt" ]]; then
-      echo "Port 443 is in use on the host. Will bind Traefik HTTPS to ${alt} instead." >&2
-      HTTPS_PORT="$alt"
+    local chosen
+    chosen=$(resolve_busy_port_interactive "HTTPS" 443 8443)
+    HTTPS_PORT="$chosen"
+    if [[ "$HTTPS_PORT" != "443" ]]; then
+      echo "Port 443 is busy; using HTTPS port ${HTTPS_PORT}." >&2
     else
-      echo "Port 443 is in use and no free alternative port found starting at 8443." >&2
-      HTTPS_PORT=8443
+      echo "Using HTTPS port 443." >&2
     fi
   fi
 }

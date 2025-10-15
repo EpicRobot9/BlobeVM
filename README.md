@@ -38,7 +38,7 @@ The installer will:
 - Optionally create your first VM and print its URL
 
 Notes during install:
-- If ports 80/443 are already in use on the host, the installer will bind Traefik to 8080/8443 automatically. In that case, URLs will include the port (e.g., http://<server-ip>:8080/vm/<name>/). The CLI output reflects the correct port.
+- If ports 80/443 are already in use on the host, the installer will show which process is using the port and ask whether to kill it or switch to another port (auto-picking from 8080/8443 upward when you choose switch). In that case, URLs will include the chosen port (e.g., http://<server-ip>:8880/vm/<name>/). The CLI output reflects the correct port.
 - Re-running the installer on an existing server safely updates the image, CLI, and Traefik config without deleting existing VMs. You'll be offered to reuse your current settings and any existing Traefik instance/network.
 
 If you provide a domain and email, Traefik will request certificates via Let's Encrypt. Point DNS for `*.your-domain` and `traefik.your-domain` to your server IP before use.
