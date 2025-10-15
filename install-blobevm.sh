@@ -56,8 +56,17 @@ fi
 
 INSTALLER_PATH="${REPO_DIR}/${INSTALLER_REL}"
 if [[ ! -f "$INSTALLER_PATH" ]]; then
-  echo "Installer script $INSTALLER_REL not found in repository." >&2
-  exit 1
+  info "Installer script missing from working tree; attempting to recover from git"
+  if git -C "$REPO_DIR" cat-file -e "origin/${REPO_BRANCH}:${INSTALLER_REL}" 2>/dev/null; then
+    git -C "$REPO_DIR" show "origin/${REPO_BRANCH}:${INSTALLER_REL}" > "$INSTALLER_PATH"
+  elif git -C "$REPO_DIR" cat-file -e "HEAD:${INSTALLER_REL}" 2>/dev/null; then
+    git -C "$REPO_DIR" show "HEAD:${INSTALLER_REL}" > "$INSTALLER_PATH"
+  else
+    echo "Installer script ${INSTALLER_REL} not found in repository." >&2
+    echo "Repository contents:" >&2
+    find "$REPO_DIR" -maxdepth 2 -type f -printf '%P\n' >&2
+    exit 1
+  fi
 fi
 
 info "Launching main installer"
