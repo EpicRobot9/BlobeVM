@@ -25,6 +25,17 @@ detect_repo_root() {
   REPO_DIR="$(cd "$script_dir/.." && pwd)"
 }
 
+# Load existing settings if present (update-safe)
+load_existing_env() {
+  local env_file=/opt/blobe-vm/.env
+  [[ -f "$env_file" ]] || return 0
+  while IFS='=' read -r k v; do
+    [[ -z "$k" || "$k" =~ ^# ]] && continue
+    v="${v%\'}"; v="${v#\'}"; v="${v%\"}"; v="${v#\"}"
+    export "$k"="$v"
+  done < "$env_file"
+}
+
 prompt_config() {
   echo "--- BlobeVM Host Configuration ---"
   read -rp "Primary domain for VMs (e.g., example.com) [leave empty to use URL paths]: " BLOBEVM_DOMAIN || true
@@ -360,22 +371,24 @@ install_manager() {
   echo "Installing blobe-vm-manager CLI..."
   install -Dm755 "$REPO_DIR/server/blobe-vm-manager" /usr/local/bin/blobe-vm-manager
   mkdir -p /opt/blobe-vm/instances
-  cat > /opt/blobe-vm/.env <<EOF
-BLOBEVM_DOMAIN=${BLOBEVM_DOMAIN:-}
-BLOBEVM_EMAIL=${BLOBEVM_EMAIL:-}
- ENABLE_TLS=${TLS_ENABLED}
-ENABLE_KVM=${ENABLE_KVM}
-REPO_DIR=${REPO_DIR}
-  BASE_PATH=/vm
-  FORCE_HTTPS=${FORCE_HTTPS}
-  TRAEFIK_DASHBOARD_AUTH=${TRAEFIK_DASHBOARD_AUTH}
-HSTS_ENABLED=${HSTS_ENABLED}
-ENABLE_DASHBOARD=${ENABLE_DASHBOARD}
-HTTP_PORT=${HTTP_PORT}
-HTTPS_PORT=${HTTPS_PORT}
-TRAEFIK_NETWORK=${TRAEFIK_NETWORK}
-SKIP_TRAEFIK=${SKIP_TRAEFIK:-0}
-EOF
+  # Helper to single-quote values safely for shell
+  sh_q() { printf "'%s'" "$(printf %s "$1" | sed "s/'/'\''/g")"; }
+  {
+    echo "BLOBEVM_DOMAIN=$(sh_q "${BLOBEVM_DOMAIN:-}")";
+    echo "BLOBEVM_EMAIL=$(sh_q "${BLOBEVM_EMAIL:-}")";
+    echo "ENABLE_TLS=$(sh_q "${TLS_ENABLED}")";
+    echo "ENABLE_KVM=$(sh_q "${ENABLE_KVM}")";
+    echo "REPO_DIR=$(sh_q "${REPO_DIR}")";
+    echo "BASE_PATH=$(sh_q "/vm")";
+    echo "FORCE_HTTPS=$(sh_q "${FORCE_HTTPS}")";
+    echo "TRAEFIK_DASHBOARD_AUTH=$(sh_q "${TRAEFIK_DASHBOARD_AUTH}")";
+    echo "HSTS_ENABLED=$(sh_q "${HSTS_ENABLED}")";
+    echo "ENABLE_DASHBOARD=$(sh_q "${ENABLE_DASHBOARD}")";
+    echo "HTTP_PORT=$(sh_q "${HTTP_PORT}")";
+    echo "HTTPS_PORT=$(sh_q "${HTTPS_PORT}")";
+    echo "TRAEFIK_NETWORK=$(sh_q "${TRAEFIK_NETWORK}")";
+    echo "SKIP_TRAEFIK=$(sh_q "${SKIP_TRAEFIK:-0}")";
+  } > /opt/blobe-vm/.env
 }
 
 maybe_create_first_vm() {
@@ -408,16 +421,58 @@ print_success() {
 main() {
   require_root "$@"
   detect_repo_root
-  prompt_config
+  # Detect existing install and load settings
+  UPDATE_MODE=0
+  if [[ -d /opt/blobe-vm || -f /usr/local/bin/blobe-vm-manager ]]; then
+    UPDATE_MODE=1
+    load_existing_env || true
+  fi
+
+  if [[ "$UPDATE_MODE" -eq 1 ]]; then
+    echo "Detected existing BlobeVM installation."
+    local reuse_cfg
+    read -rp "Use existing settings and update components? [Y/n]: " reuse_cfg || true
+    if [[ -z "$reuse_cfg" || "${reuse_cfg,,}" == y* ]]; then
+      # Keep existing settings from .env; ensure defaults for missing
+      BLOBEVM_DOMAIN="${BLOBEVM_DOMAIN:-}"
+      BLOBEVM_EMAIL="${BLOBEVM_EMAIL:-}"
+      ENABLE_KVM=${ENABLE_KVM:-0}
+      FORCE_HTTPS=${FORCE_HTTPS:-0}
+      HSTS_ENABLED=${HSTS_ENABLED:-0}
+      ENABLE_DASHBOARD=${ENABLE_DASHBOARD:-1}
+      TRAEFIK_NETWORK="${TRAEFIK_NETWORK:-proxy}"
+      SKIP_TRAEFIK=${SKIP_TRAEFIK:-0}
+      HTTP_PORT=${HTTP_PORT:-80}
+      HTTPS_PORT=${HTTPS_PORT:-443}
+      TLS_ENABLED=${ENABLE_TLS:-0}
+      BASE_PATH=${BASE_PATH:-/vm}
+    else
+      prompt_config
+    fi
+  else
+    prompt_config
+  fi
   install_prereqs
-  detect_external_traefik
+  # External Traefik only if we're not already configured to skip
+  if [[ "${SKIP_TRAEFIK:-0}" -ne 1 ]]; then
+    detect_external_traefik || true
+  fi
   ensure_network
-  detect_ports
-  handle_tls_port_conflict
+  # If updating, prefer existing port settings; otherwise detect
+  if [[ -z "${HTTP_PORT:-}" || -z "${HTTPS_PORT:-}" ]]; then
+    detect_ports
+  fi
+  if [[ -z "${TLS_ENABLED:-}" ]]; then
+    handle_tls_port_conflict
+  fi
   setup_traefik
   build_image
   install_manager
-  maybe_create_first_vm
+  if [[ "$UPDATE_MODE" -eq 1 ]]; then
+    echo "Update complete. Existing VMs were not modified."
+  else
+    maybe_create_first_vm
+  fi
   print_success
 }
 

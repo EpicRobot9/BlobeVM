@@ -29,8 +29,13 @@ INST_DIR="$STATE_DIR/instances"
 ENV_FILE="$STATE_DIR/.env"
 
 if [[ -f "$ENV_FILE" ]]; then
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
+  # shellcheck disable=SC1090,SC2155
+  while IFS='=' read -r k v; do
+    [[ -z "$k" || "$k" =~ ^# ]] && continue
+    # Remove surrounding single or double quotes
+    v="${v%\'}"; v="${v#\'}"; v="${v%\"}"; v="${v#\"}"
+    export "$k"="$v"
+  done < "$ENV_FILE"
 fi
 
 usage() {
