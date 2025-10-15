@@ -55,11 +55,12 @@ else
 fi
 
 INSTALLER_PATH="${REPO_DIR}/${INSTALLER_REL}"
-if [[ ! -x "$INSTALLER_PATH" ]]; then
+if [[ ! -f "$INSTALLER_PATH" ]]; then
   echo "Installer script $INSTALLER_REL not found in repository." >&2
   exit 1
 fi
 
 info "Launching main installer"
 cd "$REPO_DIR"
-exec "$INSTALLER_PATH" "$@"
+chmod +x "$INSTALLER_PATH" 2>/dev/null || true
+exec bash "$INSTALLER_PATH" "$@"
