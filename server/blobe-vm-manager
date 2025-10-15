@@ -121,18 +121,16 @@ common_labels() {
   local host_override path_override
   host_override="$(get_meta "$name" host_override || true)"
   path_override="$(get_meta "$name" path_override || true)"
-  local redirect_labels=()
-  if [[ "${FORCE_HTTPS:-0}" -eq 1 && "${ENABLE_TLS:-0}" -eq 1 ]]; then
-    redirect_labels+=("--label=traefik.http.middlewares.${name}-https-redirect.redirectscheme.scheme=https")
-  fi
+  local labels=()
+  # Always specify the docker network Traefik should use to reach this container
+  labels+=("--label=traefik.docker.network=${TRAEFIK_NETWORK:-proxy}")
+  labels+=("--label=traefik.enable=true")
+
   if [[ -n "$host_override" ]]; then
-    local host
-    host="$host_override"
-    # Dual routing: host + path always available
+    # Host override + dual path router
+    local host "$host_override"
     local base_path="${BASE_PATH:-/vm}"; [[ "$base_path" != /* ]] && base_path="/$base_path"; base_path="${base_path%/}"
     local prefix_path
-    local path_override
-    path_override="$(get_meta "$name" path_override || true)"
     if [[ -n "$path_override" ]]; then
       prefix_path="$path_override"
     else
@@ -140,56 +138,55 @@ common_labels() {
     fi
     [[ "$prefix_path" != /* ]] && prefix_path="/$prefix_path"
     prefix_path="${prefix_path%/}"
-    echo \
-      "--label=traefik.enable=true" \
-      "--label=traefik.http.routers.${name}.rule=Host(\`$host\`)" \
-      "--label=traefik.http.routers.${name}.entrypoints=web" \
-      "--label=traefik.http.services.${name}.loadbalancer.server.port=3000" \
-      "--label=traefik.http.routers.${name}-path.rule=PathPrefix(\`$prefix_path\`)" \
-      "--label=traefik.http.routers.${name}-path.entrypoints=web" \
+
+    labels+=(
+      "--label=traefik.http.routers.${name}.rule=Host(\`$host_override\`)"
+      "--label=traefik.http.routers.${name}.entrypoints=web"
+      "--label=traefik.http.services.${name}.loadbalancer.server.port=3000"
+      "--label=traefik.http.routers.${name}-path.rule=PathPrefix(\`$prefix_path\`)"
+      "--label=traefik.http.routers.${name}-path.entrypoints=web"
       "--label=traefik.http.services.${name}-path.loadbalancer.server.port=3000"
-      ${redirect_labels[@]:-}
+    )
     if [[ "${ENABLE_TLS:-0}" -eq 1 ]]; then
-      echo \
-        "--label=traefik.http.routers.${name}-secure.rule=Host(\`$host\`)" \
-        "--label=traefik.http.routers.${name}-secure.entrypoints=websecure" \
-        "--label=traefik.http.routers.${name}-secure.tls=true" \
-        "--label=traefik.http.routers.${name}-secure.tls.certresolver=myresolver" \
+      labels+=(
+        "--label=traefik.http.routers.${name}-secure.rule=Host(\`$host_override\`)"
+        "--label=traefik.http.routers.${name}-secure.entrypoints=websecure"
+        "--label=traefik.http.routers.${name}-secure.tls=true"
+        "--label=traefik.http.routers.${name}-secure.tls.certresolver=myresolver"
         "--label=traefik.http.services.${name}.loadbalancer.server.port=3000"
-      echo \
-        "--label=traefik.http.routers.${name}-path-secure.rule=PathPrefix(\`$prefix_path\`)" \
-        "--label=traefik.http.routers.${name}-path-secure.entrypoints=websecure" \
-        "--label=traefik.http.routers.${name}-path-secure.tls=true" \
-        "--label=traefik.http.routers.${name}-path-secure.tls.certresolver=myresolver" \
+        "--label=traefik.http.routers.${name}-path-secure.rule=PathPrefix(\`$prefix_path\`)"
+        "--label=traefik.http.routers.${name}-path-secure.entrypoints=websecure"
+        "--label=traefik.http.routers.${name}-path-secure.tls=true"
+        "--label=traefik.http.routers.${name}-path-secure.tls.certresolver=myresolver"
         "--label=traefik.http.services.${name}-path-secure.loadbalancer.server.port=3000"
+      )
     fi
   elif [[ -n "${BLOBEVM_DOMAIN:-}" ]]; then
-    local host
-    host="${name}.${BLOBEVM_DOMAIN}"
+    # Domain mode: host router + path router
+    local host="${name}.${BLOBEVM_DOMAIN}"
     local base_path="${BASE_PATH:-/vm}"; [[ "$base_path" != /* ]] && base_path="/$base_path"; base_path="${base_path%/}"
     local prefix_path="${base_path}/${name}"; [[ "$prefix_path" != /* ]] && prefix_path="/$prefix_path"; prefix_path="${prefix_path%/}"
-    echo \
-      "--label=traefik.enable=true" \
-      "--label=traefik.http.routers.${name}.rule=Host(\`$host\`)" \
-      "--label=traefik.http.routers.${name}.entrypoints=web" \
-      "--label=traefik.http.services.${name}.loadbalancer.server.port=3000" \
-      "--label=traefik.http.routers.${name}-path.rule=PathPrefix(\`$prefix_path\`)" \
-      "--label=traefik.http.routers.${name}-path.entrypoints=web" \
+    labels+=(
+      "--label=traefik.http.routers.${name}.rule=Host(\`$host\`)"
+      "--label=traefik.http.routers.${name}.entrypoints=web"
+      "--label=traefik.http.services.${name}.loadbalancer.server.port=3000"
+      "--label=traefik.http.routers.${name}-path.rule=PathPrefix(\`$prefix_path\`)"
+      "--label=traefik.http.routers.${name}-path.entrypoints=web"
       "--label=traefik.http.services.${name}-path.loadbalancer.server.port=3000"
-      ${redirect_labels[@]:-}
+    )
     if [[ "${ENABLE_TLS:-0}" -eq 1 ]]; then
-      echo \
-        "--label=traefik.http.routers.${name}-secure.rule=Host(\`$host\`)" \
-        "--label=traefik.http.routers.${name}-secure.entrypoints=websecure" \
-        "--label=traefik.http.routers.${name}-secure.tls=true" \
-        "--label=traefik.http.routers.${name}-secure.tls.certresolver=myresolver" \
+      labels+=(
+        "--label=traefik.http.routers.${name}-secure.rule=Host(\`$host\`)"
+        "--label=traefik.http.routers.${name}-secure.entrypoints=websecure"
+        "--label=traefik.http.routers.${name}-secure.tls=true"
+        "--label=traefik.http.routers.${name}-secure.tls.certresolver=myresolver"
         "--label=traefik.http.services.${name}.loadbalancer.server.port=3000"
-      echo \
-        "--label=traefik.http.routers.${name}-path-secure.rule=PathPrefix(\`$prefix_path\`)" \
-        "--label=traefik.http.routers.${name}-path-secure.entrypoints=websecure" \
-        "--label=traefik.http.routers.${name}-path-secure.tls=true" \
-        "--label=traefik.http.routers.${name}-path-secure.tls.certresolver=myresolver" \
+        "--label=traefik.http.routers.${name}-path-secure.rule=PathPrefix(\`$prefix_path\`)"
+        "--label=traefik.http.routers.${name}-path-secure.entrypoints=websecure"
+        "--label=traefik.http.routers.${name}-path-secure.tls=true"
+        "--label=traefik.http.routers.${name}-path-secure.tls.certresolver=myresolver"
         "--label=traefik.http.services.${name}-path-secure.loadbalancer.server.port=3000"
+      )
     fi
   else
     # Path-based routing when no domain present
@@ -200,16 +197,17 @@ common_labels() {
       local base_path="${BASE_PATH:-/vm}"; [[ "$base_path" != /* ]] && base_path="/$base_path"; base_path="${base_path%/}"
       prefix="${base_path}/${name}"
     fi
-    # Ensure leading slash, no trailing slash for rule
     [[ "$prefix" != /* ]] && prefix="/$prefix"
     prefix="${prefix%/}"
-    echo \
-      "--label=traefik.enable=true" \
-      "--label=traefik.http.routers.${name}.rule=PathPrefix(\`$prefix\`)" \
-      "--label=traefik.http.routers.${name}.entrypoints=web" \
-      "--label=traefik.http.services.${name}.loadbalancer.server.port=3000" \
-      ${redirect_labels[@]:-}
+    labels+=(
+      "--label=traefik.http.routers.${name}.rule=PathPrefix(\`$prefix\`)"
+      "--label=traefik.http.routers.${name}.entrypoints=web"
+      "--label=traefik.http.services.${name}.loadbalancer.server.port=3000"
+    )
   fi
+
+  # Emit all labels as separate tokens for docker run
+  printf '%s ' "${labels[@]}"
 }
 
 run_container() {
