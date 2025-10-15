@@ -142,13 +142,36 @@ detect_ports() {
       netstat -ltn 2>/dev/null | awk '{print $4}' | grep -E "(^|:)${p}$" >/dev/null 2>&1
     fi
   }
+  # Find first free TCP port from a starting point, up to N attempts
+  find_free_port() {
+    local start="$1"; local attempts="${2:-50}"; local p="$start"; local i=0
+    while (( i < attempts )); do
+      if ! port_in_use "$p"; then echo "$p"; return 0; fi
+      p=$((p+1)); i=$((i+1))
+    done
+    return 1
+  }
   if port_in_use 80; then
-    echo "Port 80 is in use on the host. Will bind Traefik HTTP to 8080 instead." >&2
-    HTTP_PORT=8080
+    local alt
+    alt=$(find_free_port 8080 200 || true)
+    if [[ -n "$alt" ]]; then
+      echo "Port 80 is in use on the host. Will bind Traefik HTTP to ${alt} instead." >&2
+      HTTP_PORT="$alt"
+    else
+      echo "Port 80 is in use and no free alternative port found starting at 8080." >&2
+      echo "You will need to free a port for Traefik HTTP." >&2
+      HTTP_PORT=8080
+    fi
   fi
-  if [[ -n "${BLOBEVM_EMAIL:-}" ]]; then
-    if port_in_use 443; then
-      echo "Port 443 is in use on the host. Will bind Traefik HTTPS to 8443 instead." >&2
+  # For HTTPS mapping, still pick a free alternative even if TLS may not be enabled yet
+  if port_in_use 443; then
+    local alt
+    alt=$(find_free_port 8443 200 || true)
+    if [[ -n "$alt" ]]; then
+      echo "Port 443 is in use on the host. Will bind Traefik HTTPS to ${alt} instead." >&2
+      HTTPS_PORT="$alt"
+    else
+      echo "Port 443 is in use and no free alternative port found starting at 8443." >&2
       HTTPS_PORT=8443
     fi
   fi

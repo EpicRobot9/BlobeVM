@@ -251,7 +251,7 @@ run_container() {
     -e TITLE="BlobeVM - ${name}" \
     --shm-size="2gb" \
     -v "$save_dir":/config \
-    --network proxy \
+  --network "${TRAEFIK_NETWORK:-proxy}" \
     ${kvm_args[@]} \
     $(common_labels "$name") \
     "${BLOBEVM_IMAGE:-blobevm:latest}" \
