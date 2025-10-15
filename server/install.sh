@@ -63,6 +63,8 @@ prompt_config() {
   else
     ENABLE_DASHBOARD=1
   fi
+  # Default Traefik network name (can be overridden later if we detect external Traefik)
+  TRAEFIK_NETWORK="${TRAEFIK_NETWORK:-proxy}"
 
   echo
   echo "Summary:"
@@ -107,8 +109,12 @@ $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
 
 ensure_network() {
   # Create a shared docker network for Traefik routing
-  if ! docker network inspect proxy >/dev/null 2>&1; then
-    docker network create proxy
+  if [[ "${SKIP_TRAEFIK:-0}" -eq 1 ]]; then
+    # We are reusing an external Traefik; assume its network exists
+    return 0
+  fi
+  if ! docker network inspect "${TRAEFIK_NETWORK}" >/dev/null 2>&1; then
+    docker network create "${TRAEFIK_NETWORK}"
   fi
 }
 
@@ -181,7 +187,40 @@ handle_tls_port_conflict() {
   fi
 }
 
+detect_external_traefik() {
+  # Look for a running Traefik container and offer to reuse it
+  local tid
+  tid=$(docker ps --filter=ancestor=traefik --format '{{.ID}}' | head -n1 || true)
+  if [[ -z "$tid" ]]; then
+    # Try by name contains 'traefik'
+    tid=$(docker ps --format '{{.ID}} {{.Image}} {{.Names}}' | awk '/traefik/{print $1; exit}')
+  fi
+  [[ -z "$tid" ]] && return 0
+
+  echo
+  echo "Detected an existing Traefik container on this host."
+  local reuse
+  read -rp "Reuse the existing Traefik instead of deploying a new one? [Y/n]: " reuse || true
+  if [[ -z "$reuse" || "${reuse,,}" == y* ]]; then
+    # Pick its first attached user-defined network
+    local net
+    net=$(docker inspect "$tid" -f '{{ range $k, $v := .NetworkSettings.Networks }}{{$k}} {{ end }}' | awk '{for(i=1;i<=NF;i++) if($i!~/(bridge|host|none)/){print $i; exit}}')
+    if [[ -z "$net" ]]; then
+      echo "Could not determine a suitable user-defined network from the existing Traefik."
+      echo "Falling back to deploying our own Traefik."
+      return 0
+    fi
+    TRAEFIK_NETWORK="$net"
+    SKIP_TRAEFIK=1
+    echo "Reusing Traefik on network '$TRAEFIK_NETWORK'."
+  fi
+}
+
 setup_traefik() {
+  if [[ "${SKIP_TRAEFIK:-0}" -eq 1 ]]; then
+    echo "Skipping Traefik deployment (reusing existing)."
+    return 0
+  fi
   mkdir -p /opt/blobe-vm/traefik/letsencrypt
   chmod 700 /opt/blobe-vm/traefik/letsencrypt
 
@@ -222,7 +261,7 @@ YAML
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./letsencrypt:/letsencrypt
     networks:
-      - proxy
+      - ${TRAEFIK_NETWORK}
     labels:
       - traefik.enable=true
       # Router rules for the dashboard are only active when a domain is set
@@ -246,6 +285,8 @@ networks:
   proxy:
     external: true
 YAML
+    # Replace default network name 'proxy' with selected network name
+    sed -i "s/^networks:\n  proxy:/networks:\n  ${TRAEFIK_NETWORK}:/" "$compose_file"
   else
     cat > "$compose_file" <<YAML
 services:
@@ -266,9 +307,9 @@ YAML
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
-      - proxy
+      - ${TRAEFIK_NETWORK}
 networks:
-  proxy:
+  ${TRAEFIK_NETWORK}:
     external: true
 YAML
   fi
@@ -292,7 +333,7 @@ YAML
       - BLOBEDASH_USER=${BLOBEDASH_USER:-}
       - BLOBEDASH_PASS=${BLOBEDASH_PASS:-}
     networks:
-      - proxy
+      - ${TRAEFIK_NETWORK}
     labels:
       - traefik.enable=true
       - traefik.http.routers.blobe-dashboard.rule=PathPrefix(`/dashboard`)
@@ -332,6 +373,8 @@ HSTS_ENABLED=${HSTS_ENABLED}
 ENABLE_DASHBOARD=${ENABLE_DASHBOARD}
 HTTP_PORT=${HTTP_PORT}
 HTTPS_PORT=${HTTPS_PORT}
+TRAEFIK_NETWORK=${TRAEFIK_NETWORK}
+SKIP_TRAEFIK=${SKIP_TRAEFIK:-0}
 EOF
 }
 
@@ -367,6 +410,7 @@ main() {
   detect_repo_root
   prompt_config
   install_prereqs
+  detect_external_traefik
   ensure_network
   detect_ports
   handle_tls_port_conflict
