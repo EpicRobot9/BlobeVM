@@ -156,7 +156,6 @@ YAML
     if [[ -n "$TRAEFIK_DASHBOARD_AUTH" ]]; then
       # Add auth middleware labels
       cat >> "$compose_file" <<YAML
-    labels:
       - traefik.http.middlewares.traefik-auth.basicauth.users=${TRAEFIK_DASHBOARD_AUTH}
       - traefik.http.routers.traefik.middlewares=traefik-auth
 YAML
@@ -217,7 +216,6 @@ YAML
 DASH
     if [[ -n "$BLOBEVM_DOMAIN" ]]; then
       cat >> /opt/blobe-vm/traefik/docker-compose.yml <<DASH
-    labels:
       - traefik.http.routers.blobe-dashboard-host.rule=Host(\`dashboard.${BLOBEVM_DOMAIN}\`)
       - traefik.http.routers.blobe-dashboard-host.entrypoints=web
       - traefik.http.services.blobe-dashboard-host.loadbalancer.server.port=5000
