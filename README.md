@@ -24,6 +24,12 @@ Run this on your server to clone the repo and start the guided installer:
 curl -fsSL https://raw.githubusercontent.com/EpicRobot9/BlobeVM/main/install-blobevm.sh | sudo bash
 ```
 
+Need to avoid Traefik and any currently allocated ports? Use direct mode (no proxy):
+```
+curl -fsSL https://raw.githubusercontent.com/EpicRobot9/BlobeVM/main/install-blobevm.sh | sudo BLOBEVM_NO_TRAEFIK=1 BLOBEVM_ENABLE_DASHBOARD=1 BLOBEVM_DIRECT_PORT_START=20000 bash
+```
+In direct mode, each VM is exposed on a unique high port automatically (starting at BLOBEVM_DIRECT_PORT_START, default 20000). The CLI prints the exact URL (for example, http://<server-ip>:20017/). The dashboard, if enabled, is served directly on another free high port.
+
 Or run the installer from a local clone:
 ### Alternative: Run the server installer from this repo
 From the server where this repo is present:
@@ -31,14 +37,15 @@ From the server where this repo is present:
 sudo bash server/install.sh
 ```
 The installer will:
-- Install Docker and Traefik, create a `proxy` network
+- Install Docker and Traefik, create a `proxy` network (unless BLOBEVM_NO_TRAEFIK=1)
 - Build the BlobeVM image
 - Install the `blobe-vm-manager` CLI
-- Deploy the web dashboard automatically (set `DISABLE_DASHBOARD=1` before running to skip)
+- Deploy the web dashboard automatically (set `DISABLE_DASHBOARD=1` before running to skip). In direct mode the dashboard is published on a free high port.
 - Optionally create your first VM and print its URL
 
 Notes during install:
 - If ports 80/443 are already in use on the host, the installer will show which process is using the port and ask whether to kill it or switch to another port (auto-picking from 8080/8443 upward when you choose switch). In that case, URLs will include the chosen port (e.g., http://<server-ip>:8880/vm/<name>/). The CLI output reflects the correct port.
+- If you set BLOBEVM_NO_TRAEFIK=1, Traefik is skipped entirely and no privileged ports are used; each VM gets a unique high port to avoid conflicts.
 - Re-running the installer on an existing server safely updates the image, CLI, and Traefik config without deleting existing VMs. You'll be offered to reuse your current settings and any existing Traefik instance/network.
 
 If you provide a domain and email, Traefik will request certificates via Let's Encrypt. Point DNS for `*.your-domain` and `traefik.your-domain` to your server IP before use.
@@ -47,6 +54,11 @@ If you provide a domain and email, Traefik will request certificates via Let's E
 ```
 # List VMs
 blobe-vm-manager list
+
+# Direct mode helpers
+blobe-vm-manager list-ports          # Show VM -> port mapping
+blobe-vm-manager port alpha          # Show the port for a specific VM
+blobe-vm-manager set-port alpha 20123# Set a fixed port and recreate the container
 
 # Create a VM named "alpha"
 blobe-vm-manager create alpha
@@ -194,13 +206,15 @@ blobe-vm-manager clear-limits <vm>       # Remove limits
 ```
 
 ### HTTPS, redirects, and dashboard auth
-- Re-run `server/install.sh` (or the one-line installer) with HTTPS inputs to enable TLS/Let's Encrypt. Set `BLOBEVM_FORCE_HTTPS=1` to force HTTP→HTTPS redirects once TLS is active.
+- Re-run `server/install.sh` (or the one-line installer) with HTTPS inputs to enable TLS/Let's Encrypt. Set `BLOBEVM_FORCE_HTTPS=1` to force HTTP→HTTPS redirects once TLS is active. (Not applicable in direct mode.)
 - Protect the dashboard by exporting `BLOBEDASH_USER` and `BLOBEDASH_PASS` (or answering the prompt) before running the installer. Credentials are stored in Traefik labels.
 
 ### Dashboard management
 - Skip deployment on install: `DISABLE_DASHBOARD=1 sudo bash server/install.sh`
 - Redeploy after removal: `docker compose up -d dashboard` inside `/opt/blobe-vm/traefik`
 - Remove after install: `cd /opt/blobe-vm/traefik && docker compose rm -sf dashboard`
+
+Direct mode (no Traefik): If enabled, the dashboard runs as a standalone container on a free high port. The installer prints the URL. You can stop/start it via `docker stop blobedash` / `docker start blobedash`.
 
 ### Full uninstall
 ```

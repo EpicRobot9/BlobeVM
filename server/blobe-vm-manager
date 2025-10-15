@@ -20,8 +20,8 @@ set -euo pipefail
 #   clear-base-path               # revert global base path to /vm
 #   set-limits <name> <cpu> <mem>  # set CPU (e.g. 0.5 or 2) and memory (e.g. 1g, 512m)
 #   clear-limits <name>            # remove resource limits
-# - Creates per-instance containers on network "proxy"
-# - Routes via Traefik using either subdomain (if BLOBEVM_DOMAIN set) or path prefix
+# - In Traefik mode: creates per-instance containers on network "proxy" and routes via Traefik
+# - In Direct mode (NO_TRAEFIK=1): publishes a unique high port per VM without any reverse proxy
 # - Prints the VM URL on create/start
 
 STATE_DIR=/opt/blobe-vm
@@ -38,12 +38,36 @@ if [[ -f "$ENV_FILE" ]]; then
   done < "$ENV_FILE"
 fi
 
+# Defaults for direct mode
+NO_TRAEFIK=${NO_TRAEFIK:-0}
+DIRECT_PORT_START=${DIRECT_PORT_START:-20000}
+
+# --- Port helpers (for direct mode) ---
+port_in_use() {
+  local p="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn | awk '{print $4}' | grep -E "(^|:)${p}$" >/dev/null 2>&1
+  else
+    netstat -ltn 2>/dev/null | awk '{print $4}' | grep -E "(^|:)${p}$" >/dev/null 2>&1
+  fi
+}
+
+find_free_port() {
+  local start="$1"; local attempts="${2:-500}"; local p="$start"; local i=0
+  while (( i < attempts )); do
+    if ! port_in_use "$p"; then echo "$p"; return 0; fi
+    p=$((p+1)); i=$((i+1))
+  done
+  return 1
+}
+
 usage() {
   cat >&2 <<USAGE
 Usage: blobe-vm-manager <command> [args]
 
 Commands:
   list
+  list-ports                 # direct mode: show VM -> port
   create <name>
   start <name>
   stop <name>
@@ -53,6 +77,8 @@ Commands:
   clear-host <name>
   set-path <name> </prefix>
   clear-path <name>
+  port <name>                # direct mode: print assigned port
+  set-port <name> <port>     # direct mode: set fixed port and recreate
 USAGE
   exit 1
 }
@@ -81,6 +107,22 @@ vm_url() {
   base_path="${base_path%/}"
   local http_port="${HTTP_PORT:-80}"
   local https_port="${HTTPS_PORT:-443}"
+  # Direct mode: show port-based URL
+  if [[ "${NO_TRAEFIK}" -eq 1 ]]; then
+    local host_port
+    host_port="$(get_meta "$name" host_port || true)"
+    if [[ -z "$host_port" ]]; then
+      echo "<port-pending>"; return
+    fi
+    local host
+    if [[ -n "$host_override" ]]; then
+      host="$host_override"
+    else
+      host="$(hostname -I | awk '{print $1}')"
+    fi
+    echo "http://${host}:${host_port}/"
+    return
+  fi
   # If a host override exists, prefer host-based URL even in no-domain mode
   if [[ -n "$host_override" ]]; then
     local scheme="http"
@@ -118,11 +160,14 @@ vm_url() {
 
 common_labels() {
   local name="$1"
+  # In direct mode, no proxy labels are needed
+  if [[ "${NO_TRAEFIK}" -eq 1 ]]; then
+    return 0
+  fi
   local host_override path_override
   host_override="$(get_meta "$name" host_override || true)"
   path_override="$(get_meta "$name" path_override || true)"
   local labels=()
-  # Always specify the docker network Traefik should use to reach this container
   labels+=("--label=traefik.docker.network=${TRAEFIK_NETWORK:-proxy}")
   labels+=("--label=traefik.enable=true")
 
@@ -239,18 +284,39 @@ run_container() {
   fi
 
   local subfolder="/"
-  if [[ -z "${BLOBEVM_DOMAIN:-}" || -n "$(get_meta "$name" path_override || true)" || -n "$(get_meta "$name" host_override || true)" ]]; then
-    local pfx
-    pfx="$(get_meta "$name" path_override || true)"
-    local base_path="${BASE_PATH:-/vm}"; [[ "$base_path" != /* ]] && base_path="/$base_path"; base_path="${base_path%/}"
-    if [[ -n "$pfx" ]]; then
-      [[ "$pfx" != /* ]] && pfx="/$pfx"
-      [[ "$pfx" != */ ]] && pfx="$pfx/"
-      subfolder="$pfx"
-    else
-      subfolder="${base_path}/${name}/"
+  if [[ "${NO_TRAEFIK}" -ne 1 ]]; then
+    if [[ -z "${BLOBEVM_DOMAIN:-}" || -n "$(get_meta "$name" path_override || true)" || -n "$(get_meta "$name" host_override || true)" ]]; then
+      local pfx
+      pfx="$(get_meta "$name" path_override || true)"
+      local base_path="${BASE_PATH:-/vm}"; [[ "$base_path" != /* ]] && base_path="/$base_path"; base_path="${base_path%/}"
+      if [[ -n "$pfx" ]]; then
+        [[ "$pfx" != /* ]] && pfx="/$pfx"
+        [[ "$pfx" != */ ]] && pfx="$pfx/"
+        subfolder="$pfx"
+      else
+        subfolder="${base_path}/${name}/"
+      fi
+      [[ "$subfolder" != /* ]] && subfolder="/$subfolder"
     fi
-    [[ "$subfolder" != /* ]] && subfolder="/$subfolder"
+  fi
+
+  local publish_args=()
+  local net_args=()
+  if [[ "${NO_TRAEFIK}" -eq 1 ]]; then
+    # Determine and persist a host port for this VM
+    local host_port
+    host_port="$(get_meta "$name" host_port || true)"
+    if [[ -z "$host_port" || $(port_in_use "$host_port"; echo $?) -eq 0 ]]; then
+      host_port="$(find_free_port "${DIRECT_PORT_START}" 1000 || true)"
+      if [[ -z "$host_port" ]]; then
+        echo "Unable to find a free port to expose VM '$name'." >&2
+        exit 1
+      fi
+      set_meta "$name" host_port "$host_port"
+    fi
+    publish_args=( -p "${host_port}:3000" )
+  else
+    net_args=( --network "${TRAEFIK_NETWORK:-proxy}" )
   fi
 
   docker run -d \
@@ -263,7 +329,8 @@ run_container() {
     -e TITLE="BlobeVM - ${name}" \
     --shm-size="2gb" \
     -v "$save_dir":/config \
-  --network "${TRAEFIK_NETWORK:-proxy}" \
+    ${publish_args[@]:-} \
+    ${net_args[@]:-} \
     ${kvm_args[@]} \
     $(common_labels "$name") \
     "${BLOBEVM_IMAGE:-blobevm:latest}" \
@@ -313,6 +380,11 @@ cmd_list() {
       local st
       st=$(docker ps --format '{{.Names}} {{.Status}}' | awk -v n="$cname" '$1==n{print $0}')
       [[ -z "$st" ]] && st="${cname} (stopped)"
+      if [[ "${NO_TRAEFIK}" -eq 1 ]]; then
+        local hp
+        hp="$(get_meta "$name" host_port || true)"
+        [[ -n "$hp" ]] && st="${st} (port ${hp})"
+      fi
       echo "- $name -> ${st} -> $(vm_url "$name")"
     fi
   done
@@ -415,6 +487,16 @@ recreate_container() {
   if docker ps -a --format '{{.Names}}' | grep -qx "$cname"; then
     docker rm -f "$cname" >/dev/null || true
   fi
+  # In direct mode, if stored host_port is now busy, pick a new one
+  if [[ "${NO_TRAEFIK}" -eq 1 ]]; then
+    local hp
+    hp="$(get_meta "$name" host_port || true)"
+    if [[ -n "$hp" && $(port_in_use "$hp"; echo $?) -eq 0 ]]; then
+      local np
+      np="$(find_free_port "${DIRECT_PORT_START}" 1000 || true)"
+      [[ -n "$np" ]] && set_meta "$name" host_port "$np"
+    fi
+  fi
   run_container "$name"
 }
 
@@ -487,6 +569,49 @@ cmd_clear_path() {
   echo "Cleared path override for '$name' -> $(vm_url "$name")"
 }
 
+cmd_list_ports() {
+  [[ "${NO_TRAEFIK}" -eq 1 ]] || { echo "list-ports is only available in direct mode (NO_TRAEFIK=1)." >&2; exit 1; }
+  ensure_instance_dir
+  echo "Ports:"
+  shopt -s nullglob
+  for d in "$INST_DIR"/*; do
+    [[ -d "$d" ]] || continue
+    local name hp
+    name="$(basename "$d")"
+    hp="$(get_meta "$name" host_port || true)"
+    echo "- ${name}: ${hp:-<unassigned>}"
+  done
+}
+
+cmd_port() {
+  local name="${1:-}"; [[ -z "$name" ]] && usage
+  [[ "${NO_TRAEFIK}" -eq 1 ]] || { echo "port is only available in direct mode (NO_TRAEFIK=1)." >&2; exit 1; }
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  local hp
+  hp="$(get_meta "$name" host_port || true)"
+  if [[ -z "$hp" ]]; then
+    echo "<unassigned>"; exit 0
+  fi
+  echo "$hp"
+}
+
+cmd_set_port() {
+  local name="${1:-}" port="${2:-}"
+  [[ -z "$name" || -z "$port" ]] && usage
+  [[ "${NO_TRAEFIK}" -eq 1 ]] || { echo "set-port is only available in direct mode (NO_TRAEFIK=1)." >&2; exit 1; }
+  [[ "$port" =~ ^[0-9]+$ && "$port" -ge 1 && "$port" -le 65535 ]] || { echo "Invalid port: $port" >&2; exit 1; }
+  if port_in_use "$port"; then
+    echo "Port $port is already in use." >&2; exit 1
+  fi
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  set_meta "$name" host_port "$port"
+  recreate_container "$name"
+  echo "Port set for '$name' -> $port"
+  echo "URL: $(vm_url "$name")"
+}
+
 cmd_set_host_interactive() {
   local name="${1:-}"; [[ -z "$name" ]] && usage
   ensure_instance_dir
@@ -539,6 +664,7 @@ main() {
   local cmd="${1:-}"; shift || true
   case "$cmd" in
     list)   cmd_list "$@" ;;
+    list-ports) cmd_list_ports "$@" ;;
     create) cmd_create "$@" ;;
     start)  cmd_start "$@" ;;
     stop)   cmd_stop "$@" ;;
@@ -548,6 +674,8 @@ main() {
     clear-host) cmd_clear_host "$@" ;;
     set-path) cmd_set_path "$@" ;;
     clear-path) cmd_clear_path "$@" ;;
+    port)   cmd_port "$@" ;;
+    set-port) cmd_set_port "$@" ;;
     nuke)   cmd_nuke "$@" ;;
     set-host-interactive) cmd_set_host_interactive "$@" ;;
     set-base-path) cmd_set_base_path "$@" ;;
