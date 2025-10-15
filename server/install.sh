@@ -700,15 +700,18 @@ main() {
   fi
   ensure_network
   check_domain_dns || true
-  # If updating, prefer existing port settings; otherwise detect
-  if [[ -z "${HTTP_PORT:-}" || -z "${HTTPS_PORT:-}" ]]; then
-    detect_ports
+  # If reusing an external Traefik, skip our port detection and TLS prompts entirely
+  if [[ "${SKIP_TRAEFIK:-0}" -ne 1 ]]; then
+    # If updating, prefer existing port settings; otherwise detect
+    if [[ -z "${HTTP_PORT:-}" || -z "${HTTPS_PORT:-}" ]]; then
+      detect_ports
+    fi
+    if [[ -z "${TLS_ENABLED:-}" ]]; then
+      handle_tls_port_conflict
+    fi
+    # If TLS is enabled, optionally wait for DNS to point before launching Traefik
+    wait_for_dns_propagation || true
   fi
-  if [[ -z "${TLS_ENABLED:-}" ]]; then
-    handle_tls_port_conflict
-  fi
-  # If TLS is enabled, optionally wait for DNS to point before launching Traefik
-  wait_for_dns_propagation || true
   setup_traefik
   build_image
   install_manager
