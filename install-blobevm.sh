@@ -34,7 +34,22 @@ fi
 
 if ! command -v traefik >/dev/null 2>&1; then
   step "Installing Traefik..."
-  curl -sL https://github.com/traefik/traefik/releases/latest/download/traefik_linux_amd64.tar.gz | tar xz -C /usr/local/bin traefik
+  tmpdir=$(mktemp -d)
+  arch="amd64"
+  release_json=$(curl -fsSL https://api.github.com/repos/traefik/traefik/releases/latest || true)
+  asset_url=$(echo "$release_json" | jq -r ".assets[] | select(.name | test(\"linux_${arch}\\.tar\\.gz$\")) | .browser_download_url" | head -n1)
+  if [[ -z "$asset_url" ]]; then
+    echo "Could not determine Traefik download URL. Skipping host binary install." >&2
+  else
+    curl -fsSL "$asset_url" -o "$tmpdir/traefik.tar.gz"
+    tar -xzf "$tmpdir/traefik.tar.gz" -C "$tmpdir"
+    if [[ -f "$tmpdir/traefik" ]]; then
+      install -m 0755 "$tmpdir/traefik" /usr/local/bin/traefik
+    else
+      echo "Traefik binary not found in archive. Skipping host binary install." >&2
+    fi
+  fi
+  rm -rf "$tmpdir"
 fi
 
 if ! command -v noip2 >/dev/null 2>&1; then
