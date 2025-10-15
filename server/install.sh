@@ -227,6 +227,104 @@ detect_external_traefik() {
   fi
 }
 
+# Check DNS for provided domain and print exact A records needed
+check_domain_dns() {
+  [[ -n "${BLOBEVM_DOMAIN:-}" ]] || return 0
+  echo
+  echo "Validating DNS for domain: ${BLOBEVM_DOMAIN}"
+  local pub4 dns4 base_ok=0 traefik_ok=0
+  pub4=$(curl -4 -fsS ifconfig.me || curl -4 -fsS icanhazip.com || true)
+  if [[ -z "$pub4" ]]; then
+    echo "Could not determine this server's public IPv4 address. Skipping DNS validation." >&2
+    return 0
+  fi
+  # Resolve A records using getent; fallback to host if available
+  dns4=$(getent ahostsv4 "$BLOBEVM_DOMAIN" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ')
+  if [[ -z "$dns4" && $(command -v host) ]]; then
+    dns4=$(host -4 "$BLOBEVM_DOMAIN" 2>/dev/null | awk '/has address/{print $4}' | sort -u | tr '\n' ' ')
+  fi
+  if [[ "$dns4" == *"$pub4"* ]]; then base_ok=1; fi
+  # Check traefik subdomain specifically
+  local traefik_host="traefik.${BLOBEVM_DOMAIN}"
+  local dns4_t
+  dns4_t=$(getent ahostsv4 "$traefik_host" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ')
+  if [[ -z "$dns4_t" && $(command -v host) ]]; then
+    dns4_t=$(host -4 "$traefik_host" 2>/dev/null | awk '/has address/{print $4}' | sort -u | tr '\n' ' ')
+  fi
+  if [[ "$dns4_t" == *"$pub4"* ]]; then traefik_ok=1; fi
+
+  if [[ $base_ok -eq 1 && $traefik_ok -eq 1 ]]; then
+    echo "DNS looks good: ${BLOBEVM_DOMAIN} and traefik.${BLOBEVM_DOMAIN} resolve to ${pub4}."
+    return 0
+  fi
+
+  echo "DNS for ${BLOBEVM_DOMAIN} is not pointing to this server yet."
+  [[ -n "$dns4" ]] && echo "  Current A for ${BLOBEVM_DOMAIN}: ${dns4}"
+  [[ -n "$dns4_t" ]] && echo "  Current A for traefik.${BLOBEVM_DOMAIN}: ${dns4_t}"
+  echo
+  echo "Add the following DNS A records at your DNS provider:"
+  echo "  A  *.${BLOBEVM_DOMAIN}     -> ${pub4}"
+  echo "  A  traefik.${BLOBEVM_DOMAIN} -> ${pub4}"
+  echo
+  echo "After updating DNS, allow time for propagation. HTTPS (Let's Encrypt) will only work after ${BLOBEVM_DOMAIN} resolves to ${pub4} and port 80 is reachable."
+  return 1
+}
+
+# Return 0 when both apex and traefik.<domain> resolve to our public IP
+domain_ready() {
+  [[ -n "${BLOBEVM_DOMAIN:-}" ]] || return 1
+  local pub4 base_ok=0 traefik_ok=0
+  pub4=$(curl -4 -fsS ifconfig.me || curl -4 -fsS icanhazip.com || true)
+  [[ -z "$pub4" ]] && return 1
+  local dns4
+  dns4=$(getent ahostsv4 "$BLOBEVM_DOMAIN" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ')
+  if [[ -z "$dns4" && $(command -v host) ]]; then
+    dns4=$(host -4 "$BLOBEVM_DOMAIN" 2>/dev/null | awk '/has address/{print $4}' | sort -u | tr '\n' ' ')
+  fi
+  [[ "$dns4" == *"$pub4"* ]] && base_ok=1
+  local traefik_host="traefik.${BLOBEVM_DOMAIN}" dns4_t
+  dns4_t=$(getent ahostsv4 "$traefik_host" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ')
+  if [[ -z "$dns4_t" && $(command -v host) ]]; then
+    dns4_t=$(host -4 "$traefik_host" 2>/dev/null | awk '/has address/{print $4}' | sort -u | tr '\n' ' ')
+  fi
+  [[ "$dns4_t" == *"$pub4"* ]] && traefik_ok=1
+  [[ $base_ok -eq 1 && $traefik_ok -eq 1 ]]
+}
+
+# Optional: wait for DNS to become ready before enabling TLS
+wait_for_dns_propagation() {
+  # Only relevant when TLS is enabled and HTTP_PORT is 80 (ACME requires 80)
+  [[ "${TLS_ENABLED:-0}" -eq 1 ]] || return 0
+  [[ "${HTTP_PORT:-80}" == "80" ]] || return 0
+  domain_ready && return 0
+  echo
+  echo "DNS for ${BLOBEVM_DOMAIN} does not point to this server yet."
+  local ans
+  read -rp "Wait for DNS to propagate before continuing? [y/N]: " ans || true
+  [[ "${ans,,}" == y* ]] || return 0
+
+  local attempts=40 delay=15 count=0
+  echo "Waiting up to $((attempts*delay/60)) minutes. Checking every ${delay}s..."
+  while (( count < attempts )); do
+    if domain_ready; then
+      echo "DNS is now pointing correctly."
+      return 0
+    fi
+    count=$((count+1))
+    sleep "$delay"
+    # Every 4 attempts (~1 min), ask if we should keep waiting
+    if (( count % 4 == 0 && count < attempts )); then
+      local cont
+      read -t 10 -rp "Still waiting on DNS... keep waiting? [Y/n]: " cont || cont=""
+      if [[ -n "$cont" && "${cont,,}" == n* ]]; then
+        echo "Skipping further DNS wait."
+        return 0
+      fi
+    fi
+  done
+  echo "Timed out waiting for DNS. You can continue; HTTPS will start working once DNS is correct."
+}
+
 setup_traefik() {
   if [[ "${SKIP_TRAEFIK:-0}" -eq 1 ]]; then
     echo "Skipping Traefik deployment (reusing existing)."
@@ -458,6 +556,7 @@ main() {
     detect_external_traefik || true
   fi
   ensure_network
+  check_domain_dns || true
   # If updating, prefer existing port settings; otherwise detect
   if [[ -z "${HTTP_PORT:-}" || -z "${HTTPS_PORT:-}" ]]; then
     detect_ports
@@ -465,6 +564,8 @@ main() {
   if [[ -z "${TLS_ENABLED:-}" ]]; then
     handle_tls_port_conflict
   fi
+  # If TLS is enabled, optionally wait for DNS to point before launching Traefik
+  wait_for_dns_propagation || true
   setup_traefik
   build_image
   install_manager
