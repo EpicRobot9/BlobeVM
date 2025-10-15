@@ -37,6 +37,9 @@ The installer will:
 - Deploy the web dashboard automatically (set `DISABLE_DASHBOARD=1` before running to skip)
 - Optionally create your first VM and print its URL
 
+Notes during install:
+- If ports 80/443 are already in use on the host, the installer will bind Traefik to 8080/8443 automatically. In that case, URLs will include the port (e.g., http://<server-ip>:8080/vm/<name>/). The CLI output reflects the correct port.
+
 If you provide a domain and email, Traefik will request certificates via Let's Encrypt. Point DNS for `*.your-domain` and `traefik.your-domain` to your server IP before use.
 
 ### 2) Manage VMs

@@ -74,17 +74,25 @@ vm_url() {
   local base_path="${BASE_PATH:-/vm}"
   [[ "$base_path" != /* ]] && base_path="/$base_path"
   base_path="${base_path%/}"
+  local http_port="${HTTP_PORT:-80}"
+  local https_port="${HTTPS_PORT:-443}"
   # If a host override exists, prefer host-based URL even in no-domain mode
   if [[ -n "$host_override" ]]; then
     local scheme="http"
     [[ "${ENABLE_TLS:-0}" -eq 1 ]] && scheme="https"
-    echo "${scheme}://${host_override}/"
+    local port_suffix=""
+    if [[ "$scheme" == "http" && "$http_port" != "80" ]]; then port_suffix=":$http_port"; fi
+    if [[ "$scheme" == "https" && "$https_port" != "443" ]]; then port_suffix=":$https_port"; fi
+    echo "${scheme}://${host_override}${port_suffix}/"
     return
   fi
   if [[ -n "${BLOBEVM_DOMAIN:-}" ]]; then
     local scheme="http"
     [[ "${ENABLE_TLS:-0}" -eq 1 ]] && scheme="https"
-    echo "${scheme}://${name}.${BLOBEVM_DOMAIN}/"
+    local port_suffix=""
+    if [[ "$scheme" == "http" && "$http_port" != "80" ]]; then port_suffix=":$http_port"; fi
+    if [[ "$scheme" == "https" && "$https_port" != "443" ]]; then port_suffix=":$https_port"; fi
+    echo "${scheme}://${name}.${BLOBEVM_DOMAIN}${port_suffix}/"
   else
     local ip
     ip="$(hostname -I | awk '{print $1}')"
@@ -97,7 +105,9 @@ vm_url() {
     # Ensure path has leading and trailing slash
     [[ "$pfx" != /* ]] && pfx="/$pfx"
     [[ "$pfx" != */ ]] && pfx="$pfx/"
-    echo "http://$ip${pfx}"
+    local port_suffix=""
+    if [[ "$http_port" != "80" ]]; then port_suffix=":$http_port"; fi
+    echo "http://$ip${port_suffix}${pfx}"
   fi
 }
 
@@ -231,11 +241,6 @@ run_container() {
     --restart unless-stopped \
     $(limits_flags "$name") \
     -e PUID="$(id -u)" -e PGID="$(id -g)" \
-  docker run -d \
-    --name "$cname" \
-    --restart unless-stopped \
-    $(limits_flags "$name") \
-    -e PUID="$(id -u)" -e PGID="$(id -g)" \
     -e TZ=Etc/UTC \
     -e SUBFOLDER="$subfolder" \
     -e TITLE="BlobeVM - ${name}" \
@@ -246,6 +251,19 @@ run_container() {
     $(common_labels "$name") \
     "${BLOBEVM_IMAGE:-blobevm:latest}" \
     >/dev/null
+}
+
+# Resource limits helpers
+limits_flags() {
+  local name="$1"
+  local cpu mem args=()
+  cpu="$(get_meta "$name" cpu_limit || true)"
+  mem="$(get_meta "$name" mem_limit || true)"
+  if [[ -n "$cpu" ]]; then args+=("--cpus" "$cpu"); fi
+  if [[ -n "$mem" ]]; then args+=("--memory" "$mem"); fi
+  echo "${args[@]:-}"
+}
+
 cmd_set_limits() {
   local name="$1" cpu="$2" mem="$3"
   [[ -z "$name" || -z "$cpu" || -z "$mem" ]] && usage
@@ -263,13 +281,6 @@ cmd_clear_limits() {
   del_meta "$name" mem_limit || true
   recreate_container "$name"
   echo "Limits cleared for '$name'"
-}
-    -v "$save_dir":/config \
-    --network proxy \
-    ${kvm_args[@]} \
-    $(common_labels "$name") \
-    "${BLOBEVM_IMAGE:-blobevm:latest}" \
-    >/dev/null
 }
 
 cmd_list() {
@@ -449,6 +460,16 @@ cmd_set_path() {
 }
 
 cmd_clear_path() {
+  local name="${1:-}"
+  [[ -z "$name" ]] && usage
+  [[ -z "${BLOBEVM_DOMAIN:-}" ]] || { echo "clear-path is only for no-domain/path mode." >&2; exit 1; }
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  del_meta "$name" path_override || true
+  recreate_container "$name"
+  echo "Cleared path override for '$name' -> $(vm_url "$name")"
+}
+
 cmd_set_host_interactive() {
   local name="${1:-}"; [[ -z "$name" ]] && usage
   ensure_instance_dir
@@ -495,15 +516,6 @@ cmd_clear_base_path() {
     local n; n="$(basename "$d")"
     recreate_container "$n"
   done
-}
-  local name="${1:-}"
-  [[ -z "$name" ]] && usage
-  [[ -z "${BLOBEVM_DOMAIN:-}" ]] || { echo "clear-path is only for no-domain/path mode." >&2; exit 1; }
-  ensure_instance_dir
-  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
-  del_meta "$name" path_override || true
-  recreate_container "$name"
-  echo "Cleared path override for '$name' -> $(vm_url "$name")"
 }
 
 main() {

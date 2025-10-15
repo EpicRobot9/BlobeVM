@@ -82,6 +82,12 @@ prompt_config() {
 
 install_prereqs() {
   echo "Installing Docker engine and compose plugin..."
+  # Clean up duplicate apt source lines that cause warnings on some hosts
+  if [[ -f /etc/apt/sources.list.d/ubuntu-mirrors.list ]]; then
+    tmpf="$(mktemp)"
+    awk '!seen[$0]++' /etc/apt/sources.list.d/ubuntu-mirrors.list > "$tmpf" || true
+    mv "$tmpf" /etc/apt/sources.list.d/ubuntu-mirrors.list || true
+  fi
   apt-get update -y
   apt-get install -y ca-certificates curl gnupg lsb-release jq
   install -m 0755 -d /etc/apt/keyrings
@@ -106,6 +112,75 @@ ensure_network() {
   fi
 }
 
+detect_ports() {
+  # Choose host ports for Traefik, falling back if 80/443 are in use
+  HTTP_PORT=80
+  HTTPS_PORT=443
+  # Helper to test if a port is in use
+  port_in_use() {
+    local p="$1"
+    if command -v ss >/dev/null 2>&1; then
+      ss -ltn | awk '{print $4}' | grep -E "(^|:)${p}$" >/dev/null 2>&1
+    else
+      netstat -ltn 2>/dev/null | awk '{print $4}' | grep -E "(^|:)${p}$" >/dev/null 2>&1
+    fi
+  }
+  if port_in_use 80; then
+    echo "Port 80 is in use on the host. Will bind Traefik HTTP to 8080 instead." >&2
+    HTTP_PORT=8080
+  fi
+  if [[ -n "${BLOBEVM_EMAIL:-}" ]]; then
+    if port_in_use 443; then
+      echo "Port 443 is in use on the host. Will bind Traefik HTTPS to 8443 instead." >&2
+      HTTPS_PORT=8443
+    fi
+  fi
+}
+
+# When ACME email is set but port 80 is busy, prompt the user to either free it or continue without TLS for now.
+handle_tls_port_conflict() {
+  TLS_ENABLED=0
+  if [[ -n "${BLOBEVM_EMAIL:-}" ]]; then
+    # Default to TLS if port 80 is available
+    if [[ "${HTTP_PORT:-80}" == "80" ]]; then
+      TLS_ENABLED=1
+      return 0
+    fi
+    echo
+    echo "=== HTTPS/ACME requires inbound port 80 ==="
+    echo "You provided an email for Let's Encrypt, but port 80 is currently in use."
+    echo "Options:"
+    echo "  1) Free port 80 now and retry detection (recommended for HTTPS)."
+    echo "  2) Continue WITHOUT TLS for now (you can enable it later after freeing port 80)."
+    echo
+    while true; do
+      read -rp "Choose [1/2]: " choice || true
+      case "${choice}" in
+        1)
+          echo "Press Enter after you have freed port 80 (e.g., stop nginx/apache/caddy)..."
+          read -r _ || true
+          detect_ports
+          if [[ "${HTTP_PORT}" == "80" ]]; then
+            TLS_ENABLED=1
+            echo "Port 80 is free. Proceeding with HTTPS enabled."
+            return 0
+          else
+            echo "Port 80 still busy. You can choose 1 again to retry or 2 to continue without TLS."
+          fi
+          ;;
+        2)
+          TLS_ENABLED=0
+          echo "Proceeding without TLS. You can re-run the installer later to enable HTTPS."
+          return 0
+          ;;
+        *)
+          echo "Please enter 1 or 2."
+          ;;
+      esac
+    done
+  fi
+}
+
 setup_traefik() {
   mkdir -p /opt/blobe-vm/traefik/letsencrypt
   chmod 700 /opt/blobe-vm/traefik/letsencrypt
@@ -113,7 +188,7 @@ setup_traefik() {
   local compose_file=/opt/blobe-vm/traefik/docker-compose.yml
   echo "Writing Traefik docker-compose.yml to $compose_file"
 
-  if [[ -n "${BLOBEVM_EMAIL:-}" ]]; then
+  if [[ "${TLS_ENABLED:-0}" -eq 1 ]]; then
     cat > "$compose_file" <<YAML
 services:
   traefik:
@@ -136,10 +211,13 @@ YAML
       - --entrypoints.web.http.redirections.entryPoint.scheme=https
 YAML
     fi
+    # Write ports with bash expansion to avoid docker compose env interpolation
+    {
+      echo "    ports:";
+      echo "      - \"${HTTP_PORT}:80\"";
+      echo "      - \"${HTTPS_PORT}:443\"";
+    } >> "$compose_file"
     cat >> "$compose_file" <<'YAML'
-    ports:
-      - "80:80"
-      - "443:443"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./letsencrypt:/letsencrypt
@@ -154,9 +232,12 @@ YAML
       - traefik.http.routers.traefik.entrypoints=web
 YAML
     if [[ -n "$TRAEFIK_DASHBOARD_AUTH" ]]; then
+      # Escape $ to $$ to prevent docker compose from treating bcrypt parts as env variables
+      local SAFE_AUTH
+      SAFE_AUTH="${TRAEFIK_DASHBOARD_AUTH//$/\$\$}"
       # Add auth middleware labels
       cat >> "$compose_file" <<YAML
-      - traefik.http.middlewares.traefik-auth.basicauth.users=${TRAEFIK_DASHBOARD_AUTH}
+      - traefik.http.middlewares.traefik-auth.basicauth.users=${SAFE_AUTH}
       - traefik.http.routers.traefik.middlewares=traefik-auth
 YAML
     fi
@@ -176,8 +257,12 @@ services:
       - --entrypoints.web.address=:80
       - --accesslog=true
       - --api.dashboard=true
-    ports:
-      - "80:80"
+YAML
+    {
+      echo "    ports:";
+      echo "      - \"${HTTP_PORT}:80\"";
+    } >> "$compose_file"
+    cat >> "$compose_file" <<'YAML'
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
@@ -237,7 +322,7 @@ install_manager() {
   cat > /opt/blobe-vm/.env <<EOF
 BLOBEVM_DOMAIN=${BLOBEVM_DOMAIN:-}
 BLOBEVM_EMAIL=${BLOBEVM_EMAIL:-}
-ENABLE_TLS=$([[ -n "${BLOBEVM_EMAIL:-}" ]] && echo 1 || echo 0)
+ ENABLE_TLS=${TLS_ENABLED}
 ENABLE_KVM=${ENABLE_KVM}
 REPO_DIR=${REPO_DIR}
   BASE_PATH=/vm
@@ -245,6 +330,8 @@ REPO_DIR=${REPO_DIR}
   TRAEFIK_DASHBOARD_AUTH=${TRAEFIK_DASHBOARD_AUTH}
 HSTS_ENABLED=${HSTS_ENABLED}
 ENABLE_DASHBOARD=${ENABLE_DASHBOARD}
+HTTP_PORT=${HTTP_PORT}
+HTTPS_PORT=${HTTPS_PORT}
 EOF
 }
 
@@ -281,6 +368,8 @@ main() {
   prompt_config
   install_prereqs
   ensure_network
+  detect_ports
+  handle_tls_port_conflict
   setup_traefik
   build_image
   install_manager
