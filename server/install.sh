@@ -67,6 +67,11 @@ prompt_config() {
   if [[ -n "${BLOBEVM_EMAIL}" ]]; then
     [[ "${force_https,,}" != "n" ]] && FORCE_HTTPS=1
   fi
+  # If TLS is not going to be enabled later, make sure we don't force HTTPS
+  # (this avoids HTTP 301 to HTTPS when no websecure routers exist)
+  if [[ "${TLS_ENABLED:-0}" -eq 0 ]]; then
+    FORCE_HTTPS=0
+  fi
   HSTS_ENABLED=0
   [[ "${hsts_ans,,}" =~ ^y(es)?$ ]] && HSTS_ENABLED=1
   if [[ "${DISABLE_DASHBOARD:-0}" -eq 1 ]]; then
@@ -365,6 +370,24 @@ detect_external_traefik() {
     TRAEFIK_NETWORK="$net"
     SKIP_TRAEFIK=1
     echo "Reusing Traefik on network '$TRAEFIK_NETWORK'."
+  fi
+}
+
+# Warn if reusing external Traefik and it forces HTTP->HTTPS while TLS is disabled
+warn_if_external_redirect() {
+  [[ "${SKIP_TRAEFIK:-0}" -ne 1 ]] && return 0
+  [[ "${TLS_ENABLED:-0}" -ne 0 ]] && return 0
+  local tid
+  tid=$(docker ps --format '{{.ID}} {{.Image}} {{.Names}}' | awk '/traefik/{print $1; exit}')
+  [[ -z "$tid" ]] && return 0
+  local args
+  args=$(docker inspect "$tid" -f '{{range .Args}}{{.}}\n{{end}}' 2>/dev/null || true)
+  if echo "$args" | grep -q -- '--entrypoints.web.http.redirections.entryPoint.to=websecure'; then
+    echo
+    echo "NOTE: External Traefik appears to have HTTP->HTTPS redirection enabled, but TLS is disabled in this setup."
+    echo "That will cause browsers/curl to be redirected to HTTPS and likely see 404s if no websecure routers exist."
+    echo "To fix: remove the redirection flag from the external Traefik and restart it, or allow this installer to manage Traefik."
+    echo "Flag to remove: --entrypoints.web.http.redirections.entryPoint.to=websecure (and related scheme settings)."
   fi
 }
 
@@ -684,6 +707,10 @@ main() {
       HTTP_PORT=${HTTP_PORT:-80}
       HTTPS_PORT=${HTTPS_PORT:-443}
       TLS_ENABLED=${ENABLE_TLS:-0}
+      # If TLS is disabled, ensure FORCE_HTTPS is not set to avoid unintended redirects
+      if [[ "${TLS_ENABLED:-0}" -eq 0 ]]; then
+        FORCE_HTTPS=0
+      fi
       BASE_PATH=${BASE_PATH:-/vm}
     else
       prompt_config
@@ -715,6 +742,8 @@ main() {
   setup_traefik
   build_image
   install_manager
+  # If reusing external Traefik while TLS is disabled, warn about possible redirect
+  warn_if_external_redirect || true
   if [[ "$UPDATE_MODE" -eq 1 ]]; then
     echo "Update complete. Existing VMs were not modified."
   else

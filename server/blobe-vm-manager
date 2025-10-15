@@ -147,7 +147,7 @@ common_labels() {
       "--label=traefik.http.routers.${name}-path.entrypoints=web"
       "--label=traefik.http.services.${name}-path.loadbalancer.server.port=3000"
     )
-    if [[ "${ENABLE_TLS:-0}" -eq 1 || "${FORCE_HTTPS:-0}" -eq 1 ]]; then
+    if [[ "${ENABLE_TLS:-0}" -eq 1 ]]; then
       # Add HTTPS routers; include certresolver only when TLS is enabled
       labels+=(
         "--label=traefik.http.routers.${name}-secure.rule=Host(\`$host_override\`)"
@@ -159,12 +159,10 @@ common_labels() {
         "--label=traefik.http.routers.${name}-path-secure.tls=true"
         "--label=traefik.http.services.${name}-path-secure.loadbalancer.server.port=3000"
       )
-      if [[ "${ENABLE_TLS:-0}" -eq 1 ]]; then
-        labels+=(
-          "--label=traefik.http.routers.${name}-secure.tls.certresolver=myresolver"
-          "--label=traefik.http.routers.${name}-path-secure.tls.certresolver=myresolver"
-        )
-      fi
+      labels+=(
+        "--label=traefik.http.routers.${name}-secure.tls.certresolver=myresolver"
+        "--label=traefik.http.routers.${name}-path-secure.tls.certresolver=myresolver"
+      )
     fi
   elif [[ -n "${BLOBEVM_DOMAIN:-}" ]]; then
     # Domain mode: host router + path router
@@ -179,7 +177,7 @@ common_labels() {
       "--label=traefik.http.routers.${name}-path.entrypoints=web"
       "--label=traefik.http.services.${name}-path.loadbalancer.server.port=3000"
     )
-    if [[ "${ENABLE_TLS:-0}" -eq 1 || "${FORCE_HTTPS:-0}" -eq 1 ]]; then
+    if [[ "${ENABLE_TLS:-0}" -eq 1 ]]; then
       labels+=(
         "--label=traefik.http.routers.${name}-secure.rule=Host(\`$host\`)"
         "--label=traefik.http.routers.${name}-secure.entrypoints=websecure"
@@ -190,12 +188,10 @@ common_labels() {
         "--label=traefik.http.routers.${name}-path-secure.tls=true"
         "--label=traefik.http.services.${name}-path-secure.loadbalancer.server.port=3000"
       )
-      if [[ "${ENABLE_TLS:-0}" -eq 1 ]]; then
-        labels+=(
-          "--label=traefik.http.routers.${name}-secure.tls.certresolver=myresolver"
-          "--label=traefik.http.routers.${name}-path-secure.tls.certresolver=myresolver"
-        )
-      fi
+      labels+=(
+        "--label=traefik.http.routers.${name}-secure.tls.certresolver=myresolver"
+        "--label=traefik.http.routers.${name}-path-secure.tls.certresolver=myresolver"
+      )
     fi
   else
     # Path-based routing when no domain present
@@ -213,16 +209,14 @@ common_labels() {
       "--label=traefik.http.routers.${name}.entrypoints=web"
       "--label=traefik.http.services.${name}.loadbalancer.server.port=3000"
     )
-    if [[ "${ENABLE_TLS:-0}" -eq 1 || "${FORCE_HTTPS:-0}" -eq 1 ]]; then
+    if [[ "${ENABLE_TLS:-0}" -eq 1 ]]; then
       labels+=(
         "--label=traefik.http.routers.${name}-secure.rule=PathPrefix(\`$prefix\`)"
         "--label=traefik.http.routers.${name}-secure.entrypoints=websecure"
         "--label=traefik.http.routers.${name}-secure.tls=true"
         "--label=traefik.http.services.${name}-secure.loadbalancer.server.port=3000"
       )
-      if [[ "${ENABLE_TLS:-0}" -eq 1 ]]; then
-        labels+=("--label=traefik.http.routers.${name}-secure.tls.certresolver=myresolver")
-      fi
+      labels+=("--label=traefik.http.routers.${name}-secure.tls.certresolver=myresolver")
     fi
   fi
 
