@@ -21,7 +21,7 @@ What you'll get:
 ### 1) Quick one-line install
 Run this on your server to clone the repo and start the guided installer:
 ```
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/EpicRobot9/BlobeVM/main/server/quick-install.sh)"
+curl -fsSL https://raw.githubusercontent.com/EpicRobot9/BlobeVM/main/install-blobevm.sh | sudo bash
 ```
 
 Or run the installer from a local clone:
