@@ -163,3 +163,46 @@ Notes:
 - Dual access (host + path): When a VM has a host route (custom host or domain), a path route still exists so you can reach it via both forms unless you tailor Traefik labels manually.
 - Per-VM limits: Use `set-limits` to avoid a single VM consuming all host resources.
 - Dashboard: Provides a quick management UI; disable by setting `DISABLE_DASHBOARD=1` before install or removing the service from the compose file.
+
+## CLI Quick Reference
+
+### Core lifecycle
+```
+blobe-vm-manager list                  # Show all VMs and their state
+blobe-vm-manager create <name>         # Create a new VM instance
+blobe-vm-manager start <name>          # Start a VM
+blobe-vm-manager stop <name>           # Stop a VM
+blobe-vm-manager delete <name>         # Delete a VM (removes data)
+blobe-vm-manager rename old new        # Rename a VM (updates URLs)
+```
+
+### Routing controls
+```
+blobe-vm-manager set-host <vm> <fqdn>  # Serve a VM at a custom hostname
+blobe-vm-manager clear-host <vm>       # Revert to default host routing
+blobe-vm-manager set-path <vm> /desk/7 # Serve a VM at a custom path prefix
+blobe-vm-manager clear-path <vm>       # Revert to default path routing
+blobe-vm-manager set-base-path /desk   # Change global base path (default /vm)
+blobe-vm-manager clear-base-path       # Reset global base path to /vm
+```
+
+### Resource limits
+```
+blobe-vm-manager set-limits <vm> <cpus> <memory>
+blobe-vm-manager set-limits myvm 1.5 2g  # Example (1.5 CPUs, 2 GiB RAM)
+blobe-vm-manager clear-limits <vm>       # Remove limits
+```
+
+### HTTPS, redirects, and dashboard auth
+- Re-run `server/install.sh` (or the one-line installer) with HTTPS inputs to enable TLS/Let's Encrypt. Set `BLOBEVM_FORCE_HTTPS=1` to force HTTP→HTTPS redirects once TLS is active.
+- Protect the dashboard by exporting `BLOBEDASH_USER` and `BLOBEDASH_PASS` (or answering the prompt) before running the installer. Credentials are stored in Traefik labels.
+
+### Dashboard management
+- Skip deployment on install: `DISABLE_DASHBOARD=1 sudo bash server/install.sh`
+- Redeploy after removal: `docker compose up -d dashboard` inside `/opt/blobe-vm/traefik`
+- Remove after install: `cd /opt/blobe-vm/traefik && docker compose rm -sf dashboard`
+
+### Full uninstall
+```
+blobe-vm-manager nuke   # Removes all VMs, data, Traefik stack, and CLI (prompts for confirmation)
+```

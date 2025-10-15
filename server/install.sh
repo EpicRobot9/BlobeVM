@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 set -euo pipefail
+set -o errtrace
 
 # BlobeVM Host/VPS Installer
 # - Installs Docker and Traefik
@@ -9,6 +10,16 @@ set -euo pipefail
 # - Builds the BlobeVM image from this repository
 # - Installs the blobe-vm-manager CLI
 # - Optionally creates a first VM instance and prints its URL
+#
+# Environment overrides (optional, useful for automation):
+#   BLOBEVM_DOMAIN, BLOBEVM_EMAIL, BLOBEVM_HTTP_PORT, BLOBEVM_HTTPS_PORT
+#   BLOBEVM_FORCE_HTTPS, BLOBEVM_ENABLE_DASHBOARD, BLOBEVM_ENABLE_KVM
+#   BLOBEVM_HSTS, BLOBEVM_TRAEFIK_NETWORK, BLOBEVM_REUSE_SETTINGS
+#   BLOBEVM_AUTO_CREATE_VM, BLOBEVM_INITIAL_VM_NAME, BLOBEVM_ENABLE_TLS
+#   BLOBEVM_ASSUME_DEFAULTS (accept safe defaults during prompts)
+#   DISABLE_DASHBOARD (legacy flag to skip dashboard deployment)
+
+trap 'echo "[ERROR] ${BASH_SOURCE[0]}: line ${LINENO} failed: ${BASH_COMMAND}" >&2' ERR
 
 
 require_root() {
@@ -36,62 +47,201 @@ load_existing_env() {
   done < "$env_file"
 }
 
+normalize_bool() {
+  local value="${1:-}"
+  case "${value,,}" in
+    1|true|yes|y|on|enable|enabled) echo 1 ;;
+    0|false|no|n|off|disable|disabled) echo 0 ;;
+    *) echo "${value}" ;;
+  esac
+}
+
+apply_env_overrides() {
+  BLOBEVM_DOMAIN="${BLOBEVM_DOMAIN:-${BLOBEVM_INSTALL_DOMAIN:-}}"
+  BLOBEVM_EMAIL="${BLOBEVM_EMAIL:-${BLOBEVM_INSTALL_EMAIL:-}}"
+
+  if [[ -n "${BLOBEVM_FORCE_HTTPS:-}" ]]; then
+    local forced
+    forced="$(normalize_bool "${BLOBEVM_FORCE_HTTPS}")"
+    [[ "${forced}" == "1" ]] && FORCE_HTTPS=1
+    [[ "${forced}" == "0" ]] && FORCE_HTTPS=0
+  fi
+
+  if [[ -n "${BLOBEVM_ENABLE_KVM:-}" ]]; then
+    local kvm
+    kvm="$(normalize_bool "${BLOBEVM_ENABLE_KVM}")"
+    [[ "${kvm}" == "1" ]] && ENABLE_KVM=1
+    [[ "${kvm}" == "0" ]] && ENABLE_KVM=0
+  fi
+
+  if [[ -n "${BLOBEVM_ENABLE_DASHBOARD:-}" ]]; then
+    local dash
+    dash="$(normalize_bool "${BLOBEVM_ENABLE_DASHBOARD}")"
+    if [[ "${dash}" == "1" ]]; then
+      ENABLE_DASHBOARD=1
+      unset DISABLE_DASHBOARD
+    elif [[ "${dash}" == "0" ]]; then
+      ENABLE_DASHBOARD=0
+      DISABLE_DASHBOARD=1
+    fi
+  fi
+
+  if [[ -n "${DISABLE_DASHBOARD:-}" ]]; then
+    local disable
+    disable="$(normalize_bool "${DISABLE_DASHBOARD}")"
+    [[ "${disable}" == "1" ]] && ENABLE_DASHBOARD=0
+  fi
+
+  if [[ -n "${BLOBEVM_HSTS:-}" ]]; then
+    local hsts
+    hsts="$(normalize_bool "${BLOBEVM_HSTS}")"
+    [[ "${hsts}" == "1" ]] && HSTS_ENABLED=1
+    [[ "${hsts}" == "0" ]] && HSTS_ENABLED=0
+  fi
+
+  if [[ -n "${BLOBEVM_ENABLE_TLS:-}" ]]; then
+    local tls
+    tls="$(normalize_bool "${BLOBEVM_ENABLE_TLS}")"
+    [[ "${tls}" == "1" ]] && TLS_ENABLED=1
+    [[ "${tls}" == "0" ]] && TLS_ENABLED=0
+  fi
+
+  if [[ -n "${BLOBEVM_HTTP_PORT:-}" ]]; then
+    HTTP_PORT="${BLOBEVM_HTTP_PORT}"
+  fi
+  if [[ -n "${BLOBEVM_HTTPS_PORT:-}" ]]; then
+    HTTPS_PORT="${BLOBEVM_HTTPS_PORT}"
+  fi
+
+  if [[ -n "${BLOBEVM_TRAEFIK_NETWORK:-}" ]]; then
+    TRAEFIK_NETWORK="${BLOBEVM_TRAEFIK_NETWORK}"
+  fi
+
+  if [[ -n "${BLOBEVM_BASE_PATH:-}" ]]; then
+    BASE_PATH="${BLOBEVM_BASE_PATH}"
+  fi
+
+  if [[ -n "${BLOBEVM_SKIP_TRAEFIK:-}" ]]; then
+    local skip
+    skip="$(normalize_bool "${BLOBEVM_SKIP_TRAEFIK}")"
+    [[ "${skip}" == "1" ]] && SKIP_TRAEFIK=1
+  fi
+
+  if [[ -n "${BLOBEVM_REUSE_SETTINGS:-}" ]]; then
+    BLOBEVM_REUSE_SETTINGS="$(normalize_bool "${BLOBEVM_REUSE_SETTINGS}")"
+  fi
+
+  if [[ -n "${BLOBEDASH_USER:-}" ]]; then
+    DASH_AUTH_USER="${BLOBEDASH_USER}"
+  fi
+
+  if [[ -n "${BLOBEVM_ASSUME_DEFAULTS:-}" ]]; then
+    ASSUME_DEFAULTS="$(normalize_bool "${BLOBEVM_ASSUME_DEFAULTS}")"
+  fi
+}
+
 prompt_config() {
   echo "--- BlobeVM Host Configuration ---"
-  read -rp "Primary domain for VMs (e.g., example.com) [leave empty to use URL paths]: " BLOBEVM_DOMAIN || true
-  read -rp "Email for Let's Encrypt (optional; required for HTTPS): " BLOBEVM_EMAIL || true
-  read -rp "Enable KVM passthrough to containers if available? [y/N]: " enable_kvm || true
-  if [[ -n "${BLOBEVM_EMAIL}" ]]; then
-    read -rp "Force HTTP->HTTPS redirect on all routers? [Y/n]: " force_https || true
-  fi
-  read -rp "Protect Traefik dashboard with basic auth? [y/N]: " dash_auth || true
-  read -rp "Enable HSTS headers on HTTPS routers? (adds preload, subdomains) [y/N]: " hsts_ans || true
-  # Web dashboard now deployed by default (can disable by setting DISABLE_DASHBOARD=1 env before running installer)
-  if [[ "${dash_auth,,}" =~ ^y(es)?$ ]]; then
-    read -rp "Dashboard username [admin]: " dash_user || true
-    dash_user=${dash_user:-admin}
-    read -rsp "Dashboard password: " dash_pass; echo
-    if ! command -v htpasswd >/dev/null 2>&1; then
-      apt-get update -y >/dev/null 2>&1 || true
-      apt-get install -y apache2-utils >/dev/null 2>&1 || true
-    fi
-    dash_hash=$(htpasswd -nbB "$dash_user" "$dash_pass" 2>/dev/null | sed 's/^.*://')
-    [[ -z "$dash_hash" ]] && dash_hash=$(htpasswd -nb "$dash_user" "$dash_pass" 2>/dev/null | sed 's/^.*://')
-    TRAEFIK_DASHBOARD_AUTH="$dash_user:$dash_hash"
+
+  if [[ -n "${BLOBEVM_DOMAIN:-}" ]]; then
+    echo "Domain supplied via environment: ${BLOBEVM_DOMAIN}"
   else
-    TRAEFIK_DASHBOARD_AUTH=""
+    read -rp "Primary domain for VMs (e.g., example.com) [leave empty to use URL paths]: " BLOBEVM_DOMAIN || true
+    BLOBEVM_DOMAIN="${BLOBEVM_DOMAIN//[[:space:]]/}"
   fi
-  ENABLE_KVM=0
-  [[ "${enable_kvm,,}" == "y" || "${enable_kvm,,}" == "yes" ]] && ENABLE_KVM=1
-  FORCE_HTTPS=0
-  if [[ -n "${BLOBEVM_EMAIL}" ]]; then
-    [[ "${force_https,,}" != "n" ]] && FORCE_HTTPS=1
+
+  if [[ -n "${BLOBEVM_EMAIL:-}" ]]; then
+    echo "Using Let's Encrypt email from environment."
+  else
+    read -rp "Email for Let's Encrypt (optional; required for HTTPS): " BLOBEVM_EMAIL || true
+    BLOBEVM_EMAIL="${BLOBEVM_EMAIL//[[:space:]]/}"
   fi
-  # If TLS is not going to be enabled later, make sure we don't force HTTPS
-  # (this avoids HTTP 301 to HTTPS when no websecure routers exist)
-  if [[ "${TLS_ENABLED:-0}" -eq 0 ]]; then
+
+  local enable_kvm_response=""
+  if [[ -n "${ENABLE_KVM:-}" ]]; then
+    ENABLE_KVM=$([[ "${ENABLE_KVM}" == "1" ]] && echo 1 || echo 0)
+  elif [[ "${ASSUME_DEFAULTS:-0}" == "1" ]]; then
+    ENABLE_KVM=0
+  else
+    read -rp "Enable KVM passthrough to containers if available? [y/N]: " enable_kvm_response || true
+    ENABLE_KVM=0
+    [[ "${enable_kvm_response,,}" == y* ]] && ENABLE_KVM=1
+  fi
+
+  if [[ -n "${BLOBEVM_EMAIL:-}" ]]; then
+    if [[ -n "${FORCE_HTTPS:-}" ]]; then
+      FORCE_HTTPS=$([[ "${FORCE_HTTPS}" == "1" ]] && echo 1 || echo 0)
+    elif [[ "${ASSUME_DEFAULTS:-0}" == "1" ]]; then
+      FORCE_HTTPS=1
+    else
+      local force_https_response=""
+      read -rp "Force HTTP->HTTPS redirect on all routers? [Y/n]: " force_https_response || true
+      FORCE_HTTPS=1
+      [[ "${force_https_response,,}" == n* ]] && FORCE_HTTPS=0
+    fi
+  else
     FORCE_HTTPS=0
   fi
-  HSTS_ENABLED=0
-  [[ "${hsts_ans,,}" =~ ^y(es)?$ ]] && HSTS_ENABLED=1
+
+  local dash_auth_response=""
+  if [[ -n "${TRAEFIK_DASHBOARD_AUTH:-}" ]]; then
+    [[ -z "${DASH_AUTH_USER:-}" ]] && DASH_AUTH_USER="${TRAEFIK_DASHBOARD_AUTH%%:*}"
+    echo "Dashboard basic auth supplied via environment."
+  elif [[ "${ASSUME_DEFAULTS:-0}" == "1" ]]; then
+    TRAEFIK_DASHBOARD_AUTH=""
+  else
+    read -rp "Protect Traefik dashboard with basic auth? [y/N]: " dash_auth_response || true
+    if [[ "${dash_auth_response,,}" =~ ^y(es)?$ ]]; then
+      local dash_user dash_pass dash_hash
+      dash_user="${DASH_AUTH_USER:-admin}"
+      read -rp "Dashboard username [${dash_user}]: " dash_user_input || true
+      [[ -n "${dash_user_input}" ]] && dash_user="${dash_user_input}"
+      read -rsp "Dashboard password: " dash_pass; echo
+      if ! command -v htpasswd >/dev/null 2>&1; then
+        apt-get update -y >/dev/null 2>&1 || true
+        apt-get install -y apache2-utils >/dev/null 2>&1 || true
+      fi
+      dash_hash=$(htpasswd -nbB "${dash_user}" "${dash_pass}" 2>/dev/null | sed 's/^.*://')
+      [[ -z "${dash_hash}" ]] && dash_hash=$(htpasswd -nb "${dash_user}" "${dash_pass}" 2>/dev/null | sed 's/^.*://')
+      TRAEFIK_DASHBOARD_AUTH="${dash_user}:${dash_hash}"
+      DASH_AUTH_USER="${dash_user}"
+    else
+      TRAEFIK_DASHBOARD_AUTH=""
+    fi
+  fi
+
+  if [[ -n "${BLOBEVM_HSTS:-}" ]]; then
+    HSTS_ENABLED=$([[ "${HSTS_ENABLED:-0}" == "1" ]] && echo 1 || echo 0)
+  elif [[ "${ASSUME_DEFAULTS:-0}" == "1" ]]; then
+    HSTS_ENABLED=0
+  else
+    local hsts_ans
+    read -rp "Enable HSTS headers on HTTPS routers? (adds preload, subdomains) [y/N]: " hsts_ans || true
+    HSTS_ENABLED=0
+    [[ "${hsts_ans,,}" =~ ^y(es)?$ ]] && HSTS_ENABLED=1
+  fi
+
   if [[ "${DISABLE_DASHBOARD:-0}" -eq 1 ]]; then
     ENABLE_DASHBOARD=0
+  elif [[ -n "${ENABLE_DASHBOARD:-}" ]]; then
+    ENABLE_DASHBOARD=$([[ "${ENABLE_DASHBOARD}" == "1" ]] && echo 1 || echo 0)
   else
     ENABLE_DASHBOARD=1
   fi
-  # Default Traefik network name (can be overridden later if we detect external Traefik)
+
   TRAEFIK_NETWORK="${TRAEFIK_NETWORK:-proxy}"
 
   echo
   echo "Summary:"
   echo "  Domain:    ${BLOBEVM_DOMAIN:-<none - path-based URLs>}"
   echo "  ACME email:${BLOBEVM_EMAIL:-<none - HTTP only>}"
-  echo "  KVM:       $([[ "$ENABLE_KVM" -eq 1 ]] && echo enabled || echo disabled)"
-  echo "  Force HTTPS: $([[ "$FORCE_HTTPS" -eq 1 ]] && echo yes || echo no)"
-  echo "  HSTS:        $([[ "$HSTS_ENABLED" -eq 1 ]] && echo yes || echo no)"
-  echo "  Web Dashboard: $([[ "$ENABLE_DASHBOARD" -eq 1 ]] && echo yes || echo no) (set DISABLE_DASHBOARD=1 to skip)"
-  if [[ -n "$TRAEFIK_DASHBOARD_AUTH" ]]; then
-    echo "  Dashboard Auth: enabled (user: ${dash_user:-admin})"
+  echo "  KVM:       $([[ "${ENABLE_KVM}" -eq 1 ]] && echo enabled || echo disabled)"
+  echo "  Force HTTPS: $([[ "${FORCE_HTTPS}" -eq 1 ]] && echo yes || echo no)"
+  echo "  HSTS:        $([[ "${HSTS_ENABLED}" -eq 1 ]] && echo yes || echo no)"
+  echo "  Web Dashboard: $([[ "${ENABLE_DASHBOARD}" -eq 1 ]] && echo yes || echo no) (set DISABLE_DASHBOARD=1 to skip)"
+  if [[ -n "${TRAEFIK_DASHBOARD_AUTH}" ]]; then
+    local summary_user="${DASH_AUTH_USER:-${TRAEFIK_DASHBOARD_AUTH%%:*}}"
+    echo "  Dashboard Auth: enabled (user: ${summary_user:-admin})"
   else
     echo "  Dashboard Auth: disabled"
   fi
@@ -99,7 +249,8 @@ prompt_config() {
 }
 
 install_prereqs() {
-  echo "Installing Docker engine and compose plugin..."
+  echo "Ensuring prerequisite packages are installed..."
+  export DEBIAN_FRONTEND=noninteractive
   # Clean up duplicate apt source lines that cause warnings on some hosts
   if [[ -f /etc/apt/sources.list.d/ubuntu-mirrors.list ]]; then
     tmpf="$(mktemp)"
@@ -107,20 +258,36 @@ install_prereqs() {
     mv "$tmpf" /etc/apt/sources.list.d/ubuntu-mirrors.list || true
   fi
   apt-get update -y
-  apt-get install -y ca-certificates curl gnupg lsb-release jq
+  apt-get install -y ca-certificates curl wget gnupg lsb-release jq >/dev/null
+
   install -m 0755 -d /etc/apt/keyrings
   if [[ ! -f /etc/apt/keyrings/docker.gpg ]]; then
     curl -fsSL https://download.docker.com/linux/$(. /etc/os-release && echo "$ID")/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
     chmod a+r /etc/apt/keyrings/docker.gpg
   fi
-  echo \
-"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$(. /etc/os-release && echo "$ID") \
-$(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
-    > /etc/apt/sources.list.d/docker.list
-  apt-get update -y
-  apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
-  systemctl enable --now docker
+  if [[ ! -f /etc/apt/sources.list.d/docker.list ]]; then
+    cat <<EOF >/etc/apt/sources.list.d/docker.list
+deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$(. /etc/os-release && echo "$ID") $(. /etc/os-release && echo "$VERSION_CODENAME") stable
+EOF
+  fi
+
+  apt-get update -y
+  apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin >/dev/null
+
+  systemctl enable --now docker >/dev/null 2>&1 || systemctl start docker >/dev/null 2>&1
+
+  # Quick sanity checks
+  command -v docker >/dev/null 2>&1 || {
+    echo "Docker did not install correctly." >&2
+    exit 1
+  }
+  if ! docker compose version >/dev/null 2>&1; then
+    echo "Docker Compose plugin is unavailable. Please ensure docker-compose-plugin is installed." >&2
+    exit 1
+  fi
+  command -v curl >/dev/null 2>&1 || { echo "curl is required." >&2; exit 1; }
+  command -v wget >/dev/null 2>&1 || { echo "wget is required." >&2; exit 1; }
 }
 
 ensure_network() {
@@ -275,27 +442,59 @@ resolve_busy_port_interactive() {
 }
 
 detect_ports() {
-  # Choose host ports for Traefik, prompting to kill or switch when 80/443 are in use
-  HTTP_PORT=80
-  HTTPS_PORT=443
-  if port_in_use 80; then
-    local chosen
-    chosen=$(resolve_busy_port_interactive "HTTP" 80 8080)
-    HTTP_PORT="$chosen"
-    if [[ "$HTTP_PORT" != "80" ]]; then
-      echo "Port 80 is busy; using HTTP port ${HTTP_PORT}." >&2
+  # Choose host ports for Traefik, prompting to kill or switch when needed
+  local desired_http="${HTTP_PORT:-${BLOBEVM_HTTP_PORT:-80}}"
+  local desired_https="${HTTPS_PORT:-${BLOBEVM_HTTPS_PORT:-443}}"
+  HTTP_PORT="${desired_http}"
+  HTTPS_PORT="${desired_https}"
+
+  if port_in_use "$HTTP_PORT"; then
+    if [[ "${ASSUME_DEFAULTS}" == "1" ]]; then
+      local fallback_http
+      if [[ "$HTTP_PORT" -eq 80 ]]; then
+        fallback_http=8080
+      else
+        fallback_http=$((HTTP_PORT + 1))
+      fi
+      HTTP_PORT=$(find_free_port "$fallback_http" 200 || true)
+      if [[ -z "$HTTP_PORT" ]]; then
+        echo "Unable to find a free HTTP port automatically. Exiting." >&2
+        exit 1
+      fi
+      echo "Port ${desired_http} is busy; automatically using HTTP port ${HTTP_PORT}." >&2
     else
-      echo "Using HTTP port 80." >&2
+      local fallback_http
+      if [[ "$desired_http" -eq 80 ]]; then
+        fallback_http=8080
+      else
+        fallback_http=$((desired_http + 1))
+      fi
+      HTTP_PORT=$(resolve_busy_port_interactive "HTTP" "$desired_http" "$fallback_http")
     fi
   fi
-  if port_in_use 443; then
-    local chosen
-    chosen=$(resolve_busy_port_interactive "HTTPS" 443 8443)
-    HTTPS_PORT="$chosen"
-    if [[ "$HTTPS_PORT" != "443" ]]; then
-      echo "Port 443 is busy; using HTTPS port ${HTTPS_PORT}." >&2
+
+  if port_in_use "$HTTPS_PORT"; then
+    if [[ "${ASSUME_DEFAULTS}" == "1" ]]; then
+      local fallback_https
+      if [[ "$HTTPS_PORT" -eq 443 ]]; then
+        fallback_https=8443
+      else
+        fallback_https=$((HTTPS_PORT + 1))
+      fi
+      HTTPS_PORT=$(find_free_port "$fallback_https" 200 || true)
+      if [[ -z "$HTTPS_PORT" ]]; then
+        echo "Unable to find a free HTTPS port automatically. Exiting." >&2
+        exit 1
+      fi
+      echo "Port ${desired_https} is busy; automatically using HTTPS port ${HTTPS_PORT}." >&2
     else
-      echo "Using HTTPS port 443." >&2
+      local fallback_https
+      if [[ "$desired_https" -eq 443 ]]; then
+        fallback_https=8443
+      else
+        fallback_https=$((desired_https + 1))
+      fi
+      HTTPS_PORT=$(resolve_busy_port_interactive "HTTPS" "$desired_https" "$fallback_https")
     fi
   fi
 }
@@ -307,6 +506,11 @@ handle_tls_port_conflict() {
     # Default to TLS if port 80 is available
     if [[ "${HTTP_PORT:-80}" == "80" ]]; then
       TLS_ENABLED=1
+      return 0
+    fi
+    if [[ "${ASSUME_DEFAULTS}" == "1" ]]; then
+      TLS_ENABLED=0
+      echo "HTTPS requires port 80; continuing without TLS (non-interactive mode)." >&2
       return 0
     fi
     echo
@@ -613,12 +817,30 @@ YAML
       - traefik.http.routers.blobe-dashboard.entrypoints=web
       - traefik.http.services.blobe-dashboard.loadbalancer.server.port=5000
 DASH
+    if [[ "$TLS_ENABLED" -eq 1 ]]; then
+      cat >> /opt/blobe-vm/traefik/docker-compose.yml <<'DASH'
+      - traefik.http.routers.blobe-dashboard-secure.rule=PathPrefix(`/dashboard`)
+      - traefik.http.routers.blobe-dashboard-secure.entrypoints=websecure
+      - traefik.http.routers.blobe-dashboard-secure.tls=true
+      - traefik.http.routers.blobe-dashboard-secure.tls.certresolver=myresolver
+DASH
+    fi
     if [[ -n "$BLOBEVM_DOMAIN" ]]; then
-      cat >> /opt/blobe-vm/traefik/docker-compose.yml <<DASH
-      - traefik.http.routers.blobe-dashboard-host.rule=Host(\`dashboard.${BLOBEVM_DOMAIN}\`)
+      if [[ "$TLS_ENABLED" -eq 1 ]]; then
+        cat >> /opt/blobe-vm/traefik/docker-compose.yml <<DASH
+      - traefik.http.routers.blobe-dashboard-host.rule=Host(`dashboard.${BLOBEVM_DOMAIN}`)
+      - traefik.http.routers.blobe-dashboard-host.entrypoints=websecure
+      - traefik.http.routers.blobe-dashboard-host.tls=true
+      - traefik.http.routers.blobe-dashboard-host.tls.certresolver=myresolver
+      - traefik.http.services.blobe-dashboard-host.loadbalancer.server.port=5000
+DASH
+      else
+        cat >> /opt/blobe-vm/traefik/docker-compose.yml <<DASH
+      - traefik.http.routers.blobe-dashboard-host.rule=Host(`dashboard.${BLOBEVM_DOMAIN}`)
       - traefik.http.routers.blobe-dashboard-host.entrypoints=web
       - traefik.http.services.blobe-dashboard-host.loadbalancer.server.port=5000
 DASH
+      fi
     fi
     (cd /opt/blobe-vm/traefik && docker compose up -d dashboard)
   fi
@@ -637,6 +859,7 @@ install_manager() {
   echo "Installing blobe-vm-manager CLI..."
   install -Dm755 "$REPO_DIR/server/blobe-vm-manager" /usr/local/bin/blobe-vm-manager
   mkdir -p /opt/blobe-vm/instances
+  local base_path="${BASE_PATH:-/vm}"
   # Helper to single-quote values safely for shell
   sh_q() { printf "'%s'" "$(printf %s "$1" | sed "s/'/'\''/g")"; }
   {
@@ -645,7 +868,7 @@ install_manager() {
     echo "ENABLE_TLS=$(sh_q "${TLS_ENABLED}")";
     echo "ENABLE_KVM=$(sh_q "${ENABLE_KVM}")";
     echo "REPO_DIR=$(sh_q "${REPO_DIR}")";
-    echo "BASE_PATH=$(sh_q "/vm")";
+    echo "BASE_PATH=$(sh_q "${base_path}")";
     echo "FORCE_HTTPS=$(sh_q "${FORCE_HTTPS}")";
     echo "TRAEFIK_DASHBOARD_AUTH=$(sh_q "${TRAEFIK_DASHBOARD_AUTH}")";
     echo "HSTS_ENABLED=$(sh_q "${HSTS_ENABLED}")";
@@ -659,6 +882,19 @@ install_manager() {
 
 maybe_create_first_vm() {
   echo
+  local auto_create="$(normalize_bool "${BLOBEVM_AUTO_CREATE_VM:-0}")"
+  if [[ "$auto_create" == "1" ]]; then
+    local name="${BLOBEVM_INITIAL_VM_NAME:-alpha}"
+    echo "Auto-creating initial VM '${name}'."
+    blobe-vm-manager create "$name"
+    return 0
+  fi
+
+  if [[ "${ASSUME_DEFAULTS}" == "1" ]]; then
+    echo "Skipping initial VM creation (non-interactive mode)."
+    return 0
+  fi
+
   read -rp "Create an initial VM instance now? [y/N]: " create_now || true
   if [[ "${create_now,,}" =~ ^y(es)?$ ]]; then
     local name
@@ -674,14 +910,33 @@ maybe_create_first_vm() {
 print_success() {
   echo
   echo "BlobeVM host setup complete."
+  local base_path="${BASE_PATH:-/vm}"
+  local http_suffix=""
+  local https_suffix=""
+  [[ "${HTTP_PORT}" != "80" ]] && http_suffix=":${HTTP_PORT}"
+  [[ "${HTTPS_PORT}" != "443" ]] && https_suffix=":${HTTPS_PORT}"
+
   if [[ -n "${BLOBEVM_DOMAIN:-}" ]]; then
-    echo "- Make sure your DNS points either wildcard *.${BLOBEVM_DOMAIN} and traefik.${BLOBEVM_DOMAIN} to this server's IP."
-    echo "- Access Traefik dashboard at: https://traefik.${BLOBEVM_DOMAIN} (if HTTPS enabled) or http://traefik.${BLOBEVM_DOMAIN} (HTTP only)."
-    echo "- Create VMs: blobe-vm-manager create myvm  -> URL: http(s)://myvm.${BLOBEVM_DOMAIN}/"
+    if [[ "${TLS_ENABLED:-0}" -eq 1 ]]; then
+      echo "- Dashboard: https://dashboard.${BLOBEVM_DOMAIN}${https_suffix}/"
+      echo "- Traefik:  https://traefik.${BLOBEVM_DOMAIN}${https_suffix}/"
+      echo "- VM URLs:  https://<name>.${BLOBEVM_DOMAIN}${https_suffix}/ (path fallback ${base_path}/<name>/)"
+    else
+      echo "- Dashboard: http://dashboard.${BLOBEVM_DOMAIN}${http_suffix}/"
+      echo "- Traefik:  http://traefik.${BLOBEVM_DOMAIN}${http_suffix}/"
+      echo "- VM URLs:  http://<name>.${BLOBEVM_DOMAIN}${http_suffix}/ (path fallback ${base_path}/<name>/)"
+    fi
+    echo "- Ensure DNS: *.${BLOBEVM_DOMAIN} and traefik.${BLOBEVM_DOMAIN} → this server's IP."
   else
-    echo "- No domain configured. VMs will be available at path prefixes, e.g.: http://<SERVER_IP>/vm/<name>/"
+    echo "- Dashboard: http://<SERVER_IP>${http_suffix}/dashboard"
+    if [[ "${TLS_ENABLED:-0}" -eq 1 ]]; then
+      echo "- Dashboard (HTTPS): https://<SERVER_IP>${https_suffix}/dashboard"
+    fi
+    echo "- VM URLs: http://<SERVER_IP>${http_suffix}${base_path}/<name>/"
+    [[ "${TLS_ENABLED:-0}" -eq 1 ]] && echo "- VM URLs (HTTPS): https://<SERVER_IP>${https_suffix}${base_path}/<name>/"
   fi
-  echo "- Manage VMs with: blobe-vm-manager [create|start|stop|delete|list] <name>"
+  echo "- Manage VMs: blobe-vm-manager [list|create|start|stop|delete|rename] <name>"
+  echo "- Uninstall everything: blobe-vm-manager nuke"
 }
 
 main() {
@@ -694,10 +949,19 @@ main() {
     load_existing_env || true
   fi
 
+  apply_env_overrides
+  ASSUME_DEFAULTS=${ASSUME_DEFAULTS:-0}
+
   if [[ "$UPDATE_MODE" -eq 1 ]]; then
     echo "Detected existing BlobeVM installation."
     local reuse_cfg
-    read -rp "Use existing settings and update components? [Y/n]: " reuse_cfg || true
+    if [[ "${BLOBEVM_REUSE_SETTINGS:-}" == "1" ]]; then
+      reuse_cfg="y"
+    elif [[ "${ASSUME_DEFAULTS}" == "1" ]]; then
+      reuse_cfg="y"
+    else
+      read -rp "Use existing settings and update components? [Y/n]: " reuse_cfg || true
+    fi
     if [[ -z "$reuse_cfg" || "${reuse_cfg,,}" == y* ]]; then
       # Keep existing settings from .env; ensure defaults for missing
       BLOBEVM_DOMAIN="${BLOBEVM_DOMAIN:-}"
@@ -728,6 +992,7 @@ main() {
   else
     prompt_config
   fi
+  BASE_PATH=${BASE_PATH:-/vm}
   install_prereqs
   # External Traefik only if we're not already configured to skip
   if [[ "${SKIP_TRAEFIK:-0}" -ne 1 ]]; then
@@ -743,6 +1008,9 @@ main() {
     fi
     if [[ -z "${TLS_ENABLED:-}" ]]; then
       handle_tls_port_conflict
+    fi
+    if [[ "${TLS_ENABLED:-0}" -eq 0 ]]; then
+      FORCE_HTTPS=0
     fi
     # If TLS is enabled, optionally wait for DNS to point before launching Traefik
     wait_for_dns_propagation || true
