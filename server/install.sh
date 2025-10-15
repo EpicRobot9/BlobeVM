@@ -625,6 +625,10 @@ DASH
 }
 
 build_image() {
+  # Fallback if REPO_DIR is missing or was loaded stale from .env
+  if [[ -z "${REPO_DIR:-}" || ! -d "$REPO_DIR" ]]; then
+    detect_repo_root
+  fi
   echo "Building the BlobeVM image from $REPO_DIR ..."
   docker build -t blobevm:latest "$REPO_DIR"
 }
@@ -712,6 +716,10 @@ main() {
         FORCE_HTTPS=0
       fi
       BASE_PATH=${BASE_PATH:-/vm}
+      # Ensure REPO_DIR points to a real directory (avoid stale temp paths)
+      if [[ -z "${REPO_DIR:-}" || ! -d "$REPO_DIR" ]]; then
+        detect_repo_root
+      fi
     else
       prompt_config
       # User chose to reconfigure: clear any previously loaded derived values so we re-detect ports/TLS
