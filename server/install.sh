@@ -853,6 +853,12 @@ YAML
 
   if [[ "$ENABLE_DASHBOARD" -eq 1 ]]; then
     echo "Deploying BlobeVM web dashboard service..."
+    # Always remove and repull dashboard container/image to ensure freshness
+    echo "[dashboard] Removing old dashboard container/image (if any)..."
+    (cd /opt/blobe-vm/traefik && docker compose rm -sf dashboard || true)
+    docker image rm -f ghcr.io/library/python:3.11-slim 2>/dev/null || true
+    echo "[dashboard] Pulling latest dashboard base image..."
+    docker pull ghcr.io/library/python:3.11-slim
     # Append dashboard service to compose file
     cat >> /opt/blobe-vm/traefik/docker-compose.yml <<'DASH'
   dashboard:
@@ -925,10 +931,15 @@ deploy_dashboard_direct() {
     echo "Unable to determine docker CLI path for dashboard deployment." >&2
     return 1
   fi
-  # Remove any existing container to avoid conflicts
+  # Always remove and repull dashboard container/image to ensure freshness
   if docker ps -a --format '{{.Names}}' | grep -qx "blobedash"; then
+    echo "[dashboard] Removing old dashboard container..."
     docker rm -f blobedash >/dev/null 2>&1 || true
   fi
+  echo "[dashboard] Removing old dashboard image (if any)..."
+  docker image rm -f ghcr.io/library/python:3.11-slim 2>/dev/null || true
+  echo "[dashboard] Pulling latest dashboard base image..."
+  docker pull ghcr.io/library/python:3.11-slim
   docker run -d --name blobedash --restart unless-stopped \
     -p "${DASHBOARD_PORT}:5000" \
     -v /opt/blobe-vm:/opt/blobe-vm \
