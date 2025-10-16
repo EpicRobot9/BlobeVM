@@ -59,6 +59,10 @@ normalize_bool() {
 }
 
 apply_env_overrides() {
+  # Default: disable Traefik unless explicitly set
+  if [[ -z "${BLOBEVM_NO_TRAEFIK:-}" ]]; then
+    NO_TRAEFIK=1
+  fi
   BLOBEVM_DOMAIN="${BLOBEVM_DOMAIN:-${BLOBEVM_INSTALL_DOMAIN:-}}"
   BLOBEVM_EMAIL="${BLOBEVM_EMAIL:-${BLOBEVM_INSTALL_EMAIL:-}}"
 

@@ -179,19 +179,38 @@ run_main_installer() {
   exec bash "$INSTALLER_PATH" "${INSTALLER_ARGS[@]}"
 }
 
+
 parse_args "$@"
 reexec_as_root "$@"
 ensure_logfile
 describe_plan
 confirm_or_exit
-if [[ $DRY_RUN -eq 1 ]]; then
-  warn "Dry run: no changes were made."
-  exit 0
-fi
+
+# Default: disable Traefik unless explicitly set
+export BLOBEVM_NO_TRAEFIK="${BLOBEVM_NO_TRAEFIK:-1}"
 
 install_git_if_missing
 need_cmd curl || warn "curl not detected; downstream installer may install it."
 need_cmd wget || warn "wget not detected; downstream installer may install it."
 clone_or_update_repo
 ensure_installer_present
+
+# Detect code changes: compare repo HEAD to installed files
+CHANGED=0
+if [[ -d "$INSTALL_ROOT" && -d "$REPO_DIR/.git" ]]; then
+  REPO_HASH=$(cd "$REPO_DIR" && git rev-parse HEAD)
+  INST_HASH_FILE="$INSTALL_ROOT/.last_install_hash"
+  LAST_HASH=""
+  [[ -f "$INST_HASH_FILE" ]] && LAST_HASH=$(cat "$INST_HASH_FILE")
+  if [[ "$REPO_HASH" != "$LAST_HASH" ]]; then
+    CHANGED=1
+    echo "$REPO_HASH" > "$INST_HASH_FILE"
+  fi
+fi
+
+if [[ $DRY_RUN -eq 1 && $CHANGED -eq 0 ]]; then
+  warn "Dry run: no changes were made."
+  exit 0
+fi
+
 run_main_installer
