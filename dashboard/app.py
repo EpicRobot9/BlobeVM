@@ -414,12 +414,17 @@ def manager_json_list():
             except Exception:
                 pass
         if instances:
-            # In direct mode, override URL with host:published-port to avoid container IPs
+            # In direct mode, override URL with host:published-port (or manager port) to avoid container IPs
             if _is_direct_mode():
                 host = _request_host()
                 for it in instances:
                     cname = f"blobevm_{it['name']}"
                     hp = _vm_host_port(cname)
+                    if not hp:
+                        try:
+                            hp = subprocess.check_output([MANAGER, 'port', it['name']], text=True).strip()
+                        except Exception:
+                            hp = ''
                     if hp and host:
                         it['url'] = f"http://{host}:{hp}/"
             return instances
@@ -454,12 +459,17 @@ def manager_json_list():
             status = '(unknown)'
         # In direct mode, compute URL using host published port
         if _is_direct_mode():
-            hp = _vm_host_port(cname)
             host = _request_host()
+            hp = _vm_host_port(cname)
+            if not hp:
+                try:
+                    hp = subprocess.check_output([MANAGER, 'port', name], text=True).strip()
+                except Exception:
+                    hp = ''
             if hp and host:
                 url = f"http://{host}:{hp}/"
             else:
-                # Fallback to manager per-VM URL
+                # Fallback to manager per-VM URL (may be container IP, but last resort)
                 try:
                     url = subprocess.check_output([MANAGER, 'url', name], text=True).strip()
                 except Exception:
