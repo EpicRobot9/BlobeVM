@@ -34,53 +34,74 @@ TEMPLATE = """
     <span id=domainip style="margin-left:1.5rem"></span>
 </div>
 <script>
+// Debug helpers: enable extra logs with ?debug=1
+const DEBUG = new URLSearchParams(window.location.search).has('debug');
+const dbg = (...args) => { if (DEBUG) console.log('[BLOBEDASH]', ...args); };
+window.addEventListener('error', (e) => console.error('[BLOBEDASH] window error', e.message, e.error || e));
+window.addEventListener('unhandledrejection', (e) => console.error('[BLOBEDASH] unhandledrejection', e.reason));
+
 let mergedMode = false, basePath = '/vm', customDomain = '', dashPort = '', dashIp = '';
 async function load(){
-    const [r, r2] = await Promise.all([
-        fetch('/dashboard/api/list'),
-        fetch('/dashboard/api/modeinfo')
-    ]);
-    const data = await r.json();
-    const info = await r2.json();
-    mergedMode = info.merged;
-    basePath = info.basePath||'/vm';
-    customDomain = info.domain||'';
-    dashPort = info.dashPort||'';
-    dashIp = info.ip||'';
-    document.getElementById('customdomain').value = customDomain;
-    document.getElementById('domainip').textContent = `Point domain to: ${dashIp}`;
-    const tb=document.getElementById('tbody');
-    tb.innerHTML='';
-    data.instances.forEach(i=>{
-        const tr=document.createElement('tr');
-        const dot = statusDot(i.status);
-        let portOrPath = '';
-        let openUrl = i.url;
-        if(mergedMode){
-            // merged: show /vm/<name> or domain
-            portOrPath = `${basePath}/${i.name}`;
-            if(customDomain){
-                openUrl = `http://${customDomain}${basePath}/${i.name}/`;
-            }
-        }else{
-            // direct: show port and build link using current host
-            const m = i.url && i.url.match(/:(\d+)/);
-            portOrPath = m ? m[1] : '';
-            if (portOrPath) {
-                const proto = window.location.protocol;
-                const host = window.location.hostname;
-                openUrl = `${proto}//${host}:${portOrPath}/`;
-            }
+    try {
+        const [r, r2] = await Promise.all([
+            fetch('/dashboard/api/list'),
+            fetch('/dashboard/api/modeinfo')
+        ]);
+        if (!r.ok) {
+            console.error('[BLOBEDASH] /dashboard/api/list HTTP', r.status);
+            return;
         }
-        tr.innerHTML=`<td>${i.name}</td><td>${dot}<span class=muted>${i.status||''}</span></td><td>${portOrPath}</td><td><a href="${openUrl}" target=_blank>${openUrl}</a></td>`+
-         `<td>`+
-         `<button onclick=window.open('${openUrl}','_blank')>Open</button>`+
-         `<button onclick=act('start','${i.name}')>Start</button>`+
-         `<button onclick=act('stop','${i.name}')>Stop</button>`+
-         `<button onclick=delvm('${i.name}') class="btn-red">Delete</button>`+
-         `</td>`;
-        tb.appendChild(tr);
-    });
+        if (!r2.ok) {
+            console.error('[BLOBEDASH] /dashboard/api/modeinfo HTTP', r2.status);
+            return;
+        }
+        const data = await r.json().catch(err => { console.error('[BLOBEDASH] list JSON error', err); return {instances:[]}; });
+        const info = await r2.json().catch(err => { console.error('[BLOBEDASH] modeinfo JSON error', err); return {}; });
+        dbg('modeinfo', info);
+        dbg('instances', data.instances);
+        mergedMode = !!info.merged;
+        basePath = info.basePath||'/vm';
+        customDomain = info.domain||'';
+        dashPort = info.dashPort||'';
+        dashIp = info.ip||'';
+        document.getElementById('customdomain').value = customDomain;
+        document.getElementById('domainip').textContent = `Point domain to: ${dashIp}`;
+        const tb=document.getElementById('tbody');
+        tb.innerHTML='';
+        (data.instances||[]).forEach(i=>{
+            const tr=document.createElement('tr');
+            const dot = statusDot(i.status);
+            let portOrPath = '';
+            let openUrl = i.url;
+            if(mergedMode){
+                // merged: show /vm/<name> or domain
+                portOrPath = `${basePath}/${i.name}`;
+                if(customDomain){
+                    openUrl = `http://${customDomain}${basePath}/${i.name}/`;
+                }
+            }else{
+                // direct: show port and build link using current host
+                const m = i.url && i.url.match(/:(\d+)/);
+                portOrPath = m ? m[1] : '';
+                if (portOrPath) {
+                    const proto = window.location.protocol;
+                    const host = window.location.hostname;
+                    openUrl = `${proto}//${host}:${portOrPath}/`;
+                }
+            }
+            dbg('row', { name: i.name, status: i.status, rawUrl: i.url, mergedMode, portOrPath, openUrl });
+            tr.innerHTML=`<td>${i.name}</td><td>${dot}<span class=muted>${i.status||''}</span></td><td>${portOrPath}</td><td><a href="${openUrl}" target=_blank>${openUrl}</a></td>`+
+             `<td>`+
+             `<button onclick=window.open('${openUrl}','_blank')>Open</button>`+
+             `<button onclick=act('start','${i.name}')>Start</button>`+
+             `<button onclick=act('stop','${i.name}')>Stop</button>`+
+             `<button onclick=delvm('${i.name}') class="btn-red">Delete</button>`+
+             `</td>`;
+            tb.appendChild(tr);
+        });
+    } catch (err) {
+        console.error('[BLOBEDASH] load() error', err);
+    }
 }
 async function setCustomDomain(){
     const dom = document.getElementById('customdomain').value.trim();
@@ -143,6 +164,7 @@ async function enableSinglePort(){
     const p=document.getElementById('spport').value||'20002';
     const r=await fetch('/dashboard/api/enable-single-port',{method:'post',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:`port=${encodeURIComponent(p)}`});
     const j=await r.json().catch(()=>({}));
+    dbg('enable-single-port', {port: p, response: j});
     alert((j && j.message) || 'Requested. The dashboard may move to the new port soon.');
 }
 async function disableSinglePort(){
@@ -150,6 +172,7 @@ async function disableSinglePort(){
     const body=p?`port=${encodeURIComponent(p)}`:'';
     const r=await fetch('/dashboard/api/disable-single-port',{method:'post',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});
     const j=await r.json().catch(()=>({}));
+    dbg('disable-single-port', {port: p, response: j});
     alert((j && (j.message||j.error)) || 'Requested. The dashboard may move to a high port soon.');
 }
 load();setInterval(load,8000);
