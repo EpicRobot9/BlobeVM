@@ -101,12 +101,14 @@ async function load(){
                     openUrl = `http://${customDomain}${basePath}/${i.name}/`;
                 }
             }else{
-                // direct: show port; prefer manager/computed URL; fallback to current host
-                const m = i.url && i.url.match(/:(\d+)/);
+                // direct: show port; always build link using current browser host
+                let m = i.url && i.url.match(/:(\d+)/);
                 portOrPath = m ? m[1] : '';
-                if (i.url) {
-                    openUrl = i.url;
-                } else if (portOrPath) {
+                if (!portOrPath && i.status) {
+                    const ms = i.status.match(/\(port\s+(\d+)\)/i);
+                    if (ms) portOrPath = ms[1];
+                }
+                if (portOrPath) {
                     const proto = window.location.protocol;
                     const host = window.location.hostname;
                     openUrl = `${proto}//${host}:${portOrPath}/`;
