@@ -1123,8 +1123,33 @@ main() {
       # Fallback to one-shot docker run if systemd missing for any reason
       deploy_dashboard_direct || true
     fi
-    # Re-write .env to include DASHBOARD_PORT if assigned
+    # Load DASHBOARD_PORT from .env if assigned by ensure script
+    if [[ -f /opt/blobe-vm/.env ]]; then
+      # shellcheck disable=SC1091
+      set +u
+      while IFS='=' read -r k v; do
+        [[ -z "$k" || "$k" =~ ^# ]] && continue
+        v="${v%\'}"; v="${v#\'}"; v="${v%\"}"; v="${v#\"}"
+        if [[ "$k" == "DASHBOARD_PORT" ]]; then export DASHBOARD_PORT="$v"; fi
+      done < /opt/blobe-vm/.env
+      set -u
+    fi
+    # Persist current env back to .env (now including DASHBOARD_PORT when present)
     install_manager
+
+    # Migrate existing instances to direct mode: assign ports automatically
+    echo "Migrating existing VMs to direct mode (assigning high ports)..."
+    shopt -s nullglob
+    for d in /opt/blobe-vm/instances/*; do
+      [[ -d "$d" ]] || continue
+      n="$(basename "$d")"
+      cname="blobevm_${n}"
+      # Remove old container if present to trigger port-publish recreation
+      if docker ps -a --format '{{.Names}}' | grep -qx "$cname"; then
+        docker rm -f "$cname" >/dev/null 2>&1 || true
+      fi
+      blobe-vm-manager start "$n" || true
+    done
   fi
   # If reusing external Traefik while TLS is disabled, warn about possible redirect
   warn_if_external_redirect || true

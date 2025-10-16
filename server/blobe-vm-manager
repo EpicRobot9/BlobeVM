@@ -116,7 +116,13 @@ vm_url() {
     local host_port
     host_port="$(get_meta "$name" host_port || true)"
     if [[ -z "$host_port" ]]; then
-      echo "<port-pending>"; return
+      # Assign on demand
+      host_port="$(find_free_port "${DIRECT_PORT_START}" 1000 || true)"
+      if [[ -n "$host_port" ]]; then
+        set_meta "$name" host_port "$host_port"
+      else
+        echo "<port-pending>"; return
+      fi
     fi
     local host
     if [[ -n "$host_override" ]]; then
@@ -495,7 +501,7 @@ recreate_container() {
   if [[ "${NO_TRAEFIK}" -eq 1 ]]; then
     local hp
     hp="$(get_meta "$name" host_port || true)"
-    if [[ -n "$hp" && $(port_in_use "$hp"; echo $?) -eq 0 ]]; then
+    if [[ -z "$hp" || $(port_in_use "$hp"; echo $?) -eq 0 ]]; then
       local np
       np="$(find_free_port "${DIRECT_PORT_START}" 1000 || true)"
       [[ -n "$np" ]] && set_meta "$name" host_port "$np"
