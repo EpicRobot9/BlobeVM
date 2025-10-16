@@ -225,7 +225,7 @@ common_labels() {
         "--label=traefik.http.routers.${name}-path-secure.tls.certresolver=myresolver"
       )
     fi
-  elif [[ -n "${BLOBEVM_DOMAIN:-}" ]]; then
+  elif [[ -n "${BLOBEVM_DOMAIN:-}" && "${MERGED_MODE:-0}" -ne 1 ]]; then
     # Domain mode: host router + path router
     local host="${name}.${BLOBEVM_DOMAIN}"
     local base_path="${BASE_PATH:-/vm}"; [[ "$base_path" != /* ]] && base_path="/$base_path"; base_path="${base_path%/}"
@@ -312,6 +312,11 @@ run_container() {
       else
         subfolder="${base_path}/${name}/"
       fi
+      [[ "$subfolder" != /* ]] && subfolder="/$subfolder"
+    elif [[ "${MERGED_MODE:-0}" -eq 1 ]]; then
+      # In merged single-port mode, always serve under base path for consistency
+      local base_path="${BASE_PATH:-/vm}"; [[ "$base_path" != /* ]] && base_path="/$base_path"; base_path="${base_path%/}"
+      subfolder="${base_path}/${name}/"
       [[ "$subfolder" != /* ]] && subfolder="/$subfolder"
     fi
   fi

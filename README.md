@@ -265,6 +265,7 @@ The web dashboard provides a modern UI for managing VMs and switching routing mo
 - **Create, Start, Stop, Delete VMs**: One-click controls for lifecycle management.
 - **Open buttons**: Each VM row has an "Open" button that adapts to the current routing mode:
   - **Merged mode**: VMs are available at `/vm/<name>` on a single port (e.g., `http://your-ip:20002/vm/alpha`).
+    In merged mode, even if you set a domain, VM routes are path-based under the shared port to avoid 404s on fresh containers.
   - **Direct mode**: Each VM is exposed on a unique high port (e.g., `http://your-ip:20017/`).
 - **Port/Path display**: Shows the port (direct mode) or merged path (merged mode) for each VM.
 - **Status dot**: Green (running), red (stopped/exited), gray (unknown).

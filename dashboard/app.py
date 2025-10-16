@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os, json, subprocess, shlex, base64, socket, threading, time
+from urllib import request as urlrequest, error as urlerror
 from functools import wraps
 from flask import Flask, jsonify, request, abort, send_from_directory, render_template_string, Response
 
@@ -95,6 +96,8 @@ async function load(){
              `<button onclick=window.open('${openUrl}','_blank')>Open</button>`+
              `<button onclick=act('start','${i.name}')>Start</button>`+
              `<button onclick=act('stop','${i.name}')>Stop</button>`+
+             `<button onclick=act('restart','${i.name}')>Restart</button>`+
+             `<button title="Shift-click for no-fix" onclick=checkVM(event,'${i.name}') class="btn-gray">Check</button>`+
              `<button onclick=delvm('${i.name}') class="btn-red">Delete</button>`+
              `</td>`;
             tb.appendChild(tr);
@@ -149,6 +152,22 @@ async function disableSinglePort(){
     const j=await r.json().catch(()=>({}));
     dbg('disable-single-port', {port: p, response: j});
     alert((j && (j.message||j.error)) || 'Requested. The dashboard may move to a high port soon.');
+}
+async function checkVM(ev,name){
+    const nofix = ev && ev.shiftKey ? 1 : 0;
+    try{
+        const r = await fetch(`/dashboard/api/check/${encodeURIComponent(name)}`,{method:'post',headers:{'Content-Type':'application/x-www-form-urlencoded'},body: nofix? 'nofix=1' : ''});
+        const j = await r.json().catch(()=>({}));
+        dbg('check', name, j);
+        if(j && j.ok){
+            alert(`OK ${j.code} - ${j.url}${j.fixed? ' (auto-resolved)': ''}`);
+        }else{
+            alert(`FAIL ${j && j.code ? j.code : ''} - ${(j && j.url) || ''}\n${(j && j.output) || ''}`);
+        }
+    }catch(e){
+        alert('Check error: '+e);
+    }
+    load();
 }
 load();setInterval(load,8000);
 </script>
@@ -207,6 +226,24 @@ def _vm_host_port(cname: str) -> str:
     except Exception:
         pass
     return ''
+
+def _build_vm_url(name: str) -> str:
+    """Best-effort VM URL appropriate for the current mode, for browser-origin host.
+    In direct mode, combine request host with published port. In merged mode, use manager url.
+    """
+    if _is_direct_mode():
+        host = _request_host()
+        if not host:
+            return ''
+        cname = f'blobevm_{name}'
+        hp = _vm_host_port(cname)
+        if hp:
+            return f'http://{host}:{hp}/'
+    # Fallback to manager-provided URL
+    try:
+        return subprocess.check_output([MANAGER, 'url', name], text=True).strip()
+    except Exception:
+        return ''
 
 def manager_json_list():
     """Return a list of instances with best-effort status and URL.
@@ -366,6 +403,7 @@ def _enable_single_port(port: int):
         'TRAEFIK_NETWORK': 'proxy',
         'ENABLE_DASHBOARD': '1',
         'BASE_PATH': _read_env().get('BASE_PATH', '/vm'),
+        'MERGED_MODE': '1',
     })
 
     # Ensure network exists
@@ -432,6 +470,7 @@ def _disable_single_port(dash_port: int | None):
         'NO_TRAEFIK': '1',
         'ENABLE_DASHBOARD': '1',
         'DASHBOARD_PORT': str(dash_port) if dash_port else env.get('DASHBOARD_PORT',''),
+        'MERGED_MODE': '0',
     }
     _write_env_kv(updates)
 
@@ -534,6 +573,61 @@ def api_stop(name):
 def api_delete(name):
     subprocess.check_call([MANAGER, 'delete', name])
     return jsonify({'ok': True})
+
+@app.post('/dashboard/api/restart/<name>')
+@auth_required
+def api_restart(name):
+    try:
+        r = subprocess.run([MANAGER, 'restart', name], capture_output=True, text=True)
+        ok = (r.returncode == 0)
+        return jsonify({'ok': ok, 'output': r.stdout.strip(), 'error': r.stderr.strip()})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+def _http_check(url: str, timeout: float = 8.0) -> int:
+    if not url:
+        return 0
+    # Ensure trailing slash to satisfy path prefix routers
+    if not url.endswith('/'):
+        url = url + '/'
+    req = urlrequest.Request(url, method='HEAD')
+    try:
+        with urlrequest.urlopen(req, timeout=timeout) as resp:
+            return int(getattr(resp, 'status', 200))
+    except urlerror.HTTPError as e:
+        try:
+            return int(e.code)
+        except Exception:
+            return 0
+    except Exception:
+        return 0
+
+@app.post('/dashboard/api/check/<name>')
+@auth_required
+def api_check(name):
+    nofix = request.values.get('nofix') in ('1','true','yes','on')
+    url = _build_vm_url(name)
+    code = _http_check(url)
+    if code and 200 <= code < 400:
+        return jsonify({'ok': True, 'code': code, 'url': url, 'fixed': False})
+    if nofix:
+        return jsonify({'ok': False, 'code': code, 'url': url, 'output': 'no-fix mode'}), 400
+    # Attempt auto-resolve: recreate container and retry briefly
+    fixed = False
+    try:
+        cname = f'blobevm_{name}'
+        subprocess.run(['docker', 'rm', '-f', cname], capture_output=True)
+        subprocess.run([MANAGER, 'start', name], capture_output=True)
+        for _ in range(8):
+            time.sleep(1)
+            url = _build_vm_url(name)
+            code = _http_check(url)
+            if code and 200 <= code < 400:
+                fixed = True
+                break
+    except Exception:
+        pass
+    return jsonify({'ok': (code and 200 <= code < 400), 'code': code or 0, 'url': url, 'fixed': fixed})
 
 @app.post('/dashboard/api/enable-single-port')
 @auth_required
