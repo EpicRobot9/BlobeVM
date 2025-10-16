@@ -81,6 +81,7 @@ docker run -d --name "$NAME" --restart unless-stopped \
   -p "${DASHBOARD_PORT}:5000" \
   -v "$STATE_DIR:/opt/blobe-vm" \
   -v /usr/local/bin/blobe-vm-manager:/usr/local/bin/blobe-vm-manager:ro \
+  -v /usr/bin/docker:/usr/bin/docker:ro \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v "$APP_PATH:/app/app.py:ro" \
   -e BLOBEDASH_USER="${BLOBEDASH_USER:-}" \

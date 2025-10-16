@@ -236,3 +236,35 @@ sudo systemctl stop blobedash
 ```
 blobe-vm-manager nuke   # Removes all VMs, data, Traefik stack, and CLI (prompts for confirmation)
 ```
+
+# BlobeVM Dashboard Features
+
+The web dashboard provides a modern UI for managing VMs and switching routing modes. Key features:
+
+- **Auto-refresh VM list**: See all VMs, their status (with color dot), and quick actions.
+- **Create, Start, Stop, Delete VMs**: One-click controls for lifecycle management.
+- **Open buttons**: Each VM row has an "Open" button that adapts to the current routing mode:
+  - **Merged mode**: VMs are available at `/vm/<name>` on a single port (e.g., `http://your-ip:20002/vm/alpha`).
+  - **Direct mode**: Each VM is exposed on a unique high port (e.g., `http://your-ip:20017/`).
+- **Port/Path display**: Shows the port (direct mode) or merged path (merged mode) for each VM.
+- **Status dot**: Green (running), red (stopped/exited), gray (unknown).
+- **Toggle routing modes**:
+  - **Enable single-port (merged) mode**: Enter a port (e.g., 20002) and click to route all VMs and the dashboard via Traefik on that port.
+  - **Disable single-port (revert to direct)**: Optionally pick a dashboard port, then click to switch back to direct mode (each VM gets a high port).
+- **Custom domain for merged mode**:
+  - Enter your domain (e.g., `vms.example.com`) and the dashboard will show the IP to point your DNS A record to.
+  - All VM links and "Open" buttons will use your domain if set.
+
+## Example workflow
+
+1. **Switch to merged mode**: Enter a port (e.g., 20002) and click "Enable single-port mode". All VMs and the dashboard will be available at that port.
+2. **Set your domain**: Enter your domain in the "Custom domain" field. The dashboard will show the IP to point your DNS A record to. Update your DNS provider accordingly.
+3. **Open VMs**: Use the "Open" button for each VM. In merged mode, links use your domain if set.
+4. **Revert to direct mode**: Click "Disable single-port (direct mode)" to switch back. Each VM will be available on its own high port.
+
+## Troubleshooting
+- If a port is busy, the dashboard will prompt you to choose another.
+- DNS changes may take time to propagate. Use the IP shown in the dashboard for your A record.
+- You can always switch modes and update your domain as needed.
+
+---
