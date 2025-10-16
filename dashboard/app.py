@@ -423,7 +423,17 @@ def api_create():
     if not name:
         return jsonify({'ok': False, 'error': 'No name provided'}), 400
     try:
-        subprocess.check_call([MANAGER, 'create', name])
+        result = subprocess.run([MANAGER, 'create', name], capture_output=True, text=True)
+        if result.returncode == 125:
+            # Docker exit 125: container name conflict or similar
+            msg = result.stderr.strip() or 'VM already exists or container conflict.'
+            # Try to start anyway
+            subprocess.run([MANAGER, 'start', name], capture_output=True)
+            return jsonify({'ok': False, 'error': msg})
+        elif result.returncode != 0:
+            return jsonify({'ok': False, 'error': result.stderr.strip() or 'Error creating VM.'}), 500
+        # Auto-start after creation
+        subprocess.run([MANAGER, 'start', name], capture_output=True)
     except FileNotFoundError:
         return jsonify({'ok': False, 'error': 'blobe-vm-manager not found in container. Make sure it is installed and mounted.'}), 500
     except Exception as e:
