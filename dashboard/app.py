@@ -28,6 +28,13 @@ TEMPLATE = """
 <button class="btn-gray" onclick="disableSinglePort()">Disable single-port (direct mode)</button>
 </div>
 <table><thead><tr><th>Name</th><th>Status</th><th>Port/Path</th><th>URL</th><th>Actions</th></tr></thead><tbody id=tbody></tbody></table>
+<div style="margin:1rem 0 2rem 0">
+        <button onclick="bulkRecreate()">Recreate ALL VMs</button>
+        <button onclick="bulkRebuildAll()">Rebuild ALL VMs</button>
+        <button onclick="bulkUpdateAndRebuild()">Update & Rebuild ALL VMs</button>
+        <button onclick="bulkDeleteAll()" class="btn-red">Delete ALL VMs</button>
+        <span class="muted" style="margin-left: .5rem">Shift+Click Check for report-only (no auto-fix)</span>
+    </div>
 <div style="margin:1.5rem 0 .5rem 0">
     <span class=badge>Custom domain (merged mode):</span>
     <input id=customdomain placeholder="e.g. vms.example.com" style="width:220px" />
@@ -42,11 +49,14 @@ window.addEventListener('error', (e) => console.error('[BLOBEDASH] window error'
 window.addEventListener('unhandledrejection', (e) => console.error('[BLOBEDASH] unhandledrejection', e.reason));
 
 let mergedMode = false, basePath = '/vm', customDomain = '', dashPort = '', dashIp = '';
+let vms = [];
+let availableApps = [];
 async function load(){
     try {
-        const [r, r2] = await Promise.all([
+        const [r, r2, r3] = await Promise.all([
             fetch('/dashboard/api/list'),
-            fetch('/dashboard/api/modeinfo')
+            fetch('/dashboard/api/modeinfo'),
+            fetch('/dashboard/api/apps').catch(()=>({ok:false}))
         ]);
         if (!r.ok) {
             console.error('[BLOBEDASH] /dashboard/api/list HTTP', r.status);
@@ -58,6 +68,10 @@ async function load(){
         }
         const data = await r.json().catch(err => { console.error('[BLOBEDASH] list JSON error', err); return {instances:[]}; });
         const info = await r2.json().catch(err => { console.error('[BLOBEDASH] modeinfo JSON error', err); return {}; });
+        if (r3 && r3.ok) {
+            const apps = await r3.json().catch(()=>({apps:[]}));
+            availableApps = apps.apps || [];
+        }
         dbg('modeinfo', info);
         dbg('instances', data.instances);
         mergedMode = !!info.merged;
@@ -67,9 +81,11 @@ async function load(){
         dashIp = info.ip||'';
         document.getElementById('customdomain').value = customDomain;
         document.getElementById('domainip').textContent = `Point domain to: ${dashIp}`;
-        const tb=document.getElementById('tbody');
+    vms = data.instances || [];
+    const tb=document.getElementById('tbody');
         tb.innerHTML='';
-        (data.instances||[]).forEach(i=>{
+    const appOpts = (availableApps||[]).map(a=>`<option value="${a}">${a}</option>`).join('');
+    vms.forEach(i=>{
             const tr=document.createElement('tr');
             const dot = statusDot(i.status);
             let portOrPath = '';
@@ -98,7 +114,143 @@ async function load(){
              `<button onclick=act('stop','${i.name}')>Stop</button>`+
              `<button onclick=act('restart','${i.name}')>Restart</button>`+
              `<button title="Shift-click for no-fix" onclick=checkVM(event,'${i.name}') class="btn-gray">Check</button>`+
+             `<button onclick=updateVM('${i.name}') class="btn-gray">Update</button>`+
+             `<button onclick=installChrome('${i.name}')>Install Chrome</button>`+
+             `<select id="appsel-${i.name}" class="btn-gray" style="background:#1f2937;color:#fff;padding:.35rem .4rem;margin-left:.25rem"><option value="">App…</option>${appOpts}</select>`+
+             `<button onclick=installSelectedApp('${i.name}')>Install</button>`+
+             `<button onclick=appStatusSelected('${i.name}') class="btn-gray">Status</button>`+
+             `<button onclick=recreateVM('${i.name}')>Recreate</button>`+
+             `<button onclick=rebuildVM('${i.name}')>Rebuild</button>`+
              `<button onclick=delvm('${i.name}') class="btn-red">Delete</button>`+
+             `</td>`;
+function recreateVM(name){
+    if(!confirm('Recreate VM '+name+'?'))return;
+    fetch('/dashboard/api/recreate',{
+        method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({names:[name]})
+    }).then(load);
+}
+function rebuildVM(name){
+    if(!confirm('Rebuild (image + recreate) VM '+name+'?'))return;
+    fetch('/dashboard/api/rebuild-vms',{
+        method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({names:[name]})
+    }).then(load);
+}
+async function updateVM(name){
+    if(!confirm('Update packages inside VM '+name+'?'))return;
+    try{
+        const r = await fetch(`/dashboard/api/update-vm/${encodeURIComponent(name)}`,{method:'POST'});
+        const j = await r.json().catch(()=>({}));
+        if(j && j.ok){
+            alert('Update completed.');
+        }else{
+            alert('Update failed:\n'+((j && (j.error||j.output))||'unknown error'));
+        }
+    }catch(e){
+        alert('Update error: '+e);
+    }
+    load();
+}
+async function installChrome(name){
+    if(!confirm('Install Google Chrome in VM '+name+'?'))return;
+    try{
+        const r = await fetch(`/dashboard/api/app-install/${encodeURIComponent(name)}/chrome`,{method:'POST'});
+        const j = await r.json().catch(()=>({}));
+        if(j && j.ok){
+            alert('Chrome installation requested.');
+        }else{
+            alert('Chrome install failed:\n'+((j && (j.error||j.output))||'unknown error'));
+        }
+    }catch(e){
+        alert('Install error: '+e);
+    }
+    load();
+}
+function promptAppName(){
+    let msg = 'Enter app name to use. Available: ' + (availableApps.join(', ')||'(none found)');
+    const v = prompt(msg, availableApps[0]||'');
+    return v ? v.trim() : '';
+}
+async function promptInstallApp(name){
+    const app = promptAppName();
+    if(!app) return;
+    await installApp(name, app);
+}
+async function promptAppStatus(name){
+    const app = promptAppName();
+    if(!app) return;
+    try{
+        const r = await fetch(`/dashboard/api/app-status/${encodeURIComponent(name)}/${encodeURIComponent(app)}`);
+        const j = await r.json().catch(()=>({}));
+        if(j && j.ok){
+            alert(`${app} status: ${j.status||'installed'}`);
+        }else{
+            alert(`${app} not installed or unknown.`);
+        }
+    }catch(e){
+        alert('Status error: '+e);
+    }
+}
+async function installApp(name, app){
+    try{
+        const r = await fetch(`/dashboard/api/app-install/${encodeURIComponent(name)}/${encodeURIComponent(app)}`,{method:'POST'});
+        const j = await r.json().catch(()=>({}));
+        if(j && j.ok){
+            alert(`${app} installation requested.`);
+        }else{
+            alert(`${app} install failed:\n`+((j && (j.error||j.output))||'unknown error'));
+        }
+    }catch(e){
+        alert('Install error: '+e);
+    }
+    load();
+}
+function selectedApp(name){
+    const el = document.getElementById(`appsel-${name}`);
+    return (el && el.value ? el.value.trim() : '');
+}
+async function installSelectedApp(name){
+    const app = selectedApp(name);
+    if(!app){ alert('Select an app first.'); return; }
+    await installApp(name, app);
+}
+async function appStatusSelected(name){
+    const app = selectedApp(name);
+    if(!app){ alert('Select an app first.'); return; }
+    try{
+        const r = await fetch(`/dashboard/api/app-status/${encodeURIComponent(name)}/${encodeURIComponent(app)}`);
+        const j = await r.json().catch(()=>({}));
+        if(j && j.ok){
+            alert(`${app} status: ${j.status||'installed'}`);
+        }else{
+            alert(`${app} not installed or unknown.`);
+        }
+    }catch(e){
+        alert('Status error: '+e);
+    }
+}
+function bulkRecreate(){
+    if(!confirm('Recreate ALL VMs?'))return;
+    fetch('/dashboard/api/recreate',{
+        method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({names:vms.map(x=>x.name)})
+    }).then(load);
+}
+function bulkRebuildAll(){
+    if(!confirm('Rebuild (image + recreate) ALL VMs?'))return;
+    fetch('/dashboard/api/rebuild-vms',{
+        method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({names:vms.map(x=>x.name)})
+    }).then(load);
+}
+function bulkUpdateAndRebuild(){
+    if(!confirm('Update repo, rebuild image, and recreate ALL VMs?'))return;
+    fetch('/dashboard/api/update-and-rebuild',{
+        method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({names:vms.map(x=>x.name)})
+    }).then(load);
+}
+function bulkDeleteAll(){
+    var conf=prompt('Delete ALL VMs? This cannot be undone. Type DELETE to confirm.');
+    if(conf!=='DELETE')return;
+    fetch('/dashboard/api/delete-all-instances',{method:'POST'}).then(load);
+}
              `</td>`;
             tb.appendChild(tr);
         });
@@ -583,6 +735,101 @@ def api_restart(name):
         return jsonify({'ok': ok, 'output': r.stdout.strip(), 'error': r.stderr.strip()})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
+
+# Bulk/targeted VM actions
+@app.post('/dashboard/api/recreate')
+@auth_required
+def api_recreate():
+    names = request.json.get('names', [])
+    if not names:
+        return jsonify({'error': 'No VM names provided'}), 400
+    try:
+        result = subprocess.run([MANAGER, 'recreate', *names], capture_output=True, text=True)
+        ok = (result.returncode == 0)
+        return jsonify({'ok': ok, 'output': result.stdout.strip(), 'error': result.stderr.strip()})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+@app.post('/dashboard/api/rebuild-vms')
+@auth_required
+def api_rebuild_vms():
+    names = request.json.get('names', [])
+    if not names:
+        return jsonify({'error': 'No VM names provided'}), 400
+    try:
+        result = subprocess.run([MANAGER, 'rebuild-vms', *names], capture_output=True, text=True)
+        ok = (result.returncode == 0)
+        return jsonify({'ok': ok, 'output': result.stdout.strip(), 'error': result.stderr.strip()})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+@app.post('/dashboard/api/update-and-rebuild')
+@auth_required
+def api_update_and_rebuild():
+    names = request.json.get('names', [])
+    try:
+        args = [MANAGER, 'update-and-rebuild'] + names
+        result = subprocess.run(args, capture_output=True, text=True)
+        ok = (result.returncode == 0)
+        return jsonify({'ok': ok, 'output': result.stdout.strip(), 'error': result.stderr.strip()})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+@app.post('/dashboard/api/delete-all-instances')
+@auth_required
+def api_delete_all_instances():
+    try:
+        result = subprocess.run([MANAGER, 'delete-all-instances'], capture_output=True, text=True)
+        ok = (result.returncode == 0)
+        return jsonify({'ok': ok, 'output': result.stdout.strip(), 'error': result.stderr.strip()})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+@app.post('/dashboard/api/update-vm/<name>')
+@auth_required
+def api_update_vm(name):
+    try:
+        r = subprocess.run([MANAGER, 'update-vm', name], capture_output=True, text=True)
+        ok = (r.returncode == 0)
+        return jsonify({'ok': ok, 'output': r.stdout.strip(), 'error': r.stderr.strip()})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+@app.post('/dashboard/api/app-install/<name>/<app>')
+@auth_required
+def api_app_install(name, app):
+    try:
+        r = subprocess.run([MANAGER, 'app-install', name, app], capture_output=True, text=True)
+        ok = (r.returncode == 0)
+        return jsonify({'ok': ok, 'output': r.stdout.strip(), 'error': r.stderr.strip()})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+@app.get('/dashboard/api/app-status/<name>/<app>')
+@auth_required
+def api_app_status(name, app):
+    try:
+        r = subprocess.run([MANAGER, 'app-status', name, app], capture_output=True, text=True)
+        ok = (r.returncode == 0)
+        # Try to parse a simple status from stdout, else return as-is
+        return jsonify({'ok': ok, 'output': r.stdout.strip(), 'error': r.stderr.strip()})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+@app.get('/dashboard/api/apps')
+@auth_required
+def api_apps():
+    # Enumerate app scripts under /opt/blobe-vm/root/installable-apps
+    apps_dir = os.path.join(_state_dir(), 'root', 'installable-apps')
+    apps = []
+    try:
+        for f in os.listdir(apps_dir):
+            if f.endswith('.sh'):
+                apps.append(f[:-3])
+    except Exception:
+        pass
+    apps.sort()
+    return jsonify({'apps': apps})
 
 def _http_check(url: str, timeout: float = 8.0) -> int:
     if not url:

@@ -1205,6 +1205,9 @@ main() {
       systemctl daemon-reload || true
       systemctl enable blobedash.service || true
       systemctl start blobedash.service || true
+        echo "Restarting dashboard service..."
+        sudo systemctl restart blobedash
+        sudo systemctl status blobedash --no-pager -l
     else
       # Fallback to one-shot docker run if systemd missing for any reason
       deploy_dashboard_direct || true

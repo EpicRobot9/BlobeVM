@@ -157,6 +157,10 @@ Actions supported in UI:
 - List instances (auto-refresh)
 - Create a VM
 - Start/Stop/Delete a VM
+- Restart and Check a VM (HTTP check with auto-resolve; Shift+Click for report-only)
+- Update a VM (apt update/dist-upgrade inside the VM container; preserves /config)
+- App controls: Install Chrome in a VM; Install App… and App Status… prompts for any available app script
+- Bulk ops: Recreate/Rebuild/Update & Rebuild/Delete ALL VMs
 
 Quick restart of the dashboard (systemd):
 ```
@@ -212,7 +216,32 @@ blobe-vm-manager start <name>          # Start a VM
 blobe-vm-manager stop <name>           # Stop a VM
 blobe-vm-manager delete <name>         # Delete a VM (removes data)
 blobe-vm-manager rename old new        # Rename a VM (updates URLs)
+
+### Rebuild/update utilities
 ```
+blobe-vm-manager pull-repo             # git pull in the server repo (if present)
+blobe-vm-manager rebuild-image         # rebuild the BlobeVM Docker image from REPO_DIR
+blobe-vm-manager recreate-all          # recreate all VM containers using the current image
+blobe-vm-manager recreate vm1 vm2      # recreate only the specified VMs
+blobe-vm-manager rebuild-all           # rebuild image and recreate all VMs
+blobe-vm-manager rebuild-vms vm1 vm2   # rebuild image, then recreate specified VMs
+blobe-vm-manager delete-all-instances  # delete ALL VMs and their data (keeps image/stack)
+blobe-vm-manager update-and-rebuild    # pull repo, rebuild image, recreate all VMs
+blobe-vm-manager update-and-rebuild vm1 vm2  # pull repo, rebuild image, recreate only these VMs
+```
+```
+
+### VM maintenance and app controls
+```
+blobe-vm-manager update-vm <name>           # apt update/dist-upgrade inside the VM
+blobe-vm-manager app-install <name> chrome  # install Google Chrome inside the VM
+blobe-vm-manager app-status <name> chrome   # check if Chrome is installed in the VM
+```
+
+To add a new app:
+- Create a script at `root/installable-apps/<app>.sh` in this repo. The script runs as root inside the VM container.
+- Keep it idempotent (safe to re-run) and non-interactive.
+- After deploying, the dashboard will list it under the Install App… prompt automatically.
 
 ### Routing controls
 ```

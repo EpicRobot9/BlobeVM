@@ -23,6 +23,14 @@ set -euo pipefail
 #   clear-base-path               # revert global base path to /vm
 #   set-limits <name> <cpu> <mem>  # set CPU (e.g. 0.5 or 2) and memory (e.g. 1g, 512m)
 #   clear-limits <name>            # remove resource limits
+#   rebuild-image                  # docker build image from REPO_DIR
+#   recreate-all                   # recreate all VM containers with current image
+#   recreate <name> [name2 ...]    # recreate only specific VMs
+#   rebuild-all                    # rebuild-image + recreate-all
+#   rebuild-vms <name> [name2..]   # rebuild image then recreate only these VMs
+#   pull-repo                      # git pull in REPO_DIR (if repo)
+#   update-and-rebuild             # pull-repo + rebuild-all
+#   delete-all-instances           # delete all VMs (containers and data) but keep stack/image
 # - In Traefik mode: creates per-instance containers on network "proxy" and routes via Traefik
 # - In Direct mode (NO_TRAEFIK=1): publishes a unique high port per VM without any reverse proxy
 # - Prints the VM URL on create/start
@@ -78,6 +86,7 @@ Commands:
   status <name>              # print container status and URL
   check [--no-fix] <name>    # HTTP check the VM URL; optional --no-fix to skip auto-resolve
   delete <name>
+  delete-all-instances       # delete all VM instances and containers (keeps image/stack)
   rename <old> <new>
   set-host <name> <fqdn>
   clear-host <name>
@@ -89,6 +98,16 @@ Commands:
   open <name>                # try to open the VM URL using a local browser
   dashboard-url              # print the dashboard URL
   open-dashboard             # try to open the dashboard URL
+  rebuild-image              # rebuild container image from REPO_DIR
+  recreate-all               # recreate all VM containers using current image
+  recreate <name> [name2..]  # recreate specific VMs using current image
+  rebuild-all                # rebuild image and recreate all VMs
+  rebuild-vms <name> [..]    # rebuild image then recreate specific VMs
+  pull-repo                  # git pull in REPO_DIR (if a git repo)
+  update-and-rebuild [vms..] # pull repo, rebuild image, recreate all or specified VMs
+  update-vm <name>           # apt update/upgrade inside VM container
+  app-install <name> <app>   # install an app inside the VM (if script exists)
+  app-status <name> <app>    # check if an app binary exists in VM
 USAGE
   exit 1
 }
@@ -542,6 +561,151 @@ cmd_delete() {
   echo "Deleted '$name'"
 }
 
+cmd_delete_all_instances() {
+  echo "This will remove ALL VM instances but keep Traefik and the image."
+  read -rp "Type 'DELETE' to confirm: " confirm
+  [[ "$confirm" == "DELETE" ]] || { echo "Aborted."; exit 1; }
+  shopt -s nullglob
+  for d in "$INST_DIR"/*; do
+    [[ -d "$d" ]] || continue
+    local name cname
+    name="$(basename "$d")"
+    cname="$(container_name "$name")"
+    if docker ps -a --format '{{.Names}}' | grep -qx "$cname"; then
+      docker rm -f "$cname" >/dev/null 2>&1 || true
+    fi
+    rm -rf "$d"
+    echo "Deleted '$name'"
+  done
+}
+
+cmd_rebuild_image() {
+  local ctx="${REPO_DIR:-/opt/blobe-vm}"
+  local image="${BLOBEVM_IMAGE:-blobevm:latest}"
+  [[ -d "$ctx" ]] || { echo "REPO_DIR not found: $ctx" >&2; exit 1; }
+  echo "Building image '$image' from $ctx ..."
+  docker build -t "$image" "$ctx"
+}
+
+cmd_recreate_all() {
+  ensure_instance_dir
+  echo "Recreating all VM containers..."
+  shopt -s nullglob
+  for d in "$INST_DIR"/*; do
+    [[ -d "$d" ]] || continue
+    local n; n="$(basename "$d")"
+    recreate_container "$n"
+    echo "Recreated '$n': $(vm_url "$n")"
+  done
+}
+
+cmd_rebuild_all() {
+  cmd_rebuild_image
+  cmd_recreate_all
+}
+
+cmd_update_vm() {
+  local name="$1"; [[ -z "$name" ]] && usage
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  local cname; cname="$(container_name "$name")"
+  if ! docker ps --format '{{.Names}}' | grep -qx "$cname"; then
+    echo "Container for '$name' not running; starting..."
+    cmd_start "$name" >/dev/null
+  fi
+  echo "Updating packages inside '$name'..."
+  docker exec -u 0 "$cname" bash -lc 'export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get -y dist-upgrade && apt-get -y autoremove && apt-get -y autoclean'
+  echo "Done."
+}
+
+_copy_app_script_into_vm() {
+  local cname="$1" app="$2"
+  local host_script="${REPO_DIR:-/opt/blobe-vm}/root/installable-apps/${app}.sh"
+  [[ -f "$host_script" ]] || { echo "App script not found: $app" >&2; return 2; }
+  docker cp "$host_script" "$cname:/tmp/app-${app}.sh"
+  docker exec -u 0 "$cname" bash -lc "chmod +x /tmp/app-${app}.sh"
+}
+
+cmd_app_install() {
+  local name="$1" app="$2"
+  [[ -z "$name" || -z "$app" ]] && usage
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  local cname; cname="$(container_name "$name")"
+  if ! docker ps --format '{{.Names}}' | grep -qx "$cname"; then
+    echo "Container for '$name' not running; starting..."
+    cmd_start "$name" >/dev/null
+  fi
+  echo "Installing app '$app' in '$name'..."
+  _copy_app_script_into_vm "$cname" "$app" || { echo "No installer for '$app'" >&2; exit 1; }
+  docker exec -u 0 "$cname" bash -lc "/tmp/app-${app}.sh"
+  echo "Installed '$app' in '$name'."
+}
+
+cmd_app_status() {
+  local name="$1" app="$2"
+  [[ -z "$name" || -z "$app" ]] && usage
+  local cname; cname="$(container_name "$name")"
+  if ! docker ps -a --format '{{.Names}}' | grep -qx "$cname"; then
+    echo "not-installed"; return 0
+  fi
+  # crude checks per known app
+  local bin=""
+  case "$app" in
+    chrome|google-chrome|google-chrome-stable) bin="/usr/bin/google-chrome" ;;
+    firefox) bin="/usr/bin/firefox" ;;
+    vlc) bin="/usr/bin/vlc" ;;
+    vscodium|code) bin="/usr/bin/codium" ;;
+    steam) bin="/usr/games/steam" ;;
+    discord) bin="/usr/bin/discord" ;;
+    *) bin="" ;;
+  esac
+  if [[ -n "$bin" ]]; then
+    if docker exec "$cname" bash -lc "test -x '$bin'"; then
+      echo "installed"; else echo "missing"; fi
+  else
+    echo "unknown"; return 0
+  fi
+}
+
+cmd_recreate_targets() {
+  ensure_instance_dir
+  [[ "$#" -ge 1 ]] || { echo "Usage: blobe-vm-manager recreate <name> [name2 ...]" >&2; exit 1; }
+  for n in "$@"; do
+    instance_exists "$n" || { echo "Instance '$n' not found" >&2; continue; }
+    recreate_container "$n"
+    echo "Recreated '$n': $(vm_url "$n")"
+  done
+}
+
+cmd_rebuild_vms() {
+  [[ "$#" -ge 1 ]] || { echo "Usage: blobe-vm-manager rebuild-vms <name> [name2 ...]" >&2; exit 1; }
+  cmd_rebuild_image || exit $?
+  cmd_recreate_targets "$@"
+}
+
+cmd_pull_repo() {
+  local ctx="${REPO_DIR:-/opt/blobe-vm}"
+  if [[ -d "$ctx/.git" ]] && command -v git >/dev/null 2>&1; then
+    echo "Updating repo at $ctx ..."
+    git -C "$ctx" pull --rebase --autostash || git -C "$ctx" pull
+  else
+    echo "No git repository found at $ctx; skipping."
+  fi
+}
+
+cmd_update_and_rebuild() {
+  if [[ "$#" -eq 0 ]]; then
+    cmd_pull_repo
+    cmd_rebuild_all
+  else
+    local targets=("$@")
+    cmd_pull_repo
+    cmd_rebuild_image
+    cmd_recreate_targets "${targets[@]}"
+  fi
+}
+
 # --- metadata helpers ---
 meta_file() { echo "$INST_DIR/$1/instance.json"; }
 
@@ -827,6 +991,7 @@ main() {
     status) cmd_status "$@" ;;
     check)  cmd_check "$@" ;;
     delete) cmd_delete "$@" ;;
+  delete-all-instances) cmd_delete_all_instances "$@" ;;
     rename) cmd_rename "$@" ;;
     set-host) cmd_set_host "$@" ;;
     clear-host) cmd_clear_host "$@" ;;
@@ -838,6 +1003,13 @@ main() {
     open)   cmd_open "$@" ;;
     dashboard-url) cmd_dashboard_url "$@" ;;
     open-dashboard) cmd_open_dashboard "$@" ;;
+  rebuild-image) cmd_rebuild_image "$@" ;;
+  recreate-all) cmd_recreate_all "$@" ;;
+  recreate) cmd_recreate_targets "$@" ;;
+  rebuild-all) cmd_rebuild_all "$@" ;;
+  rebuild-vms) cmd_rebuild_vms "$@" ;;
+  pull-repo) cmd_pull_repo "$@" ;;
+  update-and-rebuild) cmd_update_and_rebuild "$@" ;;
     nuke)   cmd_nuke "$@" ;;
     set-host-interactive) cmd_set_host_interactive "$@" ;;
     set-base-path) cmd_set_base_path "$@" ;;
