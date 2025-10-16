@@ -54,7 +54,8 @@ fi
 
 # Determine or assign port
 DASHBOARD_PORT=${DASHBOARD_PORT:-}
-if [[ -z "$DASHBOARD_PORT" || port_in_use "$DASHBOARD_PORT" ]]; then
+# If no port set or the current one is busy, (re)assign a free port
+if [[ -z "$DASHBOARD_PORT" ]] || port_in_use "$DASHBOARD_PORT"; then
   new_port=$(find_free_port "$DIRECT_PORT_START" 1000 || true)
   if [[ -z "$new_port" ]]; then
     echo "Unable to find a free port for dashboard" >&2
@@ -84,7 +85,7 @@ docker run -d --name "$NAME" --restart unless-stopped \
   -v "$APP_PATH:/app/app.py:ro" \
   -e BLOBEDASH_USER="${BLOBEDASH_USER:-}" \
   -e BLOBEDASH_PASS="${BLOBEDASH_PASS:-}" \
-  ghcr.io/library/python:3.11-slim \
+  python:3.11-slim \
   bash -c "pip install --no-cache-dir flask && python /app/app.py" \
   >/dev/null
 
