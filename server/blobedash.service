@@ -8,7 +8,7 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/bin/env bash /opt/blobe-vm/server/blobedash-ensure.sh
 ExecReload=/usr/bin/env bash /opt/blobe-vm/server/blobedash-ensure.sh
-ExecStop=/usr/bin/docker rm -f blobedash
+ExecStop=/usr/bin/env docker rm -f blobedash
 Restart=no
 
 [Install]

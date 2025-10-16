@@ -322,6 +322,20 @@ EOF
     echo "Docker Compose plugin is unavailable. Please ensure docker-compose-plugin is installed." >&2
     exit 1
   fi
+  local detected_docker
+  detected_docker="$(command -v docker)"
+  if [[ -z "${detected_docker}" ]]; then
+    echo "Unable to determine docker CLI path." >&2
+    exit 1
+  fi
+  if [[ -z "${HOST_DOCKER_BIN:-}" || ! -e "${HOST_DOCKER_BIN}" ]]; then
+    HOST_DOCKER_BIN="${detected_docker}"
+  fi
+  if [[ ! -e "${HOST_DOCKER_BIN}" ]]; then
+    echo "Docker CLI not found at ${HOST_DOCKER_BIN}." >&2
+    exit 1
+  fi
+  export HOST_DOCKER_BIN
   command -v curl >/dev/null 2>&1 || { echo "curl is required." >&2; exit 1; }
   command -v wget >/dev/null 2>&1 || { echo "wget is required." >&2; exit 1; }
 }
@@ -847,12 +861,13 @@ YAML
     volumes:
       - /opt/blobe-vm:/opt/blobe-vm
       - /usr/local/bin/blobe-vm-manager:/usr/local/bin/blobe-vm-manager:ro
-      - /usr/bin/docker:/usr/bin/docker:ro
+      - ${HOST_DOCKER_BIN:-/usr/bin/docker}:/usr/bin/docker:ro
       - /var/run/docker.sock:/var/run/docker.sock
       - /opt/blobe-vm/dashboard/app.py:/app/app.py:ro
     environment:
       - BLOBEDASH_USER=${BLOBEDASH_USER:-}
       - BLOBEDASH_PASS=${BLOBEDASH_PASS:-}
+      - HOST_DOCKER_BIN=${HOST_DOCKER_BIN:-/usr/bin/docker}
     networks:
       - ${TRAEFIK_NETWORK}
     labels:
@@ -902,6 +917,14 @@ deploy_dashboard_direct() {
     return 0
   fi
   DASHBOARD_PORT="$port"
+  local docker_bin="${HOST_DOCKER_BIN:-}"
+  if [[ -z "$docker_bin" || ! -e "$docker_bin" ]]; then
+    docker_bin="$(command -v docker || true)"
+  fi
+  if [[ -z "$docker_bin" || ! -e "$docker_bin" ]]; then
+    echo "Unable to determine docker CLI path for dashboard deployment." >&2
+    return 1
+  fi
   # Remove any existing container to avoid conflicts
   if docker ps -a --format '{{.Names}}' | grep -qx "blobedash"; then
     docker rm -f blobedash >/dev/null 2>&1 || true
@@ -910,11 +933,12 @@ deploy_dashboard_direct() {
     -p "${DASHBOARD_PORT}:5000" \
     -v /opt/blobe-vm:/opt/blobe-vm \
     -v /usr/local/bin/blobe-vm-manager:/usr/local/bin/blobe-vm-manager:ro \
-    -v /usr/bin/docker:/usr/bin/docker:ro \
+    -v "${docker_bin}:/usr/bin/docker:ro" \
     -v /var/run/docker.sock:/var/run/docker.sock \
     -v /opt/blobe-vm/dashboard/app.py:/app/app.py:ro \
     -e BLOBEDASH_USER="${BLOBEDASH_USER:-}" \
     -e BLOBEDASH_PASS="${BLOBEDASH_PASS:-}" \
+    -e HOST_DOCKER_BIN="${docker_bin}" \
     ghcr.io/library/python:3.11-slim \
     bash -c "pip install --no-cache-dir flask && python /app/app.py" \
     >/dev/null
@@ -967,7 +991,50 @@ install_manager() {
     echo "NO_TRAEFIK=$(sh_q "${NO_TRAEFIK:-0}")";
     echo "DASHBOARD_PORT=$(sh_q "${DASHBOARD_PORT:-}")";
     echo "DIRECT_PORT_START=$(sh_q "${BLOBEVM_DIRECT_PORT_START:-20000}")";
+    echo "HOST_DOCKER_BIN=$(sh_q "${HOST_DOCKER_BIN}")";
   } > /opt/blobe-vm/.env
+}
+
+# Verify that the dashboard will be able to show VM status by ensuring
+# docker CLI and socket are reachable from a tiny probe container and that
+# the manager script is on the host.
+preflight_dashboard_runtime() {
+  echo "Running dashboard preflight checks..."
+  # 1) Host docker binary path
+  local docker_bin="${HOST_DOCKER_BIN:-}"
+  if [[ -z "$docker_bin" || ! -e "$docker_bin" ]]; then
+    docker_bin="$(command -v docker || true)"
+  fi
+  if [[ -z "$docker_bin" || ! -e "$docker_bin" ]]; then
+    echo "[preflight] Could not locate docker CLI on host." >&2
+    return 1
+  fi
+  # 2) Docker socket
+  if [[ ! -S /var/run/docker.sock ]]; then
+    echo "[preflight] /var/run/docker.sock not found. Is Docker running?" >&2
+    return 1
+  fi
+  # 3) Manager binary
+  if [[ ! -x /usr/local/bin/blobe-vm-manager ]]; then
+    echo "[preflight] blobe-vm-manager missing at /usr/local/bin/blobe-vm-manager" >&2
+    return 1
+  fi
+  # 4) Instances dir exists
+  mkdir -p /opt/blobe-vm/instances
+
+  # 5) In-container probe: ensure docker ps works when mounting CLI and socket
+  local probe="blobedash-preflight-$$"
+  docker rm -f "$probe" >/dev/null 2>&1 || true
+  if ! docker run --rm --name "$probe" \
+      -v "/opt/blobe-vm:/opt/blobe-vm" \
+      -v "/usr/local/bin/blobe-vm-manager:/usr/local/bin/blobe-vm-manager:ro" \
+      -v "$docker_bin:/usr/bin/docker:ro" \
+      -v "/var/run/docker.sock:/var/run/docker.sock" \
+      ghcr.io/library/python:3.11-slim bash -lc "docker ps >/dev/null 2>&1"; then
+    echo "[preflight] docker ps failed inside probe container. Check docker socket permissions." >&2
+    return 1
+  fi
+  echo "Dashboard preflight checks passed."
 }
 
 maybe_create_first_vm() {
@@ -1118,6 +1185,8 @@ main() {
   setup_traefik
   build_image
   install_manager
+  # Check dashboard runtime dependencies before deployment
+  preflight_dashboard_runtime || true
   # Direct mode dashboard
   if [[ "${NO_TRAEFIK:-0}" -eq 1 ]]; then
     # Ensure systemd unit is installed and enabled

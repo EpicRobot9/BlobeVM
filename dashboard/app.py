@@ -5,6 +5,9 @@ from flask import Flask, jsonify, request, abort, send_from_directory, render_te
 
 APP_ROOT = '/opt/blobe-vm'
 MANAGER = 'blobe-vm-manager'
+HOST_DOCKER_BIN = os.environ.get('HOST_DOCKER_BIN') or '/usr/bin/docker'
+CONTAINER_DOCKER_BIN = os.environ.get('CONTAINER_DOCKER_BIN') or '/usr/bin/docker'
+DOCKER_VOLUME_BIND = f'{HOST_DOCKER_BIN}:{CONTAINER_DOCKER_BIN}:ro'
 TEMPLATE = """
 <!doctype html><html><head><title>BlobeVM Dashboard</title>
 <style>body{font-family:system-ui,Arial;margin:1.5rem;background:#111;color:#eee}table{border-collapse:collapse;width:100%;}th,td{padding:.5rem;border-bottom:1px solid #333}a,button{background:#2563eb;color:#fff;border:none;padding:.4rem .8rem;border-radius:4px;text-decoration:none;cursor:pointer}form{display:inline}h1{margin-top:0} .badge{background:#444;padding:.15rem .4rem;border-radius:3px;font-size:.65rem;text-transform:uppercase;margin-left:.3rem} .muted{opacity:.75} .btn-red{background:#dc2626} .btn-gray{background:#374151} .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}.green{background:#10b981}.red{background:#ef4444}.gray{background:#6b7280}</style>
@@ -321,10 +324,11 @@ def _enable_single_port(port: int):
             '-v', f'{_state_dir()}:/opt/blobe-vm',
             '-v', '/usr/local/bin/blobe-vm-manager:/usr/local/bin/blobe-vm-manager:ro',
             '-v', '/var/run/docker.sock:/var/run/docker.sock',
-            '-v', '/usr/bin/docker:/usr/bin/docker:ro',
+            '-v', DOCKER_VOLUME_BIND,
             '-v', f'{_state_dir()}/dashboard/app.py:/app/app.py:ro',
             '-e', f'BLOBEDASH_USER={os.environ.get("BLOBEDASH_USER","")}',
             '-e', f'BLOBEDASH_PASS={os.environ.get("BLOBEDASH_PASS","")}',
+            '-e', f'HOST_DOCKER_BIN={HOST_DOCKER_BIN}',
             '--network', 'proxy',
             '--label', 'traefik.enable=true',
             '--label', 'traefik.http.routers.blobe-dashboard.rule=PathPrefix(`/dashboard`)',
@@ -393,18 +397,19 @@ def _disable_single_port(dash_port: int | None):
         # Fallback: start direct dashboard on the provided port or choose one
         port = dash_port or direct_start
         # Free any existing blobedash
-        _docker('rm', '-f', 'blobedash')
-        _docker('run', '-d', '--name', 'blobedash', '--restart', 'unless-stopped',
-                '-p', f'{port}:5000',
-                '-v', f'{_state_dir()}:/opt/blobe-vm',
-                '-v', '/usr/local/bin/blobe-vm-manager:/usr/local/bin/blobe-vm-manager:ro',
-                '-v', '/usr/bin/docker:/usr/bin/docker:ro',
-                '-v', '/var/run/docker.sock:/var/run/docker.sock',
-                '-v', f'{_state_dir()}/dashboard/app.py:/app/app.py:ro',
-                '-e', f'BLOBEDASH_USER={os.environ.get("BLOBEDASH_USER","")}',
-                '-e', f'BLOBEDASH_PASS={os.environ.get("BLOBEDASH_PASS","")}',
-                'ghcr.io/library/python:3.11-slim',
-                'bash', '-c', 'pip install --no-cache-dir flask && python /app/app.py')
+    _docker('rm', '-f', 'blobedash')
+    _docker('run', '-d', '--name', 'blobedash', '--restart', 'unless-stopped',
+        '-p', f'{port}:5000',
+        '-v', f'{_state_dir()}:/opt/blobe-vm',
+        '-v', '/usr/local/bin/blobe-vm-manager:/usr/local/bin/blobe-vm-manager:ro',
+        '-v', DOCKER_VOLUME_BIND,
+        '-v', '/var/run/docker.sock:/var/run/docker.sock',
+        '-v', f'{_state_dir()}/dashboard/app.py:/app/app.py:ro',
+        '-e', f'BLOBEDASH_USER={os.environ.get("BLOBEDASH_USER","")}',
+        '-e', f'BLOBEDASH_PASS={os.environ.get("BLOBEDASH_PASS","")}',
+        '-e', f'HOST_DOCKER_BIN={HOST_DOCKER_BIN}',
+        'ghcr.io/library/python:3.11-slim',
+        'bash', '-c', 'pip install --no-cache-dir flask && python /app/app.py')
 
 @app.get('/dashboard')
 @auth_required

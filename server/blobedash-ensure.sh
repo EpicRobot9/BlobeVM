@@ -18,6 +18,16 @@ fi
 NO_TRAEFIK=${NO_TRAEFIK:-0}
 ENABLE_DASHBOARD=${ENABLE_DASHBOARD:-0}
 DIRECT_PORT_START=${DIRECT_PORT_START:-20000}
+HOST_DOCKER_BIN=${HOST_DOCKER_BIN:-}
+
+if [[ -z "$HOST_DOCKER_BIN" || ! -e "$HOST_DOCKER_BIN" ]]; then
+  HOST_DOCKER_BIN="$(command -v docker || true)"
+fi
+
+if [[ -z "$HOST_DOCKER_BIN" || ! -e "$HOST_DOCKER_BIN" ]]; then
+  echo "Unable to locate docker CLI for dashboard ensure script." >&2
+  exit 1
+fi
 
 # Nothing to do if not in direct mode or dashboard disabled
 if [[ "$NO_TRAEFIK" -ne 1 || "$ENABLE_DASHBOARD" -ne 1 ]]; then
@@ -81,11 +91,12 @@ docker run -d --name "$NAME" --restart unless-stopped \
   -p "${DASHBOARD_PORT}:5000" \
   -v "$STATE_DIR:/opt/blobe-vm" \
   -v /usr/local/bin/blobe-vm-manager:/usr/local/bin/blobe-vm-manager:ro \
-  -v /usr/bin/docker:/usr/bin/docker:ro \
+  -v "${HOST_DOCKER_BIN}:/usr/bin/docker:ro" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v "$APP_PATH:/app/app.py:ro" \
   -e BLOBEDASH_USER="${BLOBEDASH_USER:-}" \
   -e BLOBEDASH_PASS="${BLOBEDASH_PASS:-}" \
+  -e HOST_DOCKER_BIN="${HOST_DOCKER_BIN}" \
   python:3.11-slim \
     bash -c "apt-get update && apt-get install -y curl && pip install --no-cache-dir flask && python /app/app.py" \
   >/dev/null
