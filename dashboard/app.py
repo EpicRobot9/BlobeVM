@@ -45,7 +45,7 @@ async function load(){
     dashPort = info.dashPort||'';
     dashIp = info.ip||'';
     document.getElementById('customdomain').value = customDomain;
-    document.getElementById('domainip').textContent = customDomain ? `Point domain to: ${dashIp}` : '';
+    document.getElementById('domainip').textContent = `Point domain to: ${dashIp}`;
     const tb=document.getElementById('tbody');
     tb.innerHTML='';
     data.instances.forEach(i=>{
@@ -119,7 +119,21 @@ function statusDot(st){
 }
 async function act(cmd,name){await fetch(`/dashboard/api/${cmd}/${name}`,{method:'post'});load();}
 async function delvm(name){if(!confirm('Delete '+name+'?'))return;await fetch(`/dashboard/api/delete/${name}`,{method:'post'});load();}
-async function createVM(e){e.preventDefault();const fd=new FormData(e.target);await fetch('/dashboard/api/create',{method:'post',body:new URLSearchParams(fd)});e.target.reset();load();}
+async function createVM(e){
+    e.preventDefault();
+    const fd=new FormData(e.target);
+    try {
+        const r = await fetch('/dashboard/api/create', {method:'post',body:new URLSearchParams(fd)});
+        if (!r.ok) {
+            const j = await r.json().catch(()=>({}));
+            alert(j.error || 'Failed to create VM.');
+        }
+    } catch (err) {
+        alert('Error creating VM: ' + err);
+    }
+    e.target.reset();
+    load();
+}
 async function enableSinglePort(){
     const p=document.getElementById('spport').value||'20002';
     const r=await fetch('/dashboard/api/enable-single-port',{method:'post',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:`port=${encodeURIComponent(p)}`});
@@ -407,8 +421,13 @@ def api_list():
 def api_create():
     name = request.form.get('name','').strip()
     if not name:
-        abort(400)
-    subprocess.check_call([MANAGER, 'create', name])
+        return jsonify({'ok': False, 'error': 'No name provided'}), 400
+    try:
+        subprocess.check_call([MANAGER, 'create', name])
+    except FileNotFoundError:
+        return jsonify({'ok': False, 'error': 'blobe-vm-manager not found in container. Make sure it is installed and mounted.'}), 500
+    except Exception as e:
+        return jsonify({'ok': False, 'error': f'Error creating VM: {e}'}), 500
     return jsonify({'ok': True})
 
 @app.post('/dashboard/api/start/<name>')
