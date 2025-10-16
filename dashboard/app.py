@@ -111,31 +111,6 @@ async function setCustomDomain(){
     if(j && j.ip) document.getElementById('domainip').textContent = `Point domain to: ${j.ip}`;
     else alert('Saved, but could not resolve IP.');
 }
-@app.get('/dashboard/api/modeinfo')
-@auth_required
-def api_modeinfo():
-    env = _read_env()
-    merged = env.get('NO_TRAEFIK','1') == '0'
-    base_path = env.get('BASE_PATH','/vm')
-    domain = env.get('BLOBEVM_DOMAIN','')
-    dash_port = env.get('DASHBOARD_PORT','')
-    # Show the host the user used to reach the dashboard
-    ip = _request_host() or ''
-    return jsonify({'merged': merged, 'basePath': base_path, 'domain': domain, 'dashPort': dash_port, 'ip': ip})
-
-@app.post('/dashboard/api/set-domain')
-@auth_required
-def api_set_domain():
-    dom = request.values.get('domain','').strip()
-    if not dom:
-        return jsonify({'ok': False, 'error': 'No domain'}), 400
-    _write_env_kv({'BLOBEVM_DOMAIN': dom})
-    ip = ''
-    try:
-        ip = socket.gethostbyname(socket.gethostname())
-    except Exception:
-        ip = ''
-    return jsonify({'ok': True, 'domain': dom, 'ip': ip})
 function statusDot(st){
     const s=(st||'').toLowerCase();
     let cls='gray';
@@ -348,6 +323,34 @@ def _write_env_kv(updates: dict):
 
 def _docker(*args):
     return subprocess.run(['docker', *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+@app.get('/dashboard/api/modeinfo')
+@auth_required
+def api_modeinfo():
+    env = _read_env()
+    merged = env.get('NO_TRAEFIK', '1') == '0'
+    base_path = env.get('BASE_PATH', '/vm')
+    domain = env.get('BLOBEVM_DOMAIN', '')
+    dash_port = env.get('DASHBOARD_PORT', '')
+    # Show the host the user used to reach the dashboard
+    ip = _request_host() or ''
+    return jsonify({'merged': merged, 'basePath': base_path, 'domain': domain, 'dashPort': dash_port, 'ip': ip})
+
+@app.post('/dashboard/api/set-domain')
+@auth_required
+def api_set_domain():
+    dom = request.values.get('domain','').strip()
+    if not dom:
+        return jsonify({'ok': False, 'error': 'No domain'}), 400
+    _write_env_kv({'BLOBEVM_DOMAIN': dom})
+    # Best-effort IP hint: show the host the user is using to reach the dashboard
+    ip = _request_host() or ''
+    if not ip:
+        try:
+            ip = socket.gethostbyname(socket.gethostname())
+        except Exception:
+            ip = ''
+    return jsonify({'ok': True, 'domain': dom, 'ip': ip})
 
 def _enable_single_port(port: int):
     """Enable single-port mode by launching a tiny Traefik and reattaching services.
