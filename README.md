@@ -80,7 +80,8 @@ blobe-vm-manager restart alpha
 # 1) Via manager
 blobe-vm-manager status alpha    # prints container status and URL
 # 2) HTTP check via manager
-blobe-vm-manager check alpha     # returns OK/FAIL with HTTP code
+blobe-vm-manager check alpha           # returns OK/FAIL; auto-resolves common 404s by recreating
+blobe-vm-manager check --no-fix alpha  # report-only (no auto-resolve)
 # 3) Docker (optional)
 docker ps --filter name=blobevm_alpha --format '{{.Names}} {{.Status}}'
 
