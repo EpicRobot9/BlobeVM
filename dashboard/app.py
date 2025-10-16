@@ -74,8 +74,12 @@ async function load(){
         }
         dbg('modeinfo', info);
         dbg('instances', data.instances);
-        mergedMode = !!info.merged;
-        basePath = info.basePath||'/vm';
+    mergedMode = !!info.merged;
+    basePath = info.basePath||'/vm';
+    // normalize basePath: ensure single leading slash and no trailing slash
+    if(!basePath) basePath = '/vm';
+    if(!basePath.startsWith('/')) basePath = '/' + basePath;
+    basePath = basePath.replace(/\/+$/, '');
         customDomain = info.domain||'';
         dashPort = info.dashPort||'';
         dashIp = info.ip||'';
@@ -97,19 +101,23 @@ async function load(){
                     openUrl = `http://${customDomain}${basePath}/${i.name}/`;
                 }
             }else{
-                // direct: show port and build link using current host
+                // direct: show port; prefer manager/computed URL; fallback to current host
                 const m = i.url && i.url.match(/:(\d+)/);
                 portOrPath = m ? m[1] : '';
-                if (portOrPath) {
+                if (i.url) {
+                    openUrl = i.url;
+                } else if (portOrPath) {
                     const proto = window.location.protocol;
                     const host = window.location.hostname;
                     openUrl = `${proto}//${host}:${portOrPath}/`;
+                } else {
+                    openUrl = '';
                 }
             }
             dbg('row', { name: i.name, status: i.status, rawUrl: i.url, mergedMode, portOrPath, openUrl });
             tr.innerHTML=`<td>${i.name}</td><td>${dot}<span class=muted>${i.status||''}</span></td><td>${portOrPath}</td><td><a href="${openUrl}" target=_blank>${openUrl}</a></td>`+
              `<td>`+
-             `<button onclick=window.open('${openUrl}','_blank')>Open</button>`+
+             `<button onclick="openLink('${openUrl}')">Open</button>`+
              `<button onclick=act('start','${i.name}')>Start</button>`+
              `<button onclick=act('stop','${i.name}')>Stop</button>`+
              `<button onclick=act('restart','${i.name}')>Restart</button>`+
@@ -123,6 +131,11 @@ async function load(){
              `<button onclick=rebuildVM('${i.name}')>Rebuild</button>`+
              `<button onclick=delvm('${i.name}') class="btn-red">Delete</button>`+
              `</td>`;
+        });
+    } catch (err) {
+        console.error('[BLOBEDASH] load() error', err);
+    }
+}
 function recreateVM(name){
     if(!confirm('Recreate VM '+name+'?'))return;
     fetch('/dashboard/api/recreate',{
@@ -165,31 +178,6 @@ async function installChrome(name){
     }
     load();
 }
-function promptAppName(){
-    let msg = 'Enter app name to use. Available: ' + (availableApps.join(', ')||'(none found)');
-    const v = prompt(msg, availableApps[0]||'');
-    return v ? v.trim() : '';
-}
-async function promptInstallApp(name){
-    const app = promptAppName();
-    if(!app) return;
-    await installApp(name, app);
-}
-async function promptAppStatus(name){
-    const app = promptAppName();
-    if(!app) return;
-    try{
-        const r = await fetch(`/dashboard/api/app-status/${encodeURIComponent(name)}/${encodeURIComponent(app)}`);
-        const j = await r.json().catch(()=>({}));
-        if(j && j.ok){
-            alert(`${app} status: ${j.status||'installed'}`);
-        }else{
-            alert(`${app} not installed or unknown.`);
-        }
-    }catch(e){
-        alert('Status error: '+e);
-    }
-}
 async function installApp(name, app){
     try{
         const r = await fetch(`/dashboard/api/app-install/${encodeURIComponent(name)}/${encodeURIComponent(app)}`,{method:'POST'});
@@ -203,6 +191,22 @@ async function installApp(name, app){
         alert('Install error: '+e);
     }
     load();
+}
+function openLink(url){
+    try{
+        if(!url || typeof url !== 'string'){
+            alert('No URL available yet. Try again after the VM starts.');
+            return;
+        }
+        // Basic sanity: must start with http(s)://
+        if(!/^https?:\/\//i.test(url)){
+            alert('Invalid URL.');
+            return;
+        }
+        window.open(url, '_blank');
+    }catch(e){
+        console.error('openLink error', e);
+    }
 }
 function selectedApp(name){
     const el = document.getElementById(`appsel-${name}`);
@@ -250,13 +254,6 @@ function bulkDeleteAll(){
     var conf=prompt('Delete ALL VMs? This cannot be undone. Type DELETE to confirm.');
     if(conf!=='DELETE')return;
     fetch('/dashboard/api/delete-all-instances',{method:'POST'}).then(load);
-}
-             `</td>`;
-            tb.appendChild(tr);
-        });
-    } catch (err) {
-        console.error('[BLOBEDASH] load() error', err);
-    }
 }
 async function setCustomDomain(){
     const dom = document.getElementById('customdomain').value.trim();
