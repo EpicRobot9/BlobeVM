@@ -117,7 +117,7 @@ async function load(){
                 }
             }
             dbg('row', { name: i.name, status: i.status, rawUrl: i.url, mergedMode, portOrPath, openUrl });
-            tr.innerHTML=`<td>${i.name}</td><td>${dot}<span class=muted>${i.status||''}</span></td><td>${portOrPath}</td><td><a href="${openUrl}" target=_blank>${openUrl}</a></td>`+
+          tr.innerHTML=`<td>${i.name}</td><td>${dot}<span class=muted>${i.status||''}</span></td><td>${portOrPath}</td><td><a href="${openUrl}" target=_blank>${openUrl}</a></td>`+
              `<td>`+
              `<button onclick="openLink('${openUrl}')">Open</button>`+
              `<button onclick=act('start','${i.name}')>Start</button>`+
@@ -133,6 +133,7 @@ async function load(){
              `<button onclick=rebuildVM('${i.name}')>Rebuild</button>`+
              `<button onclick=delvm('${i.name}') class="btn-red">Delete</button>`+
              `</td>`;
+          tb.appendChild(tr);
         });
     } catch (err) {
         console.error('[BLOBEDASH] load() error', err);
