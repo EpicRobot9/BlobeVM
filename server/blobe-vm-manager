@@ -56,11 +56,20 @@ DIRECT_PORT_START=${DIRECT_PORT_START:-20000}
 # --- Port helpers (for direct mode) ---
 port_in_use() {
   local p="$1"
-  if command -v ss >/dev/null 2>&1; then
-    ss -ltn | awk '{print $4}' | grep -E "(^|:)${p}$" >/dev/null 2>&1
-  else
-    netstat -ltn 2>/dev/null | awk '{print $4}' | grep -E "(^|:)${p}$" >/dev/null 2>&1
+  # If Docker is available (typical when manager runs inside dashboard), check published ports first
+  if command -v docker >/dev/null 2>&1; then
+    # Look for bindings like 0.0.0.0:p-> or :::p-> in the Ports column
+    if docker ps --format '{{.Ports}}' | grep -E "(^|[, ])(0\.0\.0\.0|:::)?${p}->" >/dev/null 2>&1; then
+      return 0
+    fi
   fi
+  # Fallback to socket listeners (works when running on the host)
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn | awk '{print $4}' | grep -E "(^|:)${p}$" >/dev/null 2>&1 && return 0
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -ltn 2>/dev/null | awk '{print $4}' | grep -E "(^|:)${p}$" >/dev/null 2>&1 && return 0
+  fi
+  return 1
 }
 
 find_free_port() {
@@ -343,9 +352,15 @@ run_container() {
   local publish_args=()
   local net_args=()
   if [[ "${NO_TRAEFIK}" -eq 1 ]]; then
-    # Determine and persist a host port for this VM
+    # Determine and persist a host port for this VM (reassign if busy)
     local host_port
     host_port="$(get_meta "$name" host_port || true)"
+    if [[ -n "$host_port" && $(port_in_use "$host_port"; echo $?) -eq 0 ]]; then
+      # Port is currently in use (maybe by stale container); try to free by removing same-name container, else choose new
+      local cname
+      cname="$(container_name "$name")"
+      docker rm -f "$cname" >/dev/null 2>&1 || true
+    fi
     if [[ -z "$host_port" || $(port_in_use "$host_port"; echo $?) -eq 0 ]]; then
       host_port="$(find_free_port "${DIRECT_PORT_START}" 1000 || true)"
       if [[ -z "$host_port" ]]; then
@@ -445,6 +460,17 @@ cmd_create() {
     cp -a "${REPO_DIR}/root/config/." "$save_dir/" 2>/dev/null || true
   fi
   run_container "$name"
+  if [[ "$?" -ne 0 ]]; then
+    # Best-effort: if port collision occurred in direct mode, reassign and retry once
+    if [[ "${NO_TRAEFIK}" -eq 1 ]]; then
+      local hp
+      hp="$(find_free_port "${DIRECT_PORT_START}" 1000 || true)"
+      if [[ -n "$hp" ]]; then
+        set_meta "$name" host_port "$hp"
+        run_container "$name"
+      fi
+    fi
+  fi
   echo "Created VM '$name' at: $(vm_url "$name")"
 }
 

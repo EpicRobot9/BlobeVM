@@ -98,7 +98,7 @@ docker run -d --name "$NAME" --restart unless-stopped \
   -e BLOBEDASH_PASS="${BLOBEDASH_PASS:-}" \
   -e HOST_DOCKER_BIN="${HOST_DOCKER_BIN}" \
   python:3.11-slim \
-    bash -c "apt-get update && apt-get install -y curl && pip install --no-cache-dir flask && python /app/app.py" \
+    bash -c "apt-get update && apt-get install -y curl jq && pip install --no-cache-dir flask && python /app/app.py" \
   >/dev/null
 
 echo "Dashboard: http://$(hostname -I | awk '{print $1}'):${DASHBOARD_PORT}/dashboard"
