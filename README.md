@@ -73,6 +73,17 @@ blobe-vm-manager create alpha
 blobe-vm-manager start alpha
 blobe-vm-manager stop alpha
 
+# Restart a VM (new)
+blobe-vm-manager restart alpha
+
+# Verify a VM is running
+# 1) Via manager
+blobe-vm-manager status alpha    # prints container status and URL
+# 2) HTTP check via manager
+blobe-vm-manager check alpha     # returns OK/FAIL with HTTP code
+# 3) Docker (optional)
+docker ps --filter name=blobevm_alpha --format '{{.Names}} {{.Status}}'
+
 # Delete
 blobe-vm-manager delete alpha
 ```
@@ -90,6 +101,8 @@ blobe-vm-manager set-host myvm vm42.example.com
 # Revert to default host (name.your-domain)
 blobe-vm-manager clear-host myvm
 ```
+
+
 
 # Interactive helper to set a host (shows IPs first)
 blobe-vm-manager set-host-interactive myvm
@@ -143,6 +156,12 @@ Actions supported in UI:
 - List instances (auto-refresh)
 - Create a VM
 - Start/Stop/Delete a VM
+
+Quick restart of the dashboard (systemd):
+```
+sudo systemctl restart blobedash
+sudo systemctl status blobedash --no-pager -l
+```
 
 Disable dashboard on fresh install:
 ```
@@ -266,5 +285,6 @@ The web dashboard provides a modern UI for managing VMs and switching routing mo
 - If a port is busy, the dashboard will prompt you to choose another.
 - DNS changes may take time to propagate. Use the IP shown in the dashboard for your A record.
 - You can always switch modes and update your domain as needed.
+- Enable browser debug logs by appending `?debug=1` to the dashboard URL, then open the browser console to see messages prefixed with `[BLOBEDASH]`.
 
 ---
