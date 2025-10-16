@@ -63,9 +63,14 @@ async function load(){
                 openUrl = `http://${customDomain}${basePath}/${i.name}/`;
             }
         }else{
-            // direct: show port
-            const m = i.url.match(/:(\d+)/);
+            // direct: show port and build link using current host
+            const m = i.url && i.url.match(/:(\d+)/);
             portOrPath = m ? m[1] : '';
+            if (portOrPath) {
+                const proto = window.location.protocol;
+                const host = window.location.hostname;
+                openUrl = `${proto}//${host}:${portOrPath}/`;
+            }
         }
         tr.innerHTML=`<td>${i.name}</td><td>${dot}<span class=muted>${i.status||''}</span></td><td>${portOrPath}</td><td><a href="${openUrl}" target=_blank>${openUrl}</a></td>`+
          `<td>`+
@@ -93,11 +98,8 @@ def api_modeinfo():
     base_path = env.get('BASE_PATH','/vm')
     domain = env.get('BLOBEVM_DOMAIN','')
     dash_port = env.get('DASHBOARD_PORT','')
-    ip = ''
-    try:
-        ip = socket.gethostbyname(socket.gethostname())
-    except Exception:
-        ip = ''
+    # Show the host the user used to reach the dashboard
+    ip = _request_host() or ''
     return jsonify({'merged': merged, 'basePath': base_path, 'domain': domain, 'dashPort': dash_port, 'ip': ip})
 
 @app.post('/dashboard/api/set-domain')
@@ -185,6 +187,29 @@ def auth_required(fn):
 def _state_dir():
     return os.environ.get('BLOBEDASH_STATE', '/opt/blobe-vm')
 
+def _is_direct_mode():
+    env = _read_env()
+    return env.get('NO_TRAEFIK', '1') == '1'
+
+def _request_host():
+    try:
+        host = request.headers.get('X-Forwarded-Host') or request.host or ''
+        return (host.split(':')[0] if host else '')
+    except Exception:
+        return ''
+
+def _vm_host_port(cname: str) -> str:
+    try:
+        r = _docker('port', cname, '3000/tcp')
+        if r.returncode == 0 and r.stdout:
+            line = r.stdout.strip().splitlines()[0]
+            parts = line.rsplit(':', 1)
+            if len(parts) == 2 and parts[1].strip().isdigit():
+                return parts[1].strip()
+    except Exception:
+        pass
+    return ''
+
 def manager_json_list():
     """Return a list of instances with best-effort status and URL.
     Tries the manager 'list' first (requires docker CLI). Falls back to scanning
@@ -205,6 +230,14 @@ def manager_json_list():
             except Exception:
                 pass
         if instances:
+            # In direct mode, override URL with host:published-port to avoid container IPs
+            if _is_direct_mode():
+                host = _request_host()
+                for it in instances:
+                    cname = f"blobevm_{it['name']}"
+                    hp = _vm_host_port(cname)
+                    if hp and host:
+                        it['url'] = f"http://{host}:{hp}/"
             return instances
     except Exception:
         # likely docker CLI not present inside container -> fall back
@@ -231,14 +264,27 @@ def manager_json_list():
         pass
     for name in sorted(names):
         url = ''
-        try:
-            url = subprocess.check_output([MANAGER, 'url', name], text=True).strip()
-        except Exception:
-            url = ''
         cname = f'blobevm_{name}'
         status = docker_status.get(cname, '') or ''
         if not status:
             status = '(unknown)'
+        # In direct mode, compute URL using host published port
+        if _is_direct_mode():
+            hp = _vm_host_port(cname)
+            host = _request_host()
+            if hp and host:
+                url = f"http://{host}:{hp}/"
+            else:
+                # Fallback to manager per-VM URL
+                try:
+                    url = subprocess.check_output([MANAGER, 'url', name], text=True).strip()
+                except Exception:
+                    url = ''
+        else:
+            try:
+                url = subprocess.check_output([MANAGER, 'url', name], text=True).strip()
+            except Exception:
+                url = ''
         instances.append({'name': name, 'status': status, 'url': url})
     return instances
 
