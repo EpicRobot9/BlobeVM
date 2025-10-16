@@ -14,6 +14,7 @@ TEMPLATE = """
 <style>body{font-family:system-ui,Arial;margin:1.5rem;background:#111;color:#eee}table{border-collapse:collapse;width:100%;}th,td{padding:.5rem;border-bottom:1px solid #333}a,button{background:#2563eb;color:#fff;border:none;padding:.4rem .8rem;border-radius:4px;text-decoration:none;cursor:pointer}form{display:inline}h1{margin-top:0} .badge{background:#444;padding:.15rem .4rem;border-radius:3px;font-size:.65rem;text-transform:uppercase;margin-left:.3rem} .muted{opacity:.75} .btn-red{background:#dc2626} .btn-gray{background:#374151} .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}.green{background:#10b981}.red{background:#ef4444}.gray{background:#6b7280}</style>
 </head><body>
 <h1>BlobeVM Dashboard</h1>
+<div id=errbox style="display:none;background:#7f1d1d;color:#fff;padding:.5rem .75rem;border-radius:4px;margin:.5rem 0"></div>
 <form method=post action="/dashboard/api/create" onsubmit="return createVM(event)">
 <input name=name placeholder="name" required pattern="[a-zA-Z0-9-]+" />
 <button type=submit>Create</button>
@@ -58,14 +59,15 @@ async function load(){
             fetch('/dashboard/api/modeinfo'),
             fetch('/dashboard/api/apps').catch(()=>({ok:false}))
         ]);
-        if (!r.ok) {
-            console.error('[BLOBEDASH] /dashboard/api/list HTTP', r.status);
+        const eb = document.getElementById('errbox');
+        if (!r.ok || !r2.ok) {
+            const msg = `/dashboard/api/list: ${r.status} | /dashboard/api/modeinfo: ${r2.status}`;
+            console.error('[BLOBEDASH] API error', msg);
+            eb.style.display = 'block';
+            eb.textContent = `Dashboard API error: ${msg}. If you enabled auth, ensure the same credentials are applied to API calls (refresh the page).`;
             return;
         }
-        if (!r2.ok) {
-            console.error('[BLOBEDASH] /dashboard/api/modeinfo HTTP', r2.status);
-            return;
-        }
+        eb.style.display = 'none'; eb.textContent = '';
         const data = await r.json().catch(err => { console.error('[BLOBEDASH] list JSON error', err); return {instances:[]}; });
         const info = await r2.json().catch(err => { console.error('[BLOBEDASH] modeinfo JSON error', err); return {}; });
         if (r3 && r3.ok) {
