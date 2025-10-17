@@ -1153,12 +1153,16 @@ EOF
       echo "      - \"${HTTP_PORT_VAL}:80\"";
       echo "      - \"${HTTPS_PORT_VAL}:443\"";
     } >> "$compose_file"
-    cat >> "$compose_file" <<'EOF'
+    cat >> "$compose_file" <<EOF
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./letsencrypt:/letsencrypt
-    networks:
-      - ${net_name}
+EOF
+    {
+      echo "    networks:";
+      echo "      - ${net_name}";
+    } >> "$compose_file"
+    cat >> "$compose_file" <<'EOF'
     labels:
       - traefik.enable=true
       # Dashboard/API under /traefik with StripPrefix and redirect
@@ -1187,11 +1191,15 @@ EOF
       echo "    ports:";
       echo "      - \"${HTTP_PORT_VAL}:80\"";
     } >> "$compose_file"
-    cat >> "$compose_file" <<'EOF'
+    cat >> "$compose_file" <<EOF
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-    networks:
-      - ${net_name}
+EOF
+    {
+      echo "    networks:";
+      echo "      - ${net_name}";
+    } >> "$compose_file"
+    cat >> "$compose_file" <<'EOF'
     labels:
       - traefik.enable=true
       # Dashboard/API under /traefik with StripPrefix and redirect
