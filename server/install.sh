@@ -1140,6 +1140,83 @@ EOF
 
   echo "Starting Traefik..."
   (cd /opt/blobe-vm/traefik && docker compose up -d)
+
+  # Attempt automatic self-heal if Traefik isn't exposing its API due to a common misquote
+  traefik_self_heal || true
+}
+
+# -- Traefik self-heal: fix common misconfigurations automatically --
+traefik_self_heal() {
+  local dir="/opt/blobe-vm/traefik"
+  local file="$dir/docker-compose.yml"
+  local container="traefik-traefik-1"
+
+  [[ -f "$file" ]] || return 0
+
+  # Give it a moment to start
+  sleep 1
+
+  # If logs show illegal rune literal, it's almost always a single-quoted rule
+  if docker logs "$container" --since 30s 2>/dev/null | grep -qi "illegal rune literal"; then
+    if grep -q "traefik.http.routers.traefik.rule=PathPrefix('/traefik')" "$file"; then
+      echo "[traefik-self-heal] Fixing PathPrefix('/traefik') -> PathPrefix(\`/traefik\`)"
+      sed -i 's#traefik.http.routers.traefik.rule=PathPrefix('\''/traefik'\'')#traefik.http.routers.traefik.rule=PathPrefix(`/traefik`)#g' "$file"
+      (cd "$dir" && docker compose up -d)
+      sleep 1
+    fi
+  fi
+
+  # If the rule was mangled to PathPrefix(), restore it
+  if grep -q "traefik.http.routers.traefik.rule=PathPrefix()" "$file"; then
+    echo "[traefik-self-heal] Restoring missing PathPrefix to /traefik"
+    sed -i 's#traefik.http.routers.traefik.rule=PathPrefix()#traefik.http.routers.traefik.rule=PathPrefix(`/traefik`)#g' "$file"
+    (cd "$dir" && docker compose up -d)
+    sleep 1
+  fi
+
+  # Quick health probe of the local API through the proxy
+  local code
+  code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1/traefik/api/http/routers || true)
+  if [[ "$code" != "200" ]]; then
+    echo "[traefik-self-heal] Traefik API not reachable (HTTP $code). Attempting labels canonicalization..." >&2
+    traefik_canonicalize_labels "$file" "$dir"
+    # Re-check health once more
+    code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1/traefik/api/http/routers || true)
+    if [[ "$code" != "200" ]]; then
+      echo "[traefik-self-heal] Still unhealthy (HTTP $code). See 'docker logs traefik-traefik-1'." >&2
+    else
+      echo "[traefik-self-heal] Traefik API healthy after labels canonicalization."
+    fi
+  else
+    echo "[traefik-self-heal] Traefik API healthy."
+  fi
+}
+
+# Replace the Traefik service labels with a minimal, working dashboard/API router.
+traefik_canonicalize_labels() {
+  local file="$1"
+  local dir="$2"
+  [[ -f "$file" ]] || return 0
+  echo "[traefik-self-heal] Rewriting Traefik labels to a known-good set..."
+  awk '
+    BEGIN{inlabels=0; done=0}
+    /^\s*labels:\s*$/ && inlabels==0 && done==0 {
+      print "    labels:";
+      print "      - traefik.enable=true";
+      print "      - traefik.http.routers.apidash.rule=PathPrefix(`/traefik`)";
+      print "      - traefik.http.routers.apidash.entrypoints=web";
+      print "      - traefik.http.routers.apidash.service=api@internal";
+      inlabels=1; done=1; next
+    }
+    inlabels==1 {
+      # Skip existing labels section content until next non-indented section
+      if ($0 !~ /^\s{6,}[-a-zA-Z0-9_.:]/) { inlabels=0 }
+      next
+    }
+    { print }
+  ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+  (cd "$dir" && docker compose up -d)
+  sleep 1
 }
 
 # --- Direct mode dashboard deployment (no Traefik) ---
