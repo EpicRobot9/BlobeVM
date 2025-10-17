@@ -1149,6 +1149,9 @@ YAML
       - traefik.http.routers.traefik.rule=PathPrefix(`/traefik`)
       - traefik.http.routers.traefik.entrypoints=web
       - traefik.http.middlewares.traefik-stripprefix.stripprefix.prefixes=/traefik
+      - traefik.http.middlewares.traefik-redirectregex.redirectregex.regex=^/traefik/?$
+      - traefik.http.middlewares.traefik-redirectregex.redirectregex.replacement=/traefik/dashboard/
+      - traefik.http.middlewares.traefik-redirectregex.redirectregex.permanent=true
       - traefik.http.routers.traefik.service=api@internal
 YAML
     if [[ -n "$TRAEFIK_DASHBOARD_AUTH" ]]; then
@@ -1158,7 +1161,11 @@ YAML
       # Add auth middleware labels
       cat >> "$compose_file" <<YAML
   - traefik.http.middlewares.traefik-auth.basicauth.users=${SAFE_AUTH}
-  - traefik.http.routers.traefik.middlewares=traefik-auth,traefik-stripprefix
+      - traefik.http.routers.traefik.middlewares=traefik-auth,traefik-redirectregex,traefik-stripprefix
+YAML
+    else
+      cat >> "$compose_file" <<'YAML'
+      - traefik.http.routers.traefik.middlewares=traefik-redirectregex,traefik-stripprefix
 YAML
     fi
     cat >> "$compose_file" <<YAML
@@ -1197,6 +1204,10 @@ YAML
       - traefik.http.routers.traefik.rule=PathPrefix(`/traefik`)
       - traefik.http.routers.traefik.entrypoints=web
       - traefik.http.middlewares.traefik-stripprefix.stripprefix.prefixes=/traefik
+      - traefik.http.middlewares.traefik-redirectregex.redirectregex.regex=^/traefik/?$
+      - traefik.http.middlewares.traefik-redirectregex.redirectregex.replacement=/traefik/dashboard/
+      - traefik.http.middlewares.traefik-redirectregex.redirectregex.permanent=true
+      - traefik.http.routers.traefik.middlewares=traefik-redirectregex,traefik-stripprefix
       - traefik.http.routers.traefik.service=api@internal
 YAML
     cat >> "$compose_file" <<YAML
