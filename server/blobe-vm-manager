@@ -613,6 +613,9 @@ cmd_rebuild_image() {
   [[ -d "$ctx" ]] || { echo "REPO_DIR not found: $ctx" >&2; exit 1; }
   echo "Building image '$image' from $ctx ..."
   docker build -t "$image" "$ctx"
+  echo "Pruning dangling images and build cache..."
+  docker image prune -f >/dev/null 2>&1 || true
+  docker builder prune -af >/dev/null 2>&1 || true
 }
 
 cmd_recreate_all() {

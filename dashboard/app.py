@@ -33,6 +33,7 @@ TEMPLATE = r"""
         <button onclick="bulkRecreate()">Recreate ALL VMs</button>
         <button onclick="bulkRebuildAll()">Rebuild ALL VMs</button>
         <button onclick="bulkUpdateAndRebuild()">Update & Rebuild ALL VMs</button>
+        <button onclick="pruneDocker()" class="btn-gray">Prune Docker</button>
         <button onclick="bulkDeleteAll()" class="btn-red">Delete ALL VMs</button>
         <span class="muted" style="margin-left: .5rem">Shift+Click Check for report-only (no auto-fix)</span>
     </div>
@@ -140,6 +141,7 @@ async function load(){
                  `<button onclick="appStatusSelected('${i.name}')" class="btn-gray">Status</button>`+
                  `<button onclick="recreateVM('${i.name}')">Recreate</button>`+
                  `<button onclick="rebuildVM('${i.name}')">Rebuild</button>`+
+                 `<button onclick=\"cleanVM('${i.name}')\" class=\"btn-gray\">Clean</button>`+
                  `<button onclick="delvm('${i.name}')" class="btn-red">Delete</button>`+
                  `</td>`;
           tb.appendChild(tr);
@@ -165,14 +167,41 @@ async function updateVM(name){
     try{
         const r = await fetch(`/dashboard/api/update-vm/${encodeURIComponent(name)}`,{method:'POST'});
         const j = await r.json().catch(()=>({}));
-        if(j && j.ok){
-            alert('Update completed.');
+        if(j && (j.ok || j.started)){
+            alert('Update started. Status will show as Updating…');
         }else{
             alert('Update failed:\n'+((j && (j.error||j.output))||'unknown error'));
         }
     }catch(e){
         alert('Update error: '+e);
     }
+    load();
+}
+
+async function pruneDocker(){
+    if(!confirm('Prune unused Docker data (images, containers, cache)?')) return;
+    try{
+        const r = await fetch('/dashboard/api/prune-docker', {method:'POST'});
+        const j = await r.json().catch(()=>({}));
+        if(j && (j.ok || j.started)){
+            alert('Docker prune started. This may take a while.');
+        }else{
+            alert('Failed to start prune: ' + (j && (j.error||j.output) || 'unknown'));
+        }
+    }catch(e){ alert('Prune error: '+e); }
+}
+
+async function cleanVM(name){
+    if(!confirm('Clean apt caches and temporary files inside VM '+name+'?')) return;
+    try{
+        const r = await fetch(`/dashboard/api/clean-vm/${encodeURIComponent(name)}`, {method:'POST'});
+        const j = await r.json().catch(()=>({}));
+        if(j && j.ok){
+            alert('Clean requested.');
+        }else{
+            alert('Clean failed:\n' + ((j && (j.error||j.output)) || 'unknown error'));
+        }
+    }catch(e){ alert('Clean error: ' + e); }
     load();
 }
 async function installChrome(name){
@@ -312,7 +341,7 @@ async function setCustomDomain(){
 function statusDot(st){
     const s=(st||'').toLowerCase();
     let cls='gray';
-    if(s.includes('rebuilding')) cls='amber';
+    if(s.includes('rebuilding') || s.includes('updating')) cls='amber';
     else if(s.includes('up')) cls='green';
     else if(s.includes('exited')||s.includes('stopped')||s.includes('dead')) cls='red';
     return `<span class="dot ${cls}"></span>`;
@@ -456,9 +485,11 @@ def _run_manager(*args):
     )
     if need_fallback:
         alt = _repo_manager_path()
-        if os.path.isfile(alt) and os.access(alt, os.X_OK):
-            r2 = subprocess.run([alt, *args], capture_output=True, text=True)
-            return (r2.returncode == 0, r2.stdout.strip(), r2.stderr.strip(), r2.returncode)
+        if os.path.isfile(alt):
+            # If not executable, try invoking via bash
+            cmd = [alt, *args] if os.access(alt, os.X_OK) else ['bash', alt, *args]
+            r2 = subprocess.run(cmd, capture_output=True, text=True)
+            return (r2.returncode == 0, (r2.stdout or '').strip(), (r2.stderr or '').strip(), r2.returncode)
     return (ok, (r.stdout or '').strip(), (r.stderr or '').strip(), r.returncode)
 
 def _is_direct_mode():
@@ -538,11 +569,13 @@ def manager_json_list():
                         it['port'] = hp
                     if hp and host:
                         it['url'] = f"http://{host}:{hp}/"
-            # Apply transient statuses (e.g., rebuilding)
+            # Apply transient statuses (e.g., rebuilding/updating)
             for it in instances:
                 try:
                     if _has_flag(it['name'], 'rebuilding'):
                         it['status'] = 'Rebuilding...'
+                    elif _has_flag(it['name'], 'updating'):
+                        it['status'] = 'Updating...'
                 except Exception:
                     pass
             return instances
@@ -603,6 +636,8 @@ def manager_json_list():
         # Transient status override
         if _has_flag(name, 'rebuilding'):
             status = 'Rebuilding...'
+        elif _has_flag(name, 'updating'):
+            status = 'Updating...'
         inst = {'name': name, 'status': status, 'url': url}
         if port:
             inst['port'] = port
@@ -730,7 +765,7 @@ def _enable_single_port(port: int):
             '--label', 'traefik.http.routers.blobe-dashboard.rule=PathPrefix(`/dashboard`)',
             '--label', 'traefik.http.routers.blobe-dashboard.entrypoints=web',
             '--label', 'traefik.http.services.blobe-dashboard.loadbalancer.server.port=5000',
-            'ghcr.io/library/python:3.11-slim',
+            'python:3.11-slim',
             'bash', '-c', 'pip install --no-cache-dir flask && python /app/app.py')
 
     # Recreate VM containers into proxy network
@@ -805,7 +840,7 @@ def _disable_single_port(dash_port: int | None):
         '-e', f'BLOBEDASH_USER={os.environ.get("BLOBEDASH_USER","")}',
         '-e', f'BLOBEDASH_PASS={os.environ.get("BLOBEDASH_PASS","")}',
         '-e', f'HOST_DOCKER_BIN={HOST_DOCKER_BIN}',
-        'ghcr.io/library/python:3.11-slim',
+    'python:3.11-slim',
         'bash', '-c', 'pip install --no-cache-dir flask && python /app/app.py')
 
 @app.get('/dashboard')
@@ -936,12 +971,37 @@ def api_delete_all_instances():
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
+@app.post('/dashboard/api/prune-docker')
+@auth_required
+def api_prune_docker():
+    """Prune unused Docker data on the host. Runs in background."""
+    def worker():
+        try:
+            _docker('system', 'prune', '-af')
+            _docker('builder', 'prune', '-af')
+            _docker('image', 'prune', '-af')
+            _docker('volume', 'prune', '-f')
+        except Exception:
+            pass
+    try:
+        threading.Thread(target=worker, daemon=True).start()
+        return jsonify({'ok': True, 'started': True})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
 @app.post('/dashboard/api/update-vm/<name>')
 @auth_required
 def api_update_vm(name):
+    # Set transient updating flag and run in background to avoid blocking and to show status
     try:
-        ok, out, err, _ = _run_manager('update-vm', name)
-        return jsonify({'ok': ok, 'output': out, 'error': err})
+        _set_flag(name, 'updating', True)
+        def worker(vm_name):
+            try:
+                _run_manager('update-vm', vm_name)
+            finally:
+                _set_flag(vm_name, 'updating', False)
+        threading.Thread(target=worker, args=(name,), daemon=True).start()
+        return jsonify({'ok': True, 'started': True})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
@@ -979,6 +1039,29 @@ def api_app_reinstall(name, app):
     try:
         ok, out, err, _ = _run_manager('app-reinstall', name, app)
         return jsonify({'ok': ok, 'output': out, 'error': err})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+@app.post('/dashboard/api/clean-vm/<name>')
+@auth_required
+def api_clean_vm(name):
+    """Clean apt caches and common temp directories inside the VM container."""
+    cname = f'blobevm_{name}'
+    # Best-effort: ignore errors
+    try:
+        cmds = [
+            'apt-get update || true',
+            'apt-get -y autoremove || true',
+            'apt-get -y autoclean || true',
+            'apt-get -y clean || true',
+            'rm -rf /var/cache/apt/archives/* || true',
+            'rm -rf /var/lib/apt/lists/* || true',
+            'rm -rf /tmp/* /var/tmp/* || true',
+            'mkdir -p /var/lib/apt/lists || true'
+        ]
+        for c in cmds:
+            _docker('exec', '-u', 'root', cname, 'bash', '-lc', c)
+        return jsonify({'ok': True})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
