@@ -11,7 +11,7 @@ CONTAINER_DOCKER_BIN = os.environ.get('CONTAINER_DOCKER_BIN') or '/usr/bin/docke
 DOCKER_VOLUME_BIND = f'{HOST_DOCKER_BIN}:{CONTAINER_DOCKER_BIN}:ro'
 TEMPLATE = r"""
 <!doctype html><html><head><title>BlobeVM Dashboard</title>
-<style>body{font-family:system-ui,Arial;margin:1.5rem;background:#111;color:#eee}table{border-collapse:collapse;width:100%;}th,td{padding:.5rem;border-bottom:1px solid #333}a,button{background:#2563eb;color:#fff;border:none;padding:.4rem .8rem;border-radius:4px;text-decoration:none;cursor:pointer}form{display:inline}h1{margin-top:0} .badge{background:#444;padding:.15rem .4rem;border-radius:3px;font-size:.65rem;text-transform:uppercase;margin-left:.3rem} .muted{opacity:.75} .btn-red{background:#dc2626} .btn-gray{background:#374151} .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}.green{background:#10b981}.red{background:#ef4444}.gray{background:#6b7280}</style>
+<style>body{font-family:system-ui,Arial;margin:1.5rem;background:#111;color:#eee}table{border-collapse:collapse;width:100%;}th,td{padding:.5rem;border-bottom:1px solid #333}a,button{background:#2563eb;color:#fff;border:none;padding:.4rem .8rem;border-radius:4px;text-decoration:none;cursor:pointer}form{display:inline}h1{margin-top:0} .badge{background:#444;padding:.15rem .4rem;border-radius:3px;font-size:.65rem;text-transform:uppercase;margin-left:.3rem} .muted{opacity:.75} .btn-red{background:#dc2626} .btn-gray{background:#374151} .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}.green{background:#10b981}.red{background:#ef4444}.gray{background:#6b7280}.amber{background:#f59e0b}</style>
 </head><body>
 <h1>BlobeVM Dashboard</h1>
 <div id=errbox style="display:none;background:#7f1d1d;color:#fff;padding:.5rem .75rem;border-radius:4px;margin:.5rem 0"></div>
@@ -312,7 +312,8 @@ async function setCustomDomain(){
 function statusDot(st){
     const s=(st||'').toLowerCase();
     let cls='gray';
-    if(s.includes('up')) cls='green';
+    if(s.includes('rebuilding')) cls='amber';
+    else if(s.includes('up')) cls='green';
     else if(s.includes('exited')||s.includes('stopped')||s.includes('dead')) cls='red';
     return `<span class="dot ${cls}"></span>`;
 }
@@ -402,6 +403,37 @@ def _state_dir():
 def _repo_manager_path():
     # Fallback path to the repo-managed CLI inside the mounted state dir
     return os.path.join(_state_dir(), 'server', 'blobe-vm-manager')
+
+def _inst_dir():
+    return os.path.join(_state_dir(), 'instances')
+
+def _flag_path(name: str, flag: str) -> str:
+    return os.path.join(_inst_dir(), name, f'.{flag}')
+
+def _set_flag(name: str, flag: str, on: bool = True):
+    try:
+        p = _flag_path(name, flag)
+        if on:
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, 'w') as f:
+                f.write(str(int(time.time())))
+        else:
+            if os.path.isfile(p):
+                os.remove(p)
+    except Exception:
+        pass
+
+def _has_flag(name: str, flag: str, max_age_sec: int = 6*3600) -> bool:
+    try:
+        p = _flag_path(name, flag)
+        if not os.path.isfile(p):
+            return False
+        if max_age_sec is None:
+            return True
+        st = os.stat(p)
+        return (time.time() - st.st_mtime) < max_age_sec
+    except Exception:
+        return False
 
 def _run_manager(*args):
     """Run the manager with given args. If the primary manager doesn't support
@@ -506,6 +538,13 @@ def manager_json_list():
                         it['port'] = hp
                     if hp and host:
                         it['url'] = f"http://{host}:{hp}/"
+            # Apply transient statuses (e.g., rebuilding)
+            for it in instances:
+                try:
+                    if _has_flag(it['name'], 'rebuilding'):
+                        it['status'] = 'Rebuilding...'
+                except Exception:
+                    pass
             return instances
     except Exception:
         # likely docker CLI not present inside container -> fall back
@@ -561,6 +600,9 @@ def manager_json_list():
                 url = subprocess.check_output([MANAGER, 'url', name], text=True).strip()
             except Exception:
                 url = ''
+        # Transient status override
+        if _has_flag(name, 'rebuilding'):
+            status = 'Rebuilding...'
         inst = {'name': name, 'status': status, 'url': url}
         if port:
             inst['port'] = port
@@ -848,24 +890,41 @@ def api_rebuild_vms():
     names = request.json.get('names', [])
     if not names:
         return jsonify({'error': 'No VM names provided'}), 400
-    try:
-        result = subprocess.run([MANAGER, 'rebuild-vms', *names], capture_output=True, text=True)
-        ok = (result.returncode == 0)
-        return jsonify({'ok': ok, 'output': result.stdout.strip(), 'error': result.stderr.strip()})
-    except Exception as e:
-        return jsonify({'ok': False, 'error': str(e)}), 500
+    # Mark VMs as rebuilding and run in the background so UI can show status
+    for n in names:
+        _set_flag(n, 'rebuilding', True)
+    def worker(targets):
+        try:
+            subprocess.run([MANAGER, 'rebuild-vms', *targets], capture_output=True, text=True)
+        finally:
+            for n in targets:
+                _set_flag(n, 'rebuilding', False)
+    threading.Thread(target=worker, args=(names,), daemon=True).start()
+    return jsonify({'ok': True, 'started': True})
 
 @app.post('/dashboard/api/update-and-rebuild')
 @auth_required
 def api_update_and_rebuild():
     names = request.json.get('names', [])
-    try:
-        args = [MANAGER, 'update-and-rebuild'] + names
-        result = subprocess.run(args, capture_output=True, text=True)
-        ok = (result.returncode == 0)
-        return jsonify({'ok': ok, 'output': result.stdout.strip(), 'error': result.stderr.strip()})
-    except Exception as e:
-        return jsonify({'ok': False, 'error': str(e)}), 500
+    # Mark as rebuilding and run in background
+    targets = names[:]
+    if not targets:
+        # If none specified, mark all known instances
+        try:
+            targets = [i['name'] for i in manager_json_list()]
+        except Exception:
+            targets = []
+    for n in targets:
+        _set_flag(n, 'rebuilding', True)
+    def worker(tgts):
+        try:
+            args = [MANAGER, 'update-and-rebuild'] + names
+            subprocess.run(args, capture_output=True, text=True)
+        finally:
+            for n in tgts:
+                _set_flag(n, 'rebuilding', False)
+    threading.Thread(target=worker, args=(targets,), daemon=True).start()
+    return jsonify({'ok': True, 'started': True})
 
 @app.post('/dashboard/api/delete-all-instances')
 @auth_required
