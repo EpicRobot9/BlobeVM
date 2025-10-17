@@ -346,8 +346,10 @@ ensure_network() {
     # We are reusing an external Traefik; assume its network exists
     return 0
   fi
-  if ! docker network inspect "${TRAEFIK_NETWORK}" >/dev/null 2>&1; then
-    docker network create "${TRAEFIK_NETWORK}"
+  local net_name
+  net_name="${TRAEFIK_NETWORK:-proxy}"
+  if ! docker network inspect "${net_name}" >/dev/null 2>&1; then
+    docker network create "${net_name}"
   fi
 }
 
@@ -759,6 +761,7 @@ setup_traefik() {
   chmod 700 /opt/blobe-vm/traefik/letsencrypt
 
   local compose_file=/opt/blobe-vm/traefik/docker-compose.yml
+  local net_name="${TRAEFIK_NETWORK:-proxy}"
   echo "Writing Traefik docker-compose.yml to $compose_file"
 
   if [[ "${TLS_ENABLED:-0}" -eq 1 ]]; then
@@ -790,12 +793,12 @@ YAML
       echo "      - \"${HTTP_PORT}:80\"";
       echo "      - \"${HTTPS_PORT}:443\"";
     } >> "$compose_file"
-    cat >> "$compose_file" <<'YAML'
+    cat >> "$compose_file" <<YAML
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./letsencrypt:/letsencrypt
     networks:
-      - ${TRAEFIK_NETWORK}
+      - ${net_name}
     labels:
       - traefik.enable=true
       # Router rules for the dashboard are only active when a domain is set
@@ -814,13 +817,11 @@ YAML
       - traefik.http.routers.traefik.middlewares=traefik-auth
 YAML
     fi
-    cat >> "$compose_file" <<'YAML'
+    cat >> "$compose_file" <<YAML
 networks:
-  proxy:
+  ${net_name}:
     external: true
 YAML
-    # Replace default network name 'proxy' with selected network name
-    sed -i "s/^networks:\n  proxy:/networks:\n  ${TRAEFIK_NETWORK}:/" "$compose_file"
   else
     cat > "$compose_file" <<YAML
 services:
@@ -837,13 +838,13 @@ YAML
       echo "    ports:";
       echo "      - \"${HTTP_PORT}:80\"";
     } >> "$compose_file"
-    cat >> "$compose_file" <<'YAML'
+    cat >> "$compose_file" <<YAML
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
-      - ${TRAEFIK_NETWORK}
+      - ${net_name}
 networks:
-  ${TRAEFIK_NETWORK}:
+  ${net_name}:
     external: true
 YAML
   fi
@@ -860,10 +861,10 @@ YAML
     echo "[dashboard] Pulling latest dashboard base image..."
     docker pull ghcr.io/library/python:3.11-slim
     # Append dashboard service to compose file
-    cat >> /opt/blobe-vm/traefik/docker-compose.yml <<'DASH'
+    cat >> /opt/blobe-vm/traefik/docker-compose.yml <<DASH
   dashboard:
     image: ghcr.io/library/python:3.11-slim
-    command: bash -c "pip install --no-cache-dir flask && python /app/app.py"
+    command: bash -c "apt-get update && apt-get install -y curl jq && pip install --no-cache-dir flask && python /app/app.py"
     volumes:
       - /opt/blobe-vm:/opt/blobe-vm
       - /usr/local/bin/blobe-vm-manager:/usr/local/bin/blobe-vm-manager:ro
@@ -875,7 +876,7 @@ YAML
       - BLOBEDASH_PASS=${BLOBEDASH_PASS:-}
       - HOST_DOCKER_BIN=${HOST_DOCKER_BIN:-/usr/bin/docker}
     networks:
-      - ${TRAEFIK_NETWORK}
+      - ${net_name}
     labels:
       - traefik.enable=true
       - traefik.http.routers.blobe-dashboard.rule=PathPrefix(`/dashboard`)
@@ -950,8 +951,8 @@ deploy_dashboard_direct() {
     -e BLOBEDASH_USER="${BLOBEDASH_USER:-}" \
     -e BLOBEDASH_PASS="${BLOBEDASH_PASS:-}" \
     -e HOST_DOCKER_BIN="${docker_bin}" \
-    ghcr.io/library/python:3.11-slim \
-    bash -c "pip install --no-cache-dir flask && python /app/app.py" \
+  ghcr.io/library/python:3.11-slim \
+  bash -c "apt-get update && apt-get install -y curl jq && pip install --no-cache-dir flask && python /app/app.py" \
     >/dev/null
 }
 
