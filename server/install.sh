@@ -1060,6 +1060,8 @@ services:
       - --certificatesresolvers.myresolver.acme.httpchallenge=true
       - --certificatesresolvers.myresolver.acme.httpchallenge.entrypoint=web
 EOF
+    # Constrain Traefik provider to only discover BlobeVM-managed containers
+    echo '      - --providers.docker.constraints=Label(`com.blobevm.managed`,`1`)' >> "$compose_file"
     if [[ "${FORCE_HTTPS:-0}" -eq 1 ]]; then
       cat >> "$compose_file" <<EOF
       - --entrypoints.web.http.redirections.entryPoint.to=websecure
@@ -1083,6 +1085,7 @@ EOF
     cat >> "$compose_file" <<'EOF'
     labels:
       - traefik.enable=true
+      - com.blobevm.managed=1
       # Dashboard/API under /traefik with StripPrefix and redirect
       - traefik.http.routers.traefik.rule=PathPrefix(`/traefik`)
       - traefik.http.routers.traefik.entrypoints=web
@@ -1105,6 +1108,8 @@ services:
       - --accesslog=true
       - --api.dashboard=true
 EOF
+    # Constrain Traefik provider to only discover BlobeVM-managed containers
+    echo '      - --providers.docker.constraints=Label(`com.blobevm.managed`,`1`)' >> "$compose_file"
     {
       echo "    ports:";
       echo "      - \"${HTTP_PORT_VAL}:80\"";
@@ -1120,6 +1125,7 @@ EOF
     cat >> "$compose_file" <<'EOF'
     labels:
       - traefik.enable=true
+      - com.blobevm.managed=1
       # Dashboard/API under /traefik with StripPrefix and redirect
       - traefik.http.routers.traefik.rule=PathPrefix(`/traefik`)
       - traefik.http.routers.traefik.entrypoints=web
@@ -1190,6 +1196,17 @@ traefik_self_heal() {
   else
     echo "[traefik-self-heal] Traefik API healthy."
   fi
+
+  # If TLS is disabled, prune any stray websecure routers that might be coming from other stacks
+  if [[ "${TLS_ENABLED:-0}" -eq 0 ]]; then
+    # This relies on provider constraint to avoid unrelated containers, but ensure no HTTPS redirect flags linger
+    if grep -q "--entrypoints.web.http.redirections.entryPoint.to=websecure" "$file"; then
+      echo "[traefik-self-heal] Removing HTTP->HTTPS redirection flag because TLS is disabled."
+      sed -i '/--entrypoints.web.http.redirections.entryPoint.to=websecure/d' "$file"
+      sed -i '/--entrypoints.web.http.redirections.entryPoint.scheme=https/d' "$file" || true
+      (cd "$dir" && docker compose up -d) || true
+    fi
+  fi
 }
 
 # Replace the Traefik service labels with a minimal, working dashboard/API router.
@@ -1203,9 +1220,15 @@ traefik_canonicalize_labels() {
     /^\s*labels:\s*$/ && inlabels==0 && done==0 {
       print "    labels:";
       print "      - traefik.enable=true";
+      print "      - com.blobevm.managed=1";
       print "      - traefik.http.routers.apidash.rule=PathPrefix(`/traefik`)";
       print "      - traefik.http.routers.apidash.entrypoints=web";
+      print "      - traefik.http.routers.apidash.middlewares=apidash-redirect,apidash-stripprefix";
       print "      - traefik.http.routers.apidash.service=api@internal";
+      print "      - traefik.http.middlewares.apidash-stripprefix.stripprefix.prefixes=/traefik";
+      print "      - traefik.http.middlewares.apidash-redirect.redirectregex.regex=^/traefik/?$";
+      print "      - traefik.http.middlewares.apidash-redirect.redirectregex.replacement=/traefik/dashboard/";
+      print "      - traefik.http.middlewares.apidash-redirect.redirectregex.permanent=true";
       inlabels=1; done=1; next
     }
     inlabels==1 {

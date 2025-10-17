@@ -216,6 +216,7 @@ common_labels() {
   local labels=()
   labels+=("--label=traefik.docker.network=${TRAEFIK_NETWORK:-proxy}")
   labels+=("--label=traefik.enable=true")
+  labels+=("--label=com.blobevm.managed=1")
 
   if [[ -n "$host_override" ]]; then
     # Host override + dual path router
