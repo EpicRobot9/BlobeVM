@@ -9,7 +9,7 @@ MANAGER = 'blobe-vm-manager'
 HOST_DOCKER_BIN = os.environ.get('HOST_DOCKER_BIN') or '/usr/bin/docker'
 CONTAINER_DOCKER_BIN = os.environ.get('CONTAINER_DOCKER_BIN') or '/usr/bin/docker'
 DOCKER_VOLUME_BIND = f'{HOST_DOCKER_BIN}:{CONTAINER_DOCKER_BIN}:ro'
-TEMPLATE = """
+TEMPLATE = r"""
 <!doctype html><html><head><title>BlobeVM Dashboard</title>
 <style>body{font-family:system-ui,Arial;margin:1.5rem;background:#111;color:#eee}table{border-collapse:collapse;width:100%;}th,td{padding:.5rem;border-bottom:1px solid #333}a,button{background:#2563eb;color:#fff;border:none;padding:.4rem .8rem;border-radius:4px;text-decoration:none;cursor:pointer}form{display:inline}h1{margin-top:0} .badge{background:#444;padding:.15rem .4rem;border-radius:3px;font-size:.65rem;text-transform:uppercase;margin-left:.3rem} .muted{opacity:.75} .btn-red{background:#dc2626} .btn-gray{background:#374151} .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}.green{background:#10b981}.red{background:#ef4444}.gray{background:#6b7280}</style>
 </head><body>
@@ -68,7 +68,7 @@ async function load(){
             return;
         }
         eb.style.display = 'none'; eb.textContent = '';
-        const data = await r.json().catch(err => { console.error('[BLOBEDASH] list JSON error', err); return {instances:[]}; });
+    const data = await r.json().catch(err => { console.error('[BLOBEDASH] list JSON error', err); return {instances:[]}; });
         const info = await r2.json().catch(err => { console.error('[BLOBEDASH] modeinfo JSON error', err); return {}; });
         if (r3 && r3.ok) {
             const apps = await r3.json().catch(()=>({apps:[]}));
@@ -104,8 +104,13 @@ async function load(){
                 }
             }else{
                 // direct: show port; always build link using current browser host
-                let m = i.url && i.url.match(/:(\d+)/);
-                portOrPath = m ? m[1] : '';
+                // Prefer explicit port from API, else try to parse from URL or status text
+                if (i.port && String(i.port).match(/^\d+$/)) {
+                    portOrPath = String(i.port);
+                } else {
+                    let m = i.url && i.url.match(/:(\d+)/);
+                    portOrPath = m ? m[1] : '';
+                }
                 if (!portOrPath && i.status) {
                     const ms = i.status.match(/\(port\s+(\d+)\)/i);
                     if (ms) portOrPath = ms[1];
@@ -119,22 +124,22 @@ async function load(){
                 }
             }
             dbg('row', { name: i.name, status: i.status, rawUrl: i.url, mergedMode, portOrPath, openUrl });
-          tr.innerHTML=`<td>${i.name}</td><td>${dot}<span class=muted>${i.status||''}</span></td><td>${portOrPath}</td><td><a href="${openUrl}" target=_blank>${openUrl}</a></td>`+
-             `<td>`+
-             `<button onclick="openLink('${openUrl}')">Open</button>`+
-             `<button onclick=act('start','${i.name}')>Start</button>`+
-             `<button onclick=act('stop','${i.name}')>Stop</button>`+
-             `<button onclick=act('restart','${i.name}')>Restart</button>`+
-             `<button title="Shift-click for no-fix" onclick=checkVM(event,'${i.name}') class="btn-gray">Check</button>`+
-             `<button onclick=updateVM('${i.name}') class="btn-gray">Update</button>`+
-             `<button onclick=installChrome('${i.name}')>Install Chrome</button>`+
-             `<select id="appsel-${i.name}" class="btn-gray" style="background:#1f2937;color:#fff;padding:.35rem .4rem;margin-left:.25rem"><option value="">App…</option>${appOpts}</select>`+
-             `<button onclick=installSelectedApp('${i.name}')>Install</button>`+
-             `<button onclick=appStatusSelected('${i.name}') class="btn-gray">Status</button>`+
-             `<button onclick=recreateVM('${i.name}')>Recreate</button>`+
-             `<button onclick=rebuildVM('${i.name}')>Rebuild</button>`+
-             `<button onclick=delvm('${i.name}') class="btn-red">Delete</button>`+
-             `</td>`;
+             tr.innerHTML=`<td>${i.name}</td><td>${dot}<span class=muted>${i.status||''}</span></td><td>${portOrPath}</td><td><a href="${openUrl}" target="_blank" rel="noopener noreferrer">${openUrl}</a></td>`+
+                 `<td>`+
+                 `<button onclick="openLink('${openUrl}')">Open</button>`+
+                 `<button onclick="act('start','${i.name}')">Start</button>`+
+                 `<button onclick="act('stop','${i.name}')">Stop</button>`+
+                 `<button onclick="act('restart','${i.name}')">Restart</button>`+
+                 `<button title="Shift-click for no-fix" onclick="checkVM(event,'${i.name}')" class="btn-gray">Check</button>`+
+                 `<button onclick="updateVM('${i.name}')" class="btn-gray">Update</button>`+
+                 `<button onclick="installChrome('${i.name}')">Install Chrome</button>`+
+                 `<select id="appsel-${i.name}" class="btn-gray" style="background:#1f2937;color:#fff;padding:.35rem .4rem;margin-left:.25rem"><option value="">App…</option>${appOpts}</select>`+
+                 `<button onclick="installSelectedApp('${i.name}')">Install</button>`+
+                 `<button onclick="appStatusSelected('${i.name}')" class="btn-gray">Status</button>`+
+                 `<button onclick="recreateVM('${i.name}')">Recreate</button>`+
+                 `<button onclick="rebuildVM('${i.name}')">Rebuild</button>`+
+                 `<button onclick="delvm('${i.name}')" class="btn-red">Delete</button>`+
+                 `</td>`;
           tb.appendChild(tr);
         });
     } catch (err) {
@@ -430,6 +435,9 @@ def manager_json_list():
                             hp = subprocess.check_output([MANAGER, 'port', it['name']], text=True).strip()
                         except Exception:
                             hp = ''
+                    # Record explicit port for frontend
+                    if hp and hp.isdigit():
+                        it['port'] = hp
                     if hp and host:
                         it['url'] = f"http://{host}:{hp}/"
             return instances
@@ -462,6 +470,7 @@ def manager_json_list():
         status = docker_status.get(cname, '') or ''
         if not status:
             status = '(unknown)'
+        port = ''
         # In direct mode, compute URL using host published port
         if _is_direct_mode():
             host = _request_host()
@@ -479,12 +488,17 @@ def manager_json_list():
                     url = subprocess.check_output([MANAGER, 'url', name], text=True).strip()
                 except Exception:
                     url = ''
+            if hp and hp.isdigit():
+                port = hp
         else:
             try:
                 url = subprocess.check_output([MANAGER, 'url', name], text=True).strip()
             except Exception:
                 url = ''
-        instances.append({'name': name, 'status': status, 'url': url})
+        inst = {'name': name, 'status': status, 'url': url}
+        if port:
+            inst['port'] = port
+        instances.append(inst)
     return instances
 
 def _read_env():
