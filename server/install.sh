@@ -582,18 +582,33 @@ detect_ports() {
       if free_port_by_killing "$HTTP_PORT"; then
         echo "Freed port ${HTTP_PORT} for Traefik." >&2
       fi
-      local fallback_http
-      if [[ "$HTTP_PORT" -eq 80 ]]; then
-        fallback_http=8080
-      else
-        fallback_http=$((HTTP_PORT + 1))
+      if [[ "${MANAGE_TRAEFIK:-0}" -eq 1 && "$desired_http" -eq 80 ]]; then
+        # Try freeing again and insist on 80 in takeover mode
+        if port_in_use 80; then
+          free_port_by_killing 80 || true
+        fi
+        if port_in_use 80; then
+          echo "Port 80 remains busy; continuing with alternative port (manage mode)" >&2
+        else
+          HTTP_PORT=80
+          echo "Using HTTP port 80 (manage mode)." >&2
+          goto_http_set=1
+        fi
       fi
-      HTTP_PORT=$(find_free_port "$fallback_http" 200 || true)
-      if [[ -z "$HTTP_PORT" ]]; then
-        echo "Unable to find a free HTTP port automatically. Exiting." >&2
-        exit 1
+      if [[ -z "${goto_http_set:-}" ]]; then
+        local fallback_http
+        if [[ "$HTTP_PORT" -eq 80 ]]; then
+          fallback_http=8080
+        else
+          fallback_http=$((HTTP_PORT + 1))
+        fi
+        HTTP_PORT=$(find_free_port "$fallback_http" 200 || true)
+        if [[ -z "$HTTP_PORT" ]]; then
+          echo "Unable to find a free HTTP port automatically. Exiting." >&2
+          exit 1
+        fi
+        echo "Port ${desired_http} is busy; automatically using HTTP port ${HTTP_PORT}." >&2
       fi
-      echo "Port ${desired_http} is busy; automatically using HTTP port ${HTTP_PORT}." >&2
     else
       local fallback_http
       if [[ "$desired_http" -eq 80 ]]; then
@@ -610,18 +625,32 @@ detect_ports() {
       if free_port_by_killing "$HTTPS_PORT"; then
         echo "Freed port ${HTTPS_PORT} for Traefik." >&2
       fi
-      local fallback_https
-      if [[ "$HTTPS_PORT" -eq 443 ]]; then
-        fallback_https=8443
-      else
-        fallback_https=$((HTTPS_PORT + 1))
+      if [[ "${MANAGE_TRAEFIK:-0}" -eq 1 && -n "${BLOBEVM_EMAIL:-}" && "$desired_https" -eq 443 ]]; then
+        if port_in_use 443; then
+          free_port_by_killing 443 || true
+        fi
+        if port_in_use 443; then
+          echo "Port 443 remains busy; continuing with alternative port (manage mode)" >&2
+        else
+          HTTPS_PORT=443
+          echo "Using HTTPS port 443 (manage mode)." >&2
+          goto_https_set=1
+        fi
       fi
-      HTTPS_PORT=$(find_free_port "$fallback_https" 200 || true)
-      if [[ -z "$HTTPS_PORT" ]]; then
-        echo "Unable to find a free HTTPS port automatically. Exiting." >&2
-        exit 1
+      if [[ -z "${goto_https_set:-}" ]]; then
+        local fallback_https
+        if [[ "$HTTPS_PORT" -eq 443 ]]; then
+          fallback_https=8443
+        else
+          fallback_https=$((HTTPS_PORT + 1))
+        fi
+        HTTPS_PORT=$(find_free_port "$fallback_https" 200 || true)
+        if [[ -z "$HTTPS_PORT" ]]; then
+          echo "Unable to find a free HTTPS port automatically. Exiting." >&2
+          exit 1
+        fi
+        echo "Port ${desired_https} is busy; automatically using HTTPS port ${HTTPS_PORT}." >&2
       fi
-      echo "Port ${desired_https} is busy; automatically using HTTPS port ${HTTPS_PORT}." >&2
     else
       local fallback_https
       if [[ "$desired_https" -eq 443 ]]; then
@@ -1327,9 +1356,15 @@ main() {
   fi
   # If reusing an external Traefik, skip our port detection and TLS prompts entirely
   if [[ "${SKIP_TRAEFIK:-0}" -ne 1 && "${NO_TRAEFIK:-0}" -ne 1 ]]; then
-    # If updating, prefer existing port settings; otherwise detect
-    if [[ -z "${HTTP_PORT:-}" || -z "${HTTPS_PORT:-}" ]]; then
+    # In manage/takeover mode, force port detection (reset to 80/443 if possible)
+    if [[ "${MANAGE_TRAEFIK:-0}" -eq 1 ]]; then
+      unset HTTP_PORT HTTPS_PORT
       detect_ports
+    else
+      # If updating, prefer existing port settings; otherwise detect
+      if [[ -z "${HTTP_PORT:-}" || -z "${HTTPS_PORT:-}" ]]; then
+        detect_ports
+      fi
     fi
     if [[ -z "${TLS_ENABLED:-}" ]]; then
       handle_tls_port_conflict
