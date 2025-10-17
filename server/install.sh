@@ -1,3 +1,20 @@
+  # Query Traefik API via host HTTP port first (path /traefik/api), then fallback to internal 8080
+  echo "[diagnostics] Traefik API snapshot (routers, services, entrypoints)"
+  local host_api_base="http://127.0.0.1:${HTTP_PORT:-80}/traefik/api"
+  for ep in /entrypoints /http/routers /http/services; do
+    echo "[diagnostics] GET /traefik/api$ep (host:${HTTP_PORT:-80})"
+    curl -sS --max-time 6 "$host_api_base$ep" || echo "[diagnostics] (unreachable)"
+    echo
+  done
+  docker pull -q curlimages/curl:8.8.0 >/dev/null 2>&1 || true
+  for ep in /api/entrypoints /api/http/routers /api/http/services; do
+    echo "[diagnostics] GET $ep (traefik:8080)"
+    docker run --rm --network "$net_name" curlimages/curl:8.8.0 -sS \
+      --max-time 6 "http://traefik:8080$ep" || echo "[diagnostics] (unreachable)"
+    echo
+  done
+  curl -sS --max-time 6 "${host_api_base}/http/routers" | grep -i "${test_name}\\.${BLOBEVM_DOMAIN}" || true
+  curl -sS --max-time 6 "${host_api_base}/http/routers" | grep -i "${base_path}/${test_name}" || true
 #!/usr/bin/env bash
 
 set -euo pipefail
@@ -1168,6 +1185,12 @@ YAML
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - ${net_name}
+    labels:
+      - traefik.enable=true
+      # Expose the Traefik dashboard/API via path prefix on web (HTTP) entrypoint
+      - traefik.http.services.traefik.loadbalancer.server.port=8080
+      - traefik.http.routers.traefik.rule=PathPrefix(`/traefik`)
+      - traefik.http.routers.traefik.entrypoints=web
 networks:
   ${net_name}:
     external: true
