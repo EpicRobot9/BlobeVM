@@ -830,7 +830,9 @@ auto_test_traefik() {
   [[ "$https_port" != "443" ]] && https_suffix=":"$https_port
   local ip host_url path_url
   ip="$(hostname -I | awk '{print $1}')"
-  path_url="http://${ip}${http_suffix}${base_path}/${name}/"
+  # Use localhost for path-based routing test to avoid DNS/host routing issues
+  local loop_host="127.0.0.1"
+  path_url="http://${loop_host}${http_suffix}${base_path}/${name}/"
   if [[ -n "${BLOBEVM_DOMAIN:-}" ]]; then
     host_url="http://${name}.${BLOBEVM_DOMAIN}${http_suffix}/"
   else
@@ -878,11 +880,68 @@ auto_test_traefik() {
       echo " - Ensure Traefik network '${TRAEFIK_NETWORK:-proxy}' exists and the Traefik container is running." >&2
       echo " - If using a custom domain, make sure DNS and port ${HTTP_PORT} reach this host." >&2
       export SELF_TEST_STATUS="FAIL"
+      # Dump diagnostics to help with troubleshooting
+      dump_traefik_diagnostics "$name" || true
     fi
   fi
   # Clean up test VM (container and instance dir)
   docker rm -f "blobevm_${name}" >/dev/null 2>&1 || true
   rm -rf "/opt/blobe-vm/instances/${name}" >/dev/null 2>&1 || true
+}
+
+# --- Diagnostics: print container labels, network status, Traefik routers/services/logs ---
+dump_traefik_diagnostics() {
+  local test_name="$1"
+  local cname="blobevm_${test_name}"
+  local net_name="${TRAEFIK_NETWORK:-proxy}"
+  local base_path="${BASE_PATH:-/vm}"; [[ "$base_path" != /* ]] && base_path="/$base_path"; base_path="${base_path%/}"
+  echo
+  echo "[diagnostics] BEGIN"
+  echo "[diagnostics] Container: $cname"
+  if docker inspect "$cname" >/dev/null 2>&1; then
+    echo "[diagnostics] Labels:"
+    docker inspect -f '{{json .Config.Labels}}' "$cname" 2>/dev/null | { command -v jq >/dev/null 2>&1 && jq . || cat; }
+    echo "[diagnostics] Networks:"
+    docker inspect -f '{{json .NetworkSettings.Networks}}' "$cname" 2>/dev/null | { command -v jq >/dev/null 2>&1 && jq . || cat; }
+    if docker inspect -f '{{json .NetworkSettings.Networks}}' "$cname" 2>/dev/null | grep -q '"'"$net_name"'"'; then
+      echo "[diagnostics] Connected to network '$net_name': YES"
+    else
+      echo "[diagnostics] Connected to network '$net_name': NO (this will break Traefik routing)"
+    fi
+  else
+    echo "[diagnostics] Container $cname not found"
+  fi
+
+  # Try to capture Traefik logs
+  local traefik_cid
+  traefik_cid="$(docker ps -q --filter 'ancestor=traefik:v2.11' | head -n1)"
+  if [[ -n "$traefik_cid" ]]; then
+    echo "[diagnostics] Traefik logs (last 120 lines):"
+    docker logs --tail 120 "$traefik_cid" 2>&1 || true
+  else
+    echo "[diagnostics] Traefik container not found (image traefik:v2.11)."
+  fi
+
+  # Query Traefik API from within the proxy network
+  echo "[diagnostics] Traefik API snapshot (routers, services, entrypoints)"
+  docker pull -q curlimages/curl:8.8.0 >/dev/null 2>&1 || true
+  for ep in /api/entrypoints /api/http/routers /api/http/services; do
+    echo "[diagnostics] GET $ep"
+    docker run --rm --network "$net_name" curlimages/curl:8.8.0 -sS \
+      --max-time 6 "http://traefik:8080$ep" || echo "[diagnostics] (unreachable)"
+    echo
+  done
+
+  # Quick string matches for this VM's host/path rules
+  if [[ -n "${BLOBEVM_DOMAIN:-}" ]]; then
+    echo "[diagnostics] Routers mentioning host '${test_name}.${BLOBEVM_DOMAIN}':"
+    docker run --rm --network "$net_name" curlimages/curl:8.8.0 -sS --max-time 6 \
+      "http://traefik:8080/api/http/routers" | grep -i "${test_name}\.${BLOBEVM_DOMAIN}" || true
+  fi
+  echo "[diagnostics] Routers mentioning path '${base_path}/${test_name}':"
+  docker run --rm --network "$net_name" curlimages/curl:8.8.0 -sS --max-time 6 \
+    "http://traefik:8080/api/http/routers" | grep -i "${base_path}/${test_name}" || true
+  echo "[diagnostics] END"
 }
 
 # Check DNS for provided domain and print exact A records needed
@@ -1310,21 +1369,36 @@ print_success() {
   [[ "${HTTPS_PORT}" != "443" ]] && https_suffix=":${HTTPS_PORT}"
   local ip
   ip="$(hostname -I | awk '{print $1}')"
+  # Derive dashboard port if not available in env
+  local dport
+  dport="${DASHBOARD_PORT:-}"
+  if [[ -z "$dport" ]]; then
+    if docker inspect blobedash >/dev/null 2>&1; then
+      dport="$(docker inspect -f '{{ (index (index .NetworkSettings.Ports "5000/tcp") 0).HostPort }}' blobedash 2>/dev/null | head -n1)"
+    fi
+  fi
+  if [[ -z "$dport" ]]; then
+    dport="$(docker ps --format '{{.Names}} {{.Ports}}' 2>/dev/null | awk '/^blobedash / {print $2}' | sed -E 's/.*:([0-9]+)->5000.*/\1/' | head -n1)"
+  fi
 
   if [[ -n "${BLOBEVM_DOMAIN:-}" && "${NO_TRAEFIK:-0}" -ne 1 ]]; then
+    # Dashboard always runs in direct mode
+    if [[ "${ENABLE_DASHBOARD:-0}" -eq 1 && -n "$dport" ]]; then
+      echo "- Dashboard (direct): http://${ip}:${dport}/dashboard"
+    else
+      echo "- Dashboard: disabled (enable by setting BLOBEVM_ENABLE_DASHBOARD=1 and re-running install)."
+    fi
     if [[ "${TLS_ENABLED:-0}" -eq 1 ]]; then
-      echo "- Dashboard: https://dashboard.${BLOBEVM_DOMAIN}${https_suffix}/"
       echo "- Traefik:  https://traefik.${BLOBEVM_DOMAIN}${https_suffix}/"
       echo "- VM URLs:  https://<name>.${BLOBEVM_DOMAIN}${https_suffix}/ (path fallback ${base_path}/<name>/)"
     else
-      echo "- Dashboard: http://dashboard.${BLOBEVM_DOMAIN}${http_suffix}/"
       echo "- Traefik:  http://traefik.${BLOBEVM_DOMAIN}${http_suffix}/"
       echo "- VM URLs:  http://<name>.${BLOBEVM_DOMAIN}${http_suffix}/ (path fallback ${base_path}/<name>/)"
     fi
     echo "- Ensure DNS: *.${BLOBEVM_DOMAIN} and traefik.${BLOBEVM_DOMAIN} → this server's IP."
   else
-    if [[ "${ENABLE_DASHBOARD:-0}" -eq 1 && -n "${DASHBOARD_PORT:-}" ]]; then
-      echo "- Dashboard: http://${ip}:${DASHBOARD_PORT}/dashboard"
+    if [[ "${ENABLE_DASHBOARD:-0}" -eq 1 && -n "$dport" ]]; then
+      echo "- Dashboard: http://${ip}:${dport}/dashboard"
     else
       echo "- Dashboard: disabled (enable by setting BLOBEVM_ENABLE_DASHBOARD=1 and re-running install)."
     fi
@@ -1333,6 +1407,17 @@ print_success() {
   fi
   echo "- Manage VMs: blobe-vm-manager [list|create|start|stop|delete|rename] <name>"
   echo "- Uninstall everything: blobe-vm-manager nuke"
+  # Self-test summary if available
+  if [[ -n "${SELF_TEST_STATUS:-}" ]]; then
+    local st_path="${SELF_TEST_PATH_URL:-}" st_path_c="${SELF_TEST_PATH_CODE:-}" st_host="${SELF_TEST_HOST_URL:-}" st_host_c="${SELF_TEST_HOST_CODE:-}"
+    echo "- Traefik self-test: ${SELF_TEST_STATUS}"
+    if [[ -n "$st_path" ]]; then
+      echo "  - Path URL: ${st_path} => ${st_path_c}"
+    fi
+    if [[ -n "$st_host" ]]; then
+      echo "  - Host URL: ${st_host} => ${st_host_c}"
+    fi
+  fi
 }
 
 main() {
