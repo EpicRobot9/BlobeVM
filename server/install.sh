@@ -997,13 +997,27 @@ check_domain_dns() {
     return 0
   fi
 
-  echo "DNS for ${BLOBEVM_DOMAIN} is not pointing to this server yet."
+  echo "DNS not fully configured for ${BLOBEVM_DOMAIN}."
   [[ -n "$dns4" ]] && echo "  Current A for ${BLOBEVM_DOMAIN}: ${dns4}"
   [[ -n "$dns4_t" ]] && echo "  Current A for traefik.${BLOBEVM_DOMAIN}: ${dns4_t}"
+  if [[ $base_ok -eq 1 ]]; then
+    echo "  ✓ Base domain resolves to this server."
+  else
+    echo "  ✗ Base domain does not resolve to this server yet."
+  fi
+  if [[ $traefik_ok -eq 1 ]]; then
+    echo "  ✓ traefik.${BLOBEVM_DOMAIN} resolves to this server."
+  else
+    echo "  ✗ traefik.${BLOBEVM_DOMAIN} is missing or not pointing here."
+  fi
   echo
-  echo "Add the following DNS A records at your DNS provider:"
-  echo "  A  *.${BLOBEVM_DOMAIN}     -> ${pub4}"
-  echo "  A  traefik.${BLOBEVM_DOMAIN} -> ${pub4}"
+  echo "Recommended A records (choose one):"
+  echo "  - Wildcard for VM subdomains:  A  *.${BLOBEVM_DOMAIN}       -> ${pub4}"
+  echo "  - Or add per-VM subdomains:    A  <vm>.${BLOBEVM_DOMAIN}    -> ${pub4}"
+  echo "  - Optional Traefik dashboard:  A  traefik.${BLOBEVM_DOMAIN} -> ${pub4}"
+  echo
+  echo "Note: Host-based VM URLs (<vm>.${BLOBEVM_DOMAIN}) require either a wildcard or per-VM records."
+  echo "Path-based URLs (${BASE_PATH:-/vm}/<name>/) will work immediately on the server IP."
   echo
   echo "After updating DNS, allow time for propagation. HTTPS (Let's Encrypt) will only work after ${BLOBEVM_DOMAIN} resolves to ${pub4} and port 80 is reachable."
   return 1
