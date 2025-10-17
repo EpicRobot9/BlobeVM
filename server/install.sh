@@ -1098,6 +1098,13 @@ setup_traefik() {
     echo "Skipping Traefik deployment (reusing existing)."
     return 0
   fi
+
+  # Defaults and paths
+  local compose_file="/opt/blobe-vm/traefik/docker-compose.yml"
+  local net_name="${TRAEFIK_NETWORK:-proxy}"
+  local HTTP_PORT_VAL="${HTTP_PORT:-80}"
+  local HTTPS_PORT_VAL="${HTTPS_PORT:-443}"
+
   # Remove any pre-existing Traefik containers that may hold ports 80/443
   if [[ "${MANAGE_TRAEFIK:-0}" -eq 1 ]]; then
     for c in traefik traefik-traefik-1; do
@@ -1106,45 +1113,66 @@ setup_traefik() {
       fi
     done
   fi
+
   mkdir -p /opt/blobe-vm/traefik/letsencrypt
   chmod 700 /opt/blobe-vm/traefik/letsencrypt
 
-  local compose_file=/opt/blobe-vm/traefik/docker-compose.yml
-  local net_name="${TRAEFIK_NETWORK:-proxy}"
+  # Ensure network exists
+  if ! docker network inspect "$net_name" >/dev/null 2>&1; then
+    docker network create "$net_name" >/dev/null 2>&1 || true
+  fi
+
   echo "Writing Traefik docker-compose.yml to $compose_file"
 
+  # Build base of compose
   if [[ "${TLS_ENABLED:-0}" -eq 1 ]]; then
-    # ...existing code...
-    if [[ "$FORCE_HTTPS" -eq 1 ]]; then
-      cat >> "$compose_file" <<'YAML'
+    cat > "$compose_file" <<EOF
+services:
+  traefik:
+    image: traefik:v2.11
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --accesslog=true
+      - --api.dashboard=true
+      - --certificatesresolvers.myresolver.acme.email=${BLOBEVM_EMAIL}
+      - --certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.myresolver.acme.httpchallenge=true
+      - --certificatesresolvers.myresolver.acme.httpchallenge.entrypoint=web
+EOF
+    if [[ "${FORCE_HTTPS:-0}" -eq 1 ]]; then
+      cat >> "$compose_file" <<EOF
       - --entrypoints.web.http.redirections.entryPoint.to=websecure
       - --entrypoints.web.http.redirections.entryPoint.scheme=https
-YAML
+EOF
     fi
-    # Write ports with bash expansion to avoid docker compose env interpolation
     {
       echo "    ports:";
-      echo "      - \"${HTTP_PORT}:80\"";
-      echo "      - \"${HTTPS_PORT}:443\"";
+      echo "      - \"${HTTP_PORT_VAL}:80\"";
+      echo "      - \"${HTTPS_PORT_VAL}:443\"";
     } >> "$compose_file"
-  # ...existing code...
+    cat >> "$compose_file" <<EOF
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./letsencrypt:/letsencrypt
-YAML
-    {
-      echo "    networks:";
-      echo "      - ${net_name}";
-    } >> "$compose_file"
-    # ...existing code...
-    cat >> "$compose_file" <<YAML
-networks:
-  ${net_name}:
-    external: true
-YAML
+    networks:
+      - ${net_name}
+    labels:
+      - traefik.enable=true
+      # Dashboard/API under /traefik with StripPrefix and redirect
+      - traefik.http.routers.traefik.rule=PathPrefix('/traefik')
+      - traefik.http.routers.traefik.entrypoints=web
+      - traefik.http.routers.traefik.middlewares=traefik-redirectregex,traefik-stripprefix
+      - traefik.http.routers.traefik.service=api@internal
+      - traefik.http.middlewares.traefik-stripprefix.stripprefix.prefixes=/traefik
+      - traefik.http.middlewares.traefik-redirectregex.redirectregex.regex=^/traefik/?$
+      - traefik.http.middlewares.traefik-redirectregex.redirectregex.replacement=/traefik/dashboard/
+      - traefik.http.middlewares.traefik-redirectregex.redirectregex.permanent=true
+EOF
   else
-  # ...existing code...
-    cat > "$compose_file" <<YAML
+    cat > "$compose_file" <<EOF
 services:
   traefik:
     image: traefik:v2.11
@@ -1154,25 +1182,35 @@ services:
       - --entrypoints.web.address=:80
       - --accesslog=true
       - --api.dashboard=true
-    ports:
-      - "${HTTP_PORT}:80"
+EOF
+    {
+      echo "    ports:";
+      echo "      - \"${HTTP_PORT_VAL}:80\"";
+    } >> "$compose_file"
+    cat >> "$compose_file" <<EOF
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - ${net_name}
     labels:
       - traefik.enable=true
-      # Expose the Traefik dashboard/API via path prefix on web (HTTP) entrypoint
-  - traefik.http.routers.traefik.rule=PathPrefix('/traefik')
+      # Dashboard/API under /traefik with StripPrefix and redirect
+      - traefik.http.routers.traefik.rule=PathPrefix('/traefik')
       - traefik.http.routers.traefik.entrypoints=web
+      - traefik.http.routers.traefik.middlewares=traefik-redirectregex,traefik-stripprefix
       - traefik.http.routers.traefik.service=api@internal
-YAML
-    cat >> "$compose_file" <<YAML
+      - traefik.http.middlewares.traefik-stripprefix.stripprefix.prefixes=/traefik
+      - traefik.http.middlewares.traefik-redirectregex.redirectregex.regex=^/traefik/?$
+      - traefik.http.middlewares.traefik-redirectregex.redirectregex.replacement=/traefik/dashboard/
+      - traefik.http.middlewares.traefik-redirectregex.redirectregex.permanent=true
+EOF
+  fi
+
+  cat >> "$compose_file" <<EOF
 networks:
   ${net_name}:
     external: true
-YAML
-  fi
+EOF
 
   echo "Starting Traefik..."
   (cd /opt/blobe-vm/traefik && docker compose up -d)
