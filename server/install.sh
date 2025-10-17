@@ -1153,7 +1153,7 @@ EOF
       echo "      - \"${HTTP_PORT_VAL}:80\"";
       echo "      - \"${HTTPS_PORT_VAL}:443\"";
     } >> "$compose_file"
-    cat >> "$compose_file" <<EOF
+    cat >> "$compose_file" <<'EOF'
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./letsencrypt:/letsencrypt
@@ -1162,7 +1162,7 @@ EOF
     labels:
       - traefik.enable=true
       # Dashboard/API under /traefik with StripPrefix and redirect
-      - traefik.http.routers.traefik.rule=PathPrefix('/traefik')
+      - traefik.http.routers.traefik.rule=PathPrefix(`/traefik`)
       - traefik.http.routers.traefik.entrypoints=web
       - traefik.http.routers.traefik.middlewares=traefik-redirectregex,traefik-stripprefix
       - traefik.http.routers.traefik.service=api@internal
@@ -1187,7 +1187,7 @@ EOF
       echo "    ports:";
       echo "      - \"${HTTP_PORT_VAL}:80\"";
     } >> "$compose_file"
-    cat >> "$compose_file" <<EOF
+    cat >> "$compose_file" <<'EOF'
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
@@ -1195,7 +1195,7 @@ EOF
     labels:
       - traefik.enable=true
       # Dashboard/API under /traefik with StripPrefix and redirect
-      - traefik.http.routers.traefik.rule=PathPrefix('/traefik')
+      - traefik.http.routers.traefik.rule=PathPrefix(`/traefik`)
       - traefik.http.routers.traefik.entrypoints=web
       - traefik.http.routers.traefik.middlewares=traefik-redirectregex,traefik-stripprefix
       - traefik.http.routers.traefik.service=api@internal
