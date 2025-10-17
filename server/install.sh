@@ -171,6 +171,25 @@ apply_env_overrides() {
     [[ "${skip}" == "1" ]] && SKIP_TRAEFIK=1
   fi
 
+  # Force installer-managed Traefik takeover (ignore external; bind 80/443)
+  if [[ -n "${BLOBEVM_MANAGE_TRAEFIK:-${BLOBEVM_TAKEOVER_TRAEFIK:-}}" ]]; then
+    local t
+    t="$(normalize_bool "${BLOBEVM_MANAGE_TRAEFIK:-${BLOBEVM_TAKEOVER_TRAEFIK:-}}")"
+    if [[ "$t" == "1" ]]; then
+      NO_TRAEFIK=0
+      SKIP_TRAEFIK=0
+      MANAGE_TRAEFIK=1
+      AUTO_FREE_PORTS=1
+    fi
+  fi
+
+  # Optionally auto-free ports 80/443 without prompting
+  if [[ -n "${BLOBEVM_AUTO_FREE_PORTS:-}" ]]; then
+    local af
+    af="$(normalize_bool "${BLOBEVM_AUTO_FREE_PORTS}")"
+    [[ "$af" == "1" ]] && AUTO_FREE_PORTS=1
+  fi
+
   if [[ -n "${BLOBEVM_REUSE_SETTINGS:-}" ]]; then
     BLOBEVM_REUSE_SETTINGS="$(normalize_bool "${BLOBEVM_REUSE_SETTINGS}")"
   fi
@@ -549,8 +568,25 @@ detect_ports() {
   HTTP_PORT="${desired_http}"
   HTTPS_PORT="${desired_https}"
 
+  # In takeover mode, aggressively free ports 80/443 and use them
+  if [[ "${MANAGE_TRAEFIK:-0}" -eq 1 || "${AUTO_FREE_PORTS:-0}" -eq 1 ]]; then
+    if [[ "$HTTP_PORT" -ne 80 ]]; then HTTP_PORT=80; fi
+    if port_in_use 80; then
+      free_port_by_killing 80 || true
+    fi
+    if [[ -n "${BLOBEVM_EMAIL:-}" ]]; then
+      if [[ "$HTTPS_PORT" -ne 443 ]]; then HTTPS_PORT=443; fi
+      if port_in_use 443; then
+        free_port_by_killing 443 || true
+      fi
+    fi
+  fi
+
   if port_in_use "$HTTP_PORT"; then
-    if [[ "${ASSUME_DEFAULTS}" == "1" ]]; then
+    if [[ "${ASSUME_DEFAULTS}" == "1" || "${AUTO_FREE_PORTS:-0}" -eq 1 || "${MANAGE_TRAEFIK:-0}" -eq 1 ]]; then
+      if free_port_by_killing "$HTTP_PORT"; then
+        echo "Freed port ${HTTP_PORT} for Traefik." >&2
+      fi
       local fallback_http
       if [[ "$HTTP_PORT" -eq 80 ]]; then
         fallback_http=8080
@@ -575,7 +611,10 @@ detect_ports() {
   fi
 
   if port_in_use "$HTTPS_PORT"; then
-    if [[ "${ASSUME_DEFAULTS}" == "1" ]]; then
+    if [[ "${ASSUME_DEFAULTS}" == "1" || "${AUTO_FREE_PORTS:-0}" -eq 1 || "${MANAGE_TRAEFIK:-0}" -eq 1 ]]; then
+      if free_port_by_killing "$HTTPS_PORT"; then
+        echo "Freed port ${HTTPS_PORT} for Traefik." >&2
+      fi
       local fallback_https
       if [[ "$HTTPS_PORT" -eq 443 ]]; then
         fallback_https=8443
@@ -697,6 +736,78 @@ warn_if_external_redirect() {
   fi
 }
 
+# --- Traefik self-test: create a temporary VM and verify routing ---
+auto_test_traefik() {
+  [[ "${NO_TRAEFIK:-0}" -eq 1 ]] && return 0
+  local name="_testvm"
+  echo
+  echo "Running Traefik routing self-test..."
+  # Clean up any old test
+  if docker ps -a --format '{{.Names}}' | grep -qx "blobevm_${name}"; then
+    docker rm -f "blobevm_${name}" >/dev/null 2>&1 || true
+  fi
+  rm -rf "/opt/blobe-vm/instances/${name}" 2>/dev/null || true
+  # Create test VM
+  blobe-vm-manager create "$name" >/dev/null 2>&1 || blobe-vm-manager start "$name" >/dev/null 2>&1 || true
+  # Determine URLs to test
+  local base_path="${BASE_PATH:-/vm}"; [[ "$base_path" != /* ]] && base_path="/$base_path"; base_path="${base_path%/}"
+  local http_port="${HTTP_PORT:-80}" https_port="${HTTPS_PORT:-443}"
+  local http_suffix="" https_suffix=""
+  [[ "$http_port" != "80" ]] && http_suffix=":"$http_port
+  [[ "$https_port" != "443" ]] && https_suffix=":"$https_port
+  local ip host_url path_url
+  ip="$(hostname -I | awk '{print $1}')"
+  path_url="http://${ip}${http_suffix}${base_path}/${name}/"
+  if [[ -n "${BLOBEVM_DOMAIN:-}" ]]; then
+    host_url="http://${name}.${BLOBEVM_DOMAIN}${http_suffix}/"
+  else
+    host_url=""
+  fi
+  # Probe function
+  _probe() {
+    local url="$1"; [[ -z "$url" ]] && return 1
+    curl -sS -o /dev/null -m 8 -L -w '%{http_code}' "$url" 2>/dev/null || echo 000
+  }
+  # Try path and host
+  local ok=0 code
+  code=$(_probe "$path_url"); [[ "$code" =~ ^[23]..$ ]] && ok=1
+  if [[ "$ok" -ne 1 && -n "$host_url" ]]; then
+    code=$(_probe "$host_url"); [[ "$code" =~ ^[23]..$ ]] && ok=1
+  fi
+  if [[ "$ok" -eq 1 ]]; then
+    echo "[self-test] Traefik routing OK."
+  else
+    echo "[self-test] Routing check failed. Attempting remediation..."
+    # Ensure Traefik network exists
+    local net_name="${TRAEFIK_NETWORK:-proxy}"
+    if ! docker network inspect "$net_name" >/dev/null 2>&1; then
+      docker network create "$net_name" >/dev/null 2>&1 || true
+    fi
+    # Restart Traefik compose service
+    if [[ -f /opt/blobe-vm/traefik/docker-compose.yml ]]; then
+      (cd /opt/blobe-vm/traefik && docker compose up -d) >/dev/null 2>&1 || true
+    fi
+    # Recreate VM to refresh labels and network
+    blobe-vm-manager recreate "$name" >/dev/null 2>&1 || true
+    sleep 2
+    ok=0
+    code=$(_probe "$path_url"); [[ "$code" =~ ^[23]..$ ]] && ok=1
+    if [[ "$ok" -ne 1 && -n "$host_url" ]]; then
+      code=$(_probe "$host_url"); [[ "$code" =~ ^[23]..$ ]] && ok=1
+    fi
+    if [[ "$ok" -eq 1 ]]; then
+      echo "[self-test] Fixed by recreate."
+    else
+      echo "[self-test] Still failing. Suggestions:" >&2
+      echo " - Ensure Traefik network '${TRAEFIK_NETWORK:-proxy}' exists and the Traefik container is running." >&2
+      echo " - If using a custom domain, make sure DNS and port ${HTTP_PORT} reach this host." >&2
+    fi
+  fi
+  # Clean up test VM (container and instance dir)
+  docker rm -f "blobevm_${name}" >/dev/null 2>&1 || true
+  rm -rf "/opt/blobe-vm/instances/${name}" >/dev/null 2>&1 || true
+}
+
 # Check DNS for provided domain and print exact A records needed
 check_domain_dns() {
   [[ -n "${BLOBEVM_DOMAIN:-}" ]] || return 0
@@ -804,6 +915,14 @@ setup_traefik() {
   if [[ "${SKIP_TRAEFIK:-0}" -eq 1 ]]; then
     echo "Skipping Traefik deployment (reusing existing)."
     return 0
+  fi
+  # Remove any pre-existing Traefik containers that may hold ports 80/443
+  if [[ "${MANAGE_TRAEFIK:-0}" -eq 1 ]]; then
+    for c in traefik traefik-traefik-1; do
+      if docker ps -a --format '{{.Names}}' | grep -qx "$c"; then
+        docker rm -f "$c" >/dev/null 2>&1 || true
+      fi
+    done
   fi
   mkdir -p /opt/blobe-vm/traefik/letsencrypt
   chmod 700 /opt/blobe-vm/traefik/letsencrypt
@@ -1111,16 +1230,10 @@ print_success() {
   local https_suffix=""
   [[ "${HTTP_PORT}" != "80" ]] && http_suffix=":${HTTP_PORT}"
   [[ "${HTTPS_PORT}" != "443" ]] && https_suffix=":${HTTPS_PORT}"
+  local ip
+  ip="$(hostname -I | awk '{print $1}')"
 
-  if [[ "${NO_TRAEFIK:-0}" -eq 1 ]]; then
-    echo "- Mode: Direct (no reverse proxy)."
-    if [[ "${ENABLE_DASHBOARD:-0}" -eq 1 && -n "${DASHBOARD_PORT:-}" ]]; then
-      echo "- Dashboard: http://<SERVER_IP>:${DASHBOARD_PORT}/dashboard"
-    else
-      echo "- Dashboard: disabled (enable by setting BLOBEVM_ENABLE_DASHBOARD=1 and re-running install)."
-    fi
-    echo "- VM URLs:  http://<SERVER_IP>:<port>/  (each VM chooses a free high port; the CLI prints it)"
-  elif [[ -n "${BLOBEVM_DOMAIN:-}" ]]; then
+  if [[ -n "${BLOBEVM_DOMAIN:-}" && "${NO_TRAEFIK:-0}" -ne 1 ]]; then
     if [[ "${TLS_ENABLED:-0}" -eq 1 ]]; then
       echo "- Dashboard: https://dashboard.${BLOBEVM_DOMAIN}${https_suffix}/"
       echo "- Traefik:  https://traefik.${BLOBEVM_DOMAIN}${https_suffix}/"
@@ -1132,9 +1245,10 @@ print_success() {
     fi
     echo "- Ensure DNS: *.${BLOBEVM_DOMAIN} and traefik.${BLOBEVM_DOMAIN} → this server's IP."
   else
-    echo "- Dashboard: http://<SERVER_IP>${http_suffix}/dashboard"
-    if [[ "${TLS_ENABLED:-0}" -eq 1 ]]; then
-      echo "- Dashboard (HTTPS): https://<SERVER_IP>${https_suffix}/dashboard"
+    if [[ "${ENABLE_DASHBOARD:-0}" -eq 1 && -n "${DASHBOARD_PORT:-}" ]]; then
+      echo "- Dashboard: http://${ip}:${DASHBOARD_PORT}/dashboard"
+    else
+      echo "- Dashboard: disabled (enable by setting BLOBEVM_ENABLE_DASHBOARD=1 and re-running install)."
     fi
     echo "- VM URLs: http://<SERVER_IP>${http_suffix}${base_path}/<name>/"
     [[ "${TLS_ENABLED:-0}" -eq 1 ]] && echo "- VM URLs (HTTPS): https://<SERVER_IP>${https_suffix}${base_path}/<name>/"
@@ -1275,6 +1389,11 @@ main() {
   fi
   # If reusing external Traefik while TLS is disabled, warn about possible redirect
   warn_if_external_redirect || true
+
+  # Optional: Traefik routing self-test with a disposable VM
+  if [[ "${NO_TRAEFIK:-0}" -ne 1 ]]; then
+    auto_test_traefik || true
+  fi
   if [[ "$UPDATE_MODE" -eq 1 ]]; then
     echo "Update complete. Existing VMs were not modified."
   else
