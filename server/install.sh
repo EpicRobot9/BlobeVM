@@ -449,9 +449,34 @@ port_pids() {
   fi
 }
 
+# Find Docker containers publishing a given host port (e.g., 0.0.0.0:80->...)
+docker_containers_on_port() {
+  local p="$1"
+  command -v docker >/dev/null 2>&1 || return 0
+  docker ps --format '{{.ID}} {{.Names}} {{.Ports}}' 2>/dev/null | \
+    awk -v P=":${p}->" 'index($0, P)>0 {print $1}'
+}
+
+# Stop/remove Docker containers that are publishing the specified port
+free_port_docker() {
+  local p="$1"; local ids
+  ids="$(docker_containers_on_port "$p" | tr '\n' ' ')"
+  [[ -n "$ids" ]] || return 0
+  echo "Stopping Docker containers publishing port ${p}..."
+  local id
+  for id in $ids; do
+    # Best-effort remove; container might be important, but in takeover we prefer freeing the port
+    docker rm -f "$id" >/dev/null 2>&1 || docker stop "$id" >/dev/null 2>&1 || true
+  done
+  # give docker a moment to release docker-proxy
+  sleep 1
+}
+
 # Attempt to gracefully stop known services, else kill PIDs
 free_port_by_killing() {
   local p="$1"
+  # First handle docker containers exposing this port
+  free_port_docker "$p" || true
   local pids; pids=$(port_pids "$p")
   [[ -n "$pids" ]] || return 0
   echo "Attempting to free port ${p}..."
@@ -490,6 +515,27 @@ free_port_by_killing() {
   while (( i < 10 )); do
     if ! port_in_use "$p"; then return 0; fi
     sleep 0.5; i=$((i+1))
+  done
+  return 1
+}
+
+# Aggressively attempt to free a port using docker stop, service stop, and SIGKILL.
+ensure_port_free() {
+  local p="$1"; local tries=3; local i=0
+  while (( i < tries )); do
+    if ! port_in_use "$p"; then return 0; fi
+    free_port_docker "$p" || true
+    free_port_by_killing "$p" || true
+    # If common web servers are installed under systemd, try stopping them explicitly
+    if command -v systemctl >/dev/null 2>&1; then
+      for svc in nginx apache2 httpd caddy traefik haproxy lighttpd envoy; do
+        systemctl stop "$svc" >/dev/null 2>&1 || true
+        systemctl disable "$svc" >/dev/null 2>&1 || true
+      done
+    fi
+    sleep 1
+    if ! port_in_use "$p"; then return 0; fi
+    i=$((i+1))
   done
   return 1
 }
@@ -567,25 +613,25 @@ detect_ports() {
   if [[ "${MANAGE_TRAEFIK:-0}" -eq 1 || "${AUTO_FREE_PORTS:-0}" -eq 1 ]]; then
     if [[ "$HTTP_PORT" -ne 80 ]]; then HTTP_PORT=80; fi
     if port_in_use 80; then
-      free_port_by_killing 80 || true
+      ensure_port_free 80 || true
     fi
     if [[ -n "${BLOBEVM_EMAIL:-}" ]]; then
       if [[ "$HTTPS_PORT" -ne 443 ]]; then HTTPS_PORT=443; fi
       if port_in_use 443; then
-        free_port_by_killing 443 || true
+        ensure_port_free 443 || true
       fi
     fi
   fi
 
   if port_in_use "$HTTP_PORT"; then
     if [[ "${ASSUME_DEFAULTS}" == "1" || "${AUTO_FREE_PORTS:-0}" -eq 1 || "${MANAGE_TRAEFIK:-0}" -eq 1 ]]; then
-      if free_port_by_killing "$HTTP_PORT"; then
+      if ensure_port_free "$HTTP_PORT"; then
         echo "Freed port ${HTTP_PORT} for Traefik." >&2
       fi
       if [[ "${MANAGE_TRAEFIK:-0}" -eq 1 && "$desired_http" -eq 80 ]]; then
         # Try freeing again and insist on 80 in takeover mode
         if port_in_use 80; then
-          free_port_by_killing 80 || true
+          ensure_port_free 80 || true
         fi
         if port_in_use 80; then
           echo "Port 80 remains busy; continuing with alternative port (manage mode)" >&2
@@ -622,12 +668,12 @@ detect_ports() {
 
   if port_in_use "$HTTPS_PORT"; then
     if [[ "${ASSUME_DEFAULTS}" == "1" || "${AUTO_FREE_PORTS:-0}" -eq 1 || "${MANAGE_TRAEFIK:-0}" -eq 1 ]]; then
-      if free_port_by_killing "$HTTPS_PORT"; then
+      if ensure_port_free "$HTTPS_PORT"; then
         echo "Freed port ${HTTPS_PORT} for Traefik." >&2
       fi
       if [[ "${MANAGE_TRAEFIK:-0}" -eq 1 && -n "${BLOBEVM_EMAIL:-}" && "$desired_https" -eq 443 ]]; then
         if port_in_use 443; then
-          free_port_by_killing 443 || true
+          ensure_port_free 443 || true
         fi
         if port_in_use 443; then
           echo "Port 443 remains busy; continuing with alternative port (manage mode)" >&2
