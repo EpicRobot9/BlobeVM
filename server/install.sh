@@ -353,6 +353,23 @@ ensure_network() {
   fi
 }
 
+# If configured to skip Traefik because of a previous external instance, but it's gone now,
+# clear SKIP_TRAEFIK so we deploy ours.
+validate_skip_traefik() {
+  [[ "${NO_TRAEFIK:-0}" -eq 1 ]] && return 0
+  if [[ "${SKIP_TRAEFIK:-0}" -eq 1 ]]; then
+    local net_name="${TRAEFIK_NETWORK:-proxy}"
+    local has_tr=0 has_net=0
+    if docker ps -a --format '{{.Names}}' | grep -Eq '^(traefik|traefik-traefik-1)$'; then has_tr=1; fi
+    if docker network inspect "${net_name}" >/dev/null 2>&1; then has_net=1; fi
+    if [[ "$has_tr" -ne 1 || "$has_net" -ne 1 ]]; then
+      echo "Configured to reuse external Traefik, but it's not present (container/network missing)."
+      echo "Re-enabling Traefik deployment."
+      SKIP_TRAEFIK=0
+    fi
+  fi
+}
+
 # --- Port helpers and interactive resolution ---
 # Return 0 if port is in use
 port_in_use() {
@@ -961,8 +978,31 @@ build_image() {
   if [[ -z "${REPO_DIR:-}" || ! -d "$REPO_DIR" ]]; then
     detect_repo_root
   fi
-  echo "Building the BlobeVM image from $REPO_DIR ..."
-  docker build -t blobevm:latest "$REPO_DIR"
+  local image="blobevm:latest"
+  local force="${BLOBEVM_FORCE_REBUILD:-0}"
+  # Compute a content hash of the Dockerfile and the VM root/ folder
+  local cur_hash prev_hash hash_file
+  hash_file="/opt/blobe-vm/.image.hash"
+  cur_hash=$( \
+    cd "$REPO_DIR" && { \
+      { sha256sum Dockerfile 2>/dev/null || true; } \
+      && { find root -type f -print0 2>/dev/null | sort -z | xargs -0 sha256sum 2>/dev/null || true; } \
+    } | sha256sum | awk '{print $1}'
+  )
+  [[ -f "$hash_file" ]] && prev_hash="$(cat "$hash_file" 2>/dev/null || true)" || prev_hash=""
+
+  # Check if image exists
+  local img_id
+  img_id=$(docker images -q "$image" 2>/dev/null || true)
+
+  if [[ "$force" == "1" || -z "$img_id" || "$cur_hash" != "$prev_hash" ]]; then
+    echo "Building the BlobeVM image from $REPO_DIR ..."
+    docker build -t "$image" "$REPO_DIR"
+    echo "$cur_hash" > "$hash_file" || true
+    echo "Build complete."
+  else
+    echo "Image '$image' is up-to-date. Skipping rebuild."
+  fi
 }
 
 install_manager() {
@@ -1186,6 +1226,8 @@ main() {
   if [[ "${SKIP_TRAEFIK:-0}" -ne 1 && "${NO_TRAEFIK:-0}" -ne 1 ]]; then
     detect_external_traefik || true
   fi
+  # If previous config said to reuse external Traefik but it's gone, auto-enable our deployment
+  validate_skip_traefik || true
   ensure_network
   if [[ "${NO_TRAEFIK:-0}" -ne 1 ]]; then
     check_domain_dns || true
