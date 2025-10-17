@@ -38,8 +38,12 @@ detect_repo_root() {
   REPO_DIR="$(cd "$script_dir/.." && pwd)"
   # If that path does not contain a Dockerfile (as expected by build_image), try to locate it
   if [[ ! -f "$REPO_DIR/Dockerfile" ]]; then
-    # Common install layout: /opt/blobe-vm/repo is a working copy, parent holds Dockerfile
-    if [[ -d /opt/blobe-vm/repo && -f /opt/blobe-vm/Dockerfile ]]; then
+    # Common install layouts:
+    # 1) /opt/blobe-vm/repo contains the working copy and the Dockerfile
+    if [[ -f /opt/blobe-vm/repo/Dockerfile ]]; then
+      REPO_DIR="/opt/blobe-vm/repo"
+    # 2) /opt/blobe-vm (parent) holds the Dockerfile
+    elif [[ -f /opt/blobe-vm/Dockerfile ]]; then
       REPO_DIR="/opt/blobe-vm"
     elif [[ -f "$script_dir/../Dockerfile" ]]; then
       REPO_DIR="$(cd "$script_dir/.." && pwd)"
@@ -73,6 +77,22 @@ apply_env_overrides() {
   # Default: disable Traefik unless explicitly set
   if [[ -z "${BLOBEVM_NO_TRAEFIK:-}" ]]; then
     NO_TRAEFIK=1
+  fi
+  # Explicit overrides to force proxy or direct mode
+  if [[ -n "${BLOBEVM_FORCE_PROXY:-}" ]]; then
+    local f
+    f="$(normalize_bool "${BLOBEVM_FORCE_PROXY}")"
+    if [[ "${f}" == "1" ]]; then
+      NO_TRAEFIK=0
+      SKIP_TRAEFIK=0
+    fi
+  fi
+  if [[ -n "${BLOBEVM_FORCE_DIRECT:-}" ]]; then
+    local d
+    d="$(normalize_bool "${BLOBEVM_FORCE_DIRECT}")"
+    if [[ "${d}" == "1" ]]; then
+      NO_TRAEFIK=1
+    fi
   fi
   BLOBEVM_DOMAIN="${BLOBEVM_DOMAIN:-${BLOBEVM_INSTALL_DOMAIN:-}}"
   BLOBEVM_EMAIL="${BLOBEVM_EMAIL:-${BLOBEVM_INSTALL_EMAIL:-}}"
@@ -1261,6 +1281,13 @@ main() {
   setup_traefik
   build_image
   install_manager
+  # In proxy mode, refresh VM containers so latest routing labels (routers/services/middlewares) apply
+  if [[ "${NO_TRAEFIK:-0}" -ne 1 ]]; then
+    if command -v blobe-vm-manager >/dev/null 2>&1; then
+      echo "Refreshing VM routing labels (recreating containers in proxy mode)..."
+      blobe-vm-manager recreate-all || true
+    fi
+  fi
   # Check dashboard runtime dependencies before deployment
   preflight_dashboard_runtime || true
   # Direct mode dashboard
