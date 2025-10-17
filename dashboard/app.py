@@ -363,6 +363,36 @@ def auth_required(fn):
 def _state_dir():
     return os.environ.get('BLOBEDASH_STATE', '/opt/blobe-vm')
 
+def _repo_manager_path():
+    # Fallback path to the repo-managed CLI inside the mounted state dir
+    return os.path.join(_state_dir(), 'server', 'blobe-vm-manager')
+
+def _run_manager(*args):
+    """Run the manager with given args. If the primary manager doesn't support
+    the command (prints Usage/unknown), fall back to the repo script.
+    Returns (ok: bool, stdout: str, stderr: str, returncode: int).
+    """
+    try:
+        r = subprocess.run([MANAGER, *args], capture_output=True, text=True)
+    except FileNotFoundError:
+        r = subprocess.CompletedProcess([MANAGER, *args], 127, '', 'not found')
+    ok = (r.returncode == 0)
+    errtxt = (r.stderr or '') + ('' if ok else ('\n' + (r.stdout or '')))
+    # Heuristic: if command not recognized or prints usage, try fallback
+    need_fallback = (
+        (not ok) and (
+            'Usage: blobe-vm-manager' in errtxt or
+            'unknown' in errtxt.lower() or
+            'not found' in errtxt.lower()
+        )
+    )
+    if need_fallback:
+        alt = _repo_manager_path()
+        if os.path.isfile(alt) and os.access(alt, os.X_OK):
+            r2 = subprocess.run([alt, *args], capture_output=True, text=True)
+            return (r2.returncode == 0, r2.stdout.strip(), r2.stderr.strip(), r2.returncode)
+    return (ok, (r.stdout or '').strip(), (r.stderr or '').strip(), r.returncode)
+
 def _is_direct_mode():
     env = _read_env()
     return env.get('NO_TRAEFIK', '1') == '1'
@@ -815,9 +845,8 @@ def api_delete_all_instances():
 @auth_required
 def api_update_vm(name):
     try:
-        r = subprocess.run([MANAGER, 'update-vm', name], capture_output=True, text=True)
-        ok = (r.returncode == 0)
-        return jsonify({'ok': ok, 'output': r.stdout.strip(), 'error': r.stderr.strip()})
+        ok, out, err, _ = _run_manager('update-vm', name)
+        return jsonify({'ok': ok, 'output': out, 'error': err})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
@@ -825,9 +854,8 @@ def api_update_vm(name):
 @auth_required
 def api_app_install(name, app):
     try:
-        r = subprocess.run([MANAGER, 'app-install', name, app], capture_output=True, text=True)
-        ok = (r.returncode == 0)
-        return jsonify({'ok': ok, 'output': r.stdout.strip(), 'error': r.stderr.strip()})
+        ok, out, err, _ = _run_manager('app-install', name, app)
+        return jsonify({'ok': ok, 'output': out, 'error': err})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
@@ -835,10 +863,9 @@ def api_app_install(name, app):
 @auth_required
 def api_app_status(name, app):
     try:
-        r = subprocess.run([MANAGER, 'app-status', name, app], capture_output=True, text=True)
-        ok = (r.returncode == 0)
+        ok, out, err, _ = _run_manager('app-status', name, app)
         # Try to parse a simple status from stdout, else return as-is
-        return jsonify({'ok': ok, 'output': r.stdout.strip(), 'error': r.stderr.strip()})
+        return jsonify({'ok': ok, 'output': out, 'error': err})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
