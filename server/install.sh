@@ -1009,6 +1009,10 @@ build_image() {
   if [[ -z "${REPO_DIR:-}" || ! -d "$REPO_DIR" ]]; then
     detect_repo_root
   fi
+  # If the directory exists but doesn't contain a Dockerfile, try to auto-correct
+  if [[ ! -f "$REPO_DIR/Dockerfile" ]]; then
+    detect_repo_root
+  fi
   local image="blobevm:latest"
   local force="${BLOBEVM_FORCE_REBUILD:-0}"
   # Compute a content hash of the Dockerfile and the VM root/ folder
@@ -1240,7 +1244,7 @@ main() {
       fi
       BASE_PATH=${BASE_PATH:-/vm}
       # Ensure REPO_DIR points to a real directory (avoid stale temp paths)
-      if [[ -z "${REPO_DIR:-}" || ! -d "$REPO_DIR" ]]; then
+      if [[ -z "${REPO_DIR:-}" || ! -d "$REPO_DIR" || ! -f "$REPO_DIR/Dockerfile" ]]; then
         detect_repo_root
       fi
     else
