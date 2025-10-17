@@ -1144,43 +1144,27 @@ networks:
 YAML
   else
   # ...existing code...
-    labels:
-      - traefik.enable=true
-      # Expose the Traefik dashboard/API via path prefix on web (HTTP) entrypoint
-      - traefik.http.routers.traefik.rule=PathPrefix(`/traefik`)
-      - traefik.http.routers.traefik.entrypoints=web
-      - traefik.http.routers.traefik.service=api@internal
-YAML
-    {
-      echo "    ports:";
-      echo "      - \"${HTTP_PORT}:80\"";
-    } >> "$compose_file"
-    cat >> "$compose_file" <<'YAML'
-    labels:
-      - traefik.enable=true
-      # Expose the Traefik dashboard/API via path prefix on web (HTTP) entrypoint
-      - traefik.http.routers.traefik.rule=PathPrefix(`/traefik`)
-      - traefik.http.routers.traefik.entrypoints=web
-      - traefik.http.routers.traefik.service=api@internal
-YAML
+    cat > "$compose_file" <<YAML
+services:
+  traefik:
+    image: traefik:v2.11
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --accesslog=true
+      - --api.dashboard=true
+    ports:
+      - "${HTTP_PORT}:80"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-YAML
-    {
-      echo "    networks:";
-      echo "      - ${net_name}";
-    } >> "$compose_file"
-    cat >> "$compose_file" <<'YAML'
+    networks:
+      - ${net_name}
     labels:
       - traefik.enable=true
       # Expose the Traefik dashboard/API via path prefix on web (HTTP) entrypoint
       - traefik.http.routers.traefik.rule=PathPrefix(`/traefik`)
       - traefik.http.routers.traefik.entrypoints=web
-      - traefik.http.middlewares.traefik-stripprefix.stripprefix.prefixes=/traefik
-      - traefik.http.middlewares.traefik-redirectregex.redirectregex.regex=^/traefik/?$
-      - traefik.http.middlewares.traefik-redirectregex.redirectregex.replacement=/traefik/dashboard/
-      - traefik.http.middlewares.traefik-redirectregex.redirectregex.permanent=true
-      - traefik.http.routers.traefik.middlewares=traefik-redirectregex,traefik-stripprefix
       - traefik.http.routers.traefik.service=api@internal
 YAML
     cat >> "$compose_file" <<YAML
