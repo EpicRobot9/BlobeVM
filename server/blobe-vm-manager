@@ -1146,7 +1146,7 @@ main() {
 }
 
 cmd_nuke() {
-  echo "This will remove ALL BlobeVM instances, Traefik stack, data, images, and the manager binary."
+  echo "This will remove ALL BlobeVM instances, BlobeVM dashboard, Traefik stack (if deployed by BlobeVM), data, images, related volumes, and the manager binary."
   read -rp "Type 'NUKE' to confirm: " confirm
   if [[ "$confirm" != "NUKE" ]]; then
     echo "Aborted."
@@ -1160,13 +1160,20 @@ cmd_nuke() {
     docker rm -f "$cname" >/dev/null 2>&1 || true
   done
 
-  echo "Removing Traefik stack..."
+  echo "Removing BlobeVM dashboard containers (blobedash, blobedash-proxy) if present..."
+  for cname in blobedash blobedash-proxy; do
+    if docker ps -a --format '{{.Names}}' | grep -qx "$cname"; then
+      docker rm -f "$cname" >/dev/null 2>&1 || true
+    fi
+  done
+
+  echo "Bringing down Traefik stack if deployed by BlobeVM..."
   if [[ -f /opt/blobe-vm/traefik/docker-compose.yml ]]; then
     (cd /opt/blobe-vm/traefik && docker compose down --remove-orphans) || true
   fi
 
-  echo "Removing docker image 'blobevm:latest'..."
-  docker rmi -f blobevm:latest >/dev/null 2>&1 || true
+  echo "Removing BlobeVM images (all tags under repository 'blobevm')..."
+  docker images --format '{{.Repository}}:{{.Tag}}' | awk -F: '$1=="blobevm" {print $0}' | xargs -r docker rmi -f >/dev/null 2>&1 || true
 
   echo "Removing proxy network if empty..."
   if docker network inspect proxy >/dev/null 2>&1; then
@@ -1178,13 +1185,16 @@ cmd_nuke() {
     fi
   fi
 
+  echo "Removing BlobeVM-related Docker volumes (best-effort)..."
+  docker volume ls --format '{{.Name}}' | grep -Ei '(blobevm|blobe-vm|blobedash|blobe)' | xargs -r docker volume rm >/dev/null 2>&1 || true
+
   echo "Removing data directory /opt/blobe-vm ..."
   rm -rf /opt/blobe-vm
 
   echo "Removing manager binary /usr/local/bin/blobe-vm-manager ..."
   rm -f /usr/local/bin/blobe-vm-manager
 
-  echo "Done. System cleaned."
+  echo "Done. BlobeVM resources removed (no global Docker prune performed)."
 }
 
 main "$@"
