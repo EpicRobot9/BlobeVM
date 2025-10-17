@@ -345,7 +345,7 @@ install_prereqs() {
   fi
   apt-get update -y
   apt-get install -y ca-certificates curl wget gnupg lsb-release jq >/dev/null
-
+  if [[ -n "${BLOBEVM_DOMAIN:-}" && "${NO_TRAEFIK:-0}" -ne 1 ]]; then
   install -m 0755 -d /etc/apt/keyrings
   if [[ ! -f /etc/apt/keyrings/docker.gpg ]]; then
     curl -fsSL https://download.docker.com/linux/$(. /etc/os-release && echo "$ID")/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
@@ -358,13 +358,25 @@ deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] h
 EOF
   fi
 
-  apt-get update -y
-  apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin >/dev/null
-
-  systemctl enable --now docker >/dev/null 2>&1 || systemctl start docker >/dev/null 2>&1
-
   # Quick sanity checks
   command -v docker >/dev/null 2>&1 || {
+  # Always show the direct dashboard URL for convenience
+  if [[ "${ENABLE_DASHBOARD:-0}" -eq 1 && -n "${DASHBOARD_PORT:-}" ]]; then
+    echo "- Dashboard (direct): http://${ip}:${DASHBOARD_PORT}/dashboard"
+  else
+    echo "- Dashboard: disabled (enable by setting BLOBEVM_ENABLE_DASHBOARD=1 and re-running install)."
+  fi
+
+  # If a self-test ran, print its summary
+  if [[ -n "${SELF_TEST_STATUS:-}" ]]; then
+    echo "- Traefik self-test: ${SELF_TEST_STATUS}"
+    if [[ -n "${SELF_TEST_PATH_URL:-}" ]]; then
+      echo "  • Path URL: ${SELF_TEST_PATH_URL}  [${SELF_TEST_PATH_CODE:----}]"
+    fi
+    if [[ -n "${SELF_TEST_HOST_URL:-}" ]]; then
+      echo "  • Host URL: ${SELF_TEST_HOST_URL}  [${SELF_TEST_HOST_CODE:----}]"
+    fi
+  fi
     echo "Docker did not install correctly." >&2
     exit 1
   }
@@ -763,6 +775,9 @@ auto_test_traefik() {
   else
     host_url=""
   fi
+  # Export for final summary
+  export SELF_TEST_PATH_URL="$path_url"
+  export SELF_TEST_HOST_URL="$host_url"
   # Probe function
   _probe() {
     local url="$1"; [[ -z "$url" ]] && return 1
@@ -770,12 +785,12 @@ auto_test_traefik() {
   }
   # Try path and host
   local ok=0 code
-  code=$(_probe "$path_url"); [[ "$code" =~ ^[23]..$ ]] && ok=1
+  code=$(_probe "$path_url"); export SELF_TEST_PATH_CODE="$code"; [[ "$code" =~ ^[23]..$ ]] && ok=1
   if [[ "$ok" -ne 1 && -n "$host_url" ]]; then
-    code=$(_probe "$host_url"); [[ "$code" =~ ^[23]..$ ]] && ok=1
+    code=$(_probe "$host_url"); export SELF_TEST_HOST_CODE="$code"; [[ "$code" =~ ^[23]..$ ]] && ok=1
   fi
   if [[ "$ok" -eq 1 ]]; then
-    echo "[self-test] Traefik routing OK."
+    echo "[self-test] Traefik routing OK."; export SELF_TEST_STATUS="OK"
   else
     echo "[self-test] Routing check failed. Attempting remediation..."
     # Ensure Traefik network exists
@@ -791,16 +806,17 @@ auto_test_traefik() {
     blobe-vm-manager recreate "$name" >/dev/null 2>&1 || true
     sleep 2
     ok=0
-    code=$(_probe "$path_url"); [[ "$code" =~ ^[23]..$ ]] && ok=1
+    code=$(_probe "$path_url"); export SELF_TEST_PATH_CODE="$code"; [[ "$code" =~ ^[23]..$ ]] && ok=1
     if [[ "$ok" -ne 1 && -n "$host_url" ]]; then
-      code=$(_probe "$host_url"); [[ "$code" =~ ^[23]..$ ]] && ok=1
+      code=$(_probe "$host_url"); export SELF_TEST_HOST_CODE="$code"; [[ "$code" =~ ^[23]..$ ]] && ok=1
     fi
     if [[ "$ok" -eq 1 ]]; then
-      echo "[self-test] Fixed by recreate."
+      echo "[self-test] Fixed by recreate."; export SELF_TEST_STATUS="FIXED"
     else
       echo "[self-test] Still failing. Suggestions:" >&2
       echo " - Ensure Traefik network '${TRAEFIK_NETWORK:-proxy}' exists and the Traefik container is running." >&2
       echo " - If using a custom domain, make sure DNS and port ${HTTP_PORT} reach this host." >&2
+      export SELF_TEST_STATUS="FAIL"
     fi
   fi
   # Clean up test VM (container and instance dir)
