@@ -1118,7 +1118,7 @@ YAML
       echo "      - \"${HTTP_PORT}:80\"";
       echo "      - \"${HTTPS_PORT}:443\"";
     } >> "$compose_file"
-    cat >> "$compose_file" <<'YAML'
+  # ...existing code...
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./letsencrypt:/letsencrypt
@@ -1134,7 +1134,7 @@ networks:
     external: true
 YAML
   else
-    cat >> "$compose_file" <<'YAML'
+  # ...existing code...
     labels:
       - traefik.enable=true
       # Expose the Traefik dashboard/API via path prefix on web (HTTP) entrypoint
@@ -1147,6 +1147,13 @@ YAML
       echo "      - \"${HTTP_PORT}:80\"";
     } >> "$compose_file"
     cat >> "$compose_file" <<'YAML'
+    labels:
+      - traefik.enable=true
+      # Expose the Traefik dashboard/API via path prefix on web (HTTP) entrypoint
+      - traefik.http.routers.traefik.rule=PathPrefix(`/traefik`)
+      - traefik.http.routers.traefik.entrypoints=web
+      - traefik.http.routers.traefik.service=api@internal
+YAML
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
 YAML
