@@ -1145,11 +1145,11 @@ YAML
     cat >> "$compose_file" <<'YAML'
     labels:
       - traefik.enable=true
-      # Router rules for the dashboard are only active when a domain is set
-      # You can later attach a host rule via labels or set a CNAME like traefik.<domain>
-      - traefik.http.services.traefik.loadbalancer.server.port=8080
+      # Expose Traefik dashboard/API via path prefix on web (HTTP) entrypoint
       - traefik.http.routers.traefik.rule=PathPrefix(`/traefik`)
       - traefik.http.routers.traefik.entrypoints=web
+      - traefik.http.middlewares.traefik-stripprefix.stripprefix.prefixes=/traefik
+      - traefik.http.routers.traefik.service=api@internal
 YAML
     if [[ -n "$TRAEFIK_DASHBOARD_AUTH" ]]; then
       # Escape $ to $$ to prevent docker compose from treating bcrypt parts as env variables
@@ -1157,8 +1157,8 @@ YAML
       SAFE_AUTH="${TRAEFIK_DASHBOARD_AUTH//$/\$\$}"
       # Add auth middleware labels
       cat >> "$compose_file" <<YAML
-      - traefik.http.middlewares.traefik-auth.basicauth.users=${SAFE_AUTH}
-      - traefik.http.routers.traefik.middlewares=traefik-auth
+  - traefik.http.middlewares.traefik-auth.basicauth.users=${SAFE_AUTH}
+  - traefik.http.routers.traefik.middlewares=traefik-auth,traefik-stripprefix
 YAML
     fi
     cat >> "$compose_file" <<YAML
@@ -1194,9 +1194,10 @@ YAML
     labels:
       - traefik.enable=true
       # Expose the Traefik dashboard/API via path prefix on web (HTTP) entrypoint
-      - traefik.http.services.traefik.loadbalancer.server.port=8080
       - traefik.http.routers.traefik.rule=PathPrefix(`/traefik`)
       - traefik.http.routers.traefik.entrypoints=web
+      - traefik.http.middlewares.traefik-stripprefix.stripprefix.prefixes=/traefik
+      - traefik.http.routers.traefik.service=api@internal
 YAML
     cat >> "$compose_file" <<YAML
 networks:
