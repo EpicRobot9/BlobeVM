@@ -29,56 +29,9 @@ if [[ -z "$HOST_DOCKER_BIN" || ! -e "$HOST_DOCKER_BIN" ]]; then
   exit 1
 fi
 
+# Note: we always run the dashboard in direct mode now. If a proxy exists, you can still access it via IP:port.
 # If dashboard disabled, nothing to do
 if [[ "$ENABLE_DASHBOARD" -ne 1 ]]; then
-  exit 0
-fi
-
-# If running in Traefik mode (NO_TRAEFIK != 1), ensure proxy network,
-# Traefik service and a proxy-attached dashboard container are present.
-if [[ "$NO_TRAEFIK" -ne 1 ]]; then
-  # Ensure proxy network exists
-  if ! docker network inspect proxy >/dev/null 2>&1; then
-    docker network create proxy >/dev/null 2>&1 || true
-  fi
-
-  # Recreate traefik container
-  if docker ps -a --format '{{.Names}}' | grep -qx "traefik"; then
-    docker rm -f "traefik" >/dev/null 2>&1 || true
-  fi
-  docker run -d --name "traefik" --restart unless-stopped \
-    -p 80:80 \
-    -v /var/run/docker.sock:/var/run/docker.sock:ro \
-    --network proxy \
-    traefik:v2.11 \
-      --providers.docker=true \
-      --providers.docker.exposedbydefault=false \
-      --entrypoints.web.address=:80 \
-      --api.dashboard=true \
-    >/dev/null 2>&1 || true
-
-  # Recreate a proxy-attached dashboard container so Traefik can route /dashboard
-  if docker ps -a --format '{{.Names}}' | grep -qx "blobedash-proxy"; then
-    docker rm -f "blobedash-proxy" >/dev/null 2>&1 || true
-  fi
-  docker run -d --name "blobedash-proxy" --restart unless-stopped \
-    -v "$STATE_DIR:/opt/blobe-vm" \
-    -v /usr/local/bin/blobe-vm-manager:/usr/local/bin/blobe-vm-manager:ro \
-    -v "${HOST_DOCKER_BIN}:/usr/bin/docker:ro" \
-    -v /var/run/docker.sock:/var/run/docker.sock \
-    -v "$APP_PATH:/app/app.py:ro" \
-    -e BLOBEDASH_USER="${BLOBEDASH_USER:-}" \
-    -e BLOBEDASH_PASS="${BLOBEDASH_PASS:-}" \
-    --network proxy \
-    --label 'traefik.enable=true' \
-    --label 'traefik.http.routers.blobe-dashboard.rule=PathPrefix(`/dashboard`)' \
-    --label 'traefik.http.routers.blobe-dashboard.entrypoints=web' \
-    --label 'traefik.http.services.blobe-dashboard.loadbalancer.server.port=5000' \
-    python:3.11-slim \
-      bash -c "apt-get update && apt-get install -y curl jq && pip install --no-cache-dir flask && python /app/app.py" \
-    >/dev/null 2>&1 || true
-
-  echo "Dashboard (Traefik mode): http://$(hostname -I | awk '{print $1}')/dashboard"
   exit 0
 fi
 

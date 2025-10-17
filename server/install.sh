@@ -899,65 +899,6 @@ YAML
 
   echo "Starting Traefik..."
   (cd /opt/blobe-vm/traefik && docker compose up -d)
-
-  if [[ "$ENABLE_DASHBOARD" -eq 1 ]]; then
-    echo "Deploying BlobeVM web dashboard service..."
-    # Always remove and repull dashboard container/image to ensure freshness
-    echo "[dashboard] Removing old dashboard container/image (if any)..."
-    (cd /opt/blobe-vm/traefik && docker compose rm -sf dashboard || true)
-    docker image rm -f ghcr.io/library/python:3.11-slim 2>/dev/null || true
-    echo "[dashboard] Pulling latest dashboard base image..."
-    docker pull ghcr.io/library/python:3.11-slim
-    # Append dashboard service to compose file
-    cat >> /opt/blobe-vm/traefik/docker-compose.yml <<DASH
-  dashboard:
-    image: ghcr.io/library/python:3.11-slim
-    command: bash -c "apt-get update && apt-get install -y curl jq && pip install --no-cache-dir flask && python /app/app.py"
-    volumes:
-      - /opt/blobe-vm:/opt/blobe-vm
-      - /usr/local/bin/blobe-vm-manager:/usr/local/bin/blobe-vm-manager:ro
-      - ${HOST_DOCKER_BIN:-/usr/bin/docker}:/usr/bin/docker:ro
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /opt/blobe-vm/dashboard/app.py:/app/app.py:ro
-    environment:
-      - BLOBEDASH_USER=${BLOBEDASH_USER:-}
-      - BLOBEDASH_PASS=${BLOBEDASH_PASS:-}
-      - HOST_DOCKER_BIN=${HOST_DOCKER_BIN:-/usr/bin/docker}
-    networks:
-      - ${net_name}
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.blobe-dashboard.rule=PathPrefix(`/dashboard`)
-      - traefik.http.routers.blobe-dashboard.entrypoints=web
-      - traefik.http.services.blobe-dashboard.loadbalancer.server.port=5000
-DASH
-    if [[ "$TLS_ENABLED" -eq 1 ]]; then
-      cat >> /opt/blobe-vm/traefik/docker-compose.yml <<'DASH'
-      - traefik.http.routers.blobe-dashboard-secure.rule=PathPrefix(`/dashboard`)
-      - traefik.http.routers.blobe-dashboard-secure.entrypoints=websecure
-      - traefik.http.routers.blobe-dashboard-secure.tls=true
-      - traefik.http.routers.blobe-dashboard-secure.tls.certresolver=myresolver
-DASH
-    fi
-    if [[ -n "$BLOBEVM_DOMAIN" ]]; then
-      if [[ "$TLS_ENABLED" -eq 1 ]]; then
-        cat >> /opt/blobe-vm/traefik/docker-compose.yml <<DASH
-      - traefik.http.routers.blobe-dashboard-host.rule=Host(`dashboard.${BLOBEVM_DOMAIN}`)
-      - traefik.http.routers.blobe-dashboard-host.entrypoints=websecure
-      - traefik.http.routers.blobe-dashboard-host.tls=true
-      - traefik.http.routers.blobe-dashboard-host.tls.certresolver=myresolver
-      - traefik.http.services.blobe-dashboard-host.loadbalancer.server.port=5000
-DASH
-      else
-        cat >> /opt/blobe-vm/traefik/docker-compose.yml <<DASH
-      - traefik.http.routers.blobe-dashboard-host.rule=Host(`dashboard.${BLOBEVM_DOMAIN}`)
-      - traefik.http.routers.blobe-dashboard-host.entrypoints=web
-      - traefik.http.services.blobe-dashboard-host.loadbalancer.server.port=5000
-DASH
-      fi
-    fi
-    (cd /opt/blobe-vm/traefik && docker compose up -d dashboard)
-  fi
 }
 
 # --- Direct mode dashboard deployment (no Traefik) ---
@@ -1294,35 +1235,31 @@ main() {
   fi
   # Check dashboard runtime dependencies before deployment
   preflight_dashboard_runtime || true
-  # Direct mode dashboard
-  if [[ "${NO_TRAEFIK:-0}" -eq 1 ]]; then
-    # Ensure systemd unit is installed and enabled
-    if [[ -f /etc/systemd/system/blobedash.service ]]; then
-      systemctl daemon-reload || true
-      systemctl enable blobedash.service || true
-      systemctl start blobedash.service || true
-        echo "Restarting dashboard service..."
-        sudo systemctl restart blobedash
-        sudo systemctl status blobedash --no-pager -l
-    else
-      # Fallback to one-shot docker run if systemd missing for any reason
-      deploy_dashboard_direct || true
-    fi
-    # Load DASHBOARD_PORT from .env if assigned by ensure script
-    if [[ -f /opt/blobe-vm/.env ]]; then
-      # shellcheck disable=SC1091
-      set +u
-      while IFS='=' read -r k v; do
-        [[ -z "$k" || "$k" =~ ^# ]] && continue
-        v="${v%\'}"; v="${v#\'}"; v="${v%\"}"; v="${v#\"}"
-        if [[ "$k" == "DASHBOARD_PORT" ]]; then export DASHBOARD_PORT="$v"; fi
-      done < /opt/blobe-vm/.env
-      set -u
-    fi
-    # Persist current env back to .env (now including DASHBOARD_PORT when present)
-    install_manager
+  # Always ensure the dashboard direct-service is enabled and running
+  if [[ -f /etc/systemd/system/blobedash.service ]]; then
+    systemctl daemon-reload || true
+    systemctl enable blobedash.service || true
+    systemctl restart blobedash.service || systemctl start blobedash.service || true
+  else
+    # Fallback to one-shot docker run if systemd missing for any reason
+    deploy_dashboard_direct || true
+  fi
+  # Load DASHBOARD_PORT from .env if assigned by ensure script
+  if [[ -f /opt/blobe-vm/.env ]]; then
+    # shellcheck disable=SC1091
+    set +u
+    while IFS='=' read -r k v; do
+      [[ -z "$k" || "$k" =~ ^# ]] && continue
+      v="${v%\'}"; v="${v#\'}"; v="${v%\"}"; v="${v#\"}"
+      if [[ "$k" == "DASHBOARD_PORT" ]]; then export DASHBOARD_PORT="$v"; fi
+    done < /opt/blobe-vm/.env
+    set -u
+  fi
+  # Persist current env back to .env (now including DASHBOARD_PORT when present)
+  install_manager
 
-    # Migrate existing instances to direct mode: assign ports automatically
+  # If running in direct mode, migrate existing instances to ensure port assignment
+  if [[ "${NO_TRAEFIK:-0}" -eq 1 ]]; then
     echo "Migrating existing VMs to direct mode (assigning high ports)..."
     shopt -s nullglob
     for d in /opt/blobe-vm/instances/*; do

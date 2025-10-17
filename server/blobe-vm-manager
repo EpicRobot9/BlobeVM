@@ -1043,27 +1043,18 @@ cmd_set_base_path() {
 
 # --- URL helpers ---
 dashboard_url() {
-  local ip http_port https_port https_suffix http_suffix
+  # Always report the direct-mode dashboard URL (IP:port), regardless of Traefik mode
+  local ip port
   ip="$(hostname -I | awk '{print $1}')"
-  http_port="${HTTP_PORT:-80}"; https_port="${HTTPS_PORT:-443}"
-  http_suffix=""; https_suffix=""
-  [[ "$http_port" != "80" ]] && http_suffix=":"$http_port
-  [[ "$https_port" != "443" ]] && https_suffix=":"$https_port
-  if [[ "${NO_TRAEFIK}" -eq 1 ]]; then
-    if [[ -n "${DASHBOARD_PORT:-}" ]]; then
-      echo "http://${ip}:${DASHBOARD_PORT}/dashboard"; return
-    fi
-    echo "(dashboard disabled or unknown port)"; return
+  port="${DASHBOARD_PORT:-}"
+  if [[ -z "$port" ]]; then
+    # Try to discover from running container mapping
+    port=$(docker ps --format '{{.Names}} {{.Ports}}' 2>/dev/null | awk '$1=="blobedash"{print $2}' | sed -n 's/.*:\([0-9]\+\)->5000.*/\1/p' | head -n1 || true)
   fi
-  if [[ -n "${BLOBEVM_DOMAIN:-}" ]]; then
-    if [[ "${ENABLE_TLS:-0}" -eq 1 ]]; then
-      echo "https://dashboard.${BLOBEVM_DOMAIN}${https_suffix}/"; return
-    else
-      echo "http://dashboard.${BLOBEVM_DOMAIN}${http_suffix}/"; return
-    fi
-  else
-    echo "http://${ip}${http_suffix}/dashboard"; return
+  if [[ -n "$port" ]]; then
+    echo "http://${ip}:${port}/dashboard"; return
   fi
+  echo "(dashboard disabled or unknown port)"
 }
 
 open_browser() {
