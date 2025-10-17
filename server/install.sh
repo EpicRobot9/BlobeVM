@@ -1122,8 +1122,12 @@ YAML
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./letsencrypt:/letsencrypt
-    networks:
-      - ${net_name}
+YAML
+    {
+      echo "    networks:";
+      echo "      - ${net_name}";
+    } >> "$compose_file"
+    cat >> "$compose_file" <<'YAML'
     labels:
       - traefik.enable=true
       # Router rules for the dashboard are only active when a domain is set
@@ -1166,14 +1170,20 @@ YAML
     cat >> "$compose_file" <<'YAML'
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-    networks:
-      - ${net_name}
+YAML
+    {
+      echo "    networks:";
+      echo "      - ${net_name}";
+    } >> "$compose_file"
+    cat >> "$compose_file" <<'YAML'
     labels:
       - traefik.enable=true
       # Expose the Traefik dashboard/API via path prefix on web (HTTP) entrypoint
       - traefik.http.services.traefik.loadbalancer.server.port=8080
       - traefik.http.routers.traefik.rule=PathPrefix(`/traefik`)
       - traefik.http.routers.traefik.entrypoints=web
+YAML
+    cat >> "$compose_file" <<YAML
 networks:
   ${net_name}:
     external: true
