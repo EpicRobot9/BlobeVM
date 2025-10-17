@@ -345,7 +345,6 @@ install_prereqs() {
   fi
   apt-get update -y
   apt-get install -y ca-certificates curl wget gnupg lsb-release jq >/dev/null
-  if [[ -n "${BLOBEVM_DOMAIN:-}" && "${NO_TRAEFIK:-0}" -ne 1 ]]; then
   install -m 0755 -d /etc/apt/keyrings
   if [[ ! -f /etc/apt/keyrings/docker.gpg ]]; then
     curl -fsSL https://download.docker.com/linux/$(. /etc/os-release && echo "$ID")/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
@@ -359,27 +358,7 @@ EOF
   fi
 
   # Quick sanity checks
-  command -v docker >/dev/null 2>&1 || {
-  # Always show the direct dashboard URL for convenience
-  if [[ "${ENABLE_DASHBOARD:-0}" -eq 1 && -n "${DASHBOARD_PORT:-}" ]]; then
-    echo "- Dashboard (direct): http://${ip}:${DASHBOARD_PORT}/dashboard"
-  else
-    echo "- Dashboard: disabled (enable by setting BLOBEVM_ENABLE_DASHBOARD=1 and re-running install)."
-  fi
-
-  # If a self-test ran, print its summary
-  if [[ -n "${SELF_TEST_STATUS:-}" ]]; then
-    echo "- Traefik self-test: ${SELF_TEST_STATUS}"
-    if [[ -n "${SELF_TEST_PATH_URL:-}" ]]; then
-      echo "  • Path URL: ${SELF_TEST_PATH_URL}  [${SELF_TEST_PATH_CODE:----}]"
-    fi
-    if [[ -n "${SELF_TEST_HOST_URL:-}" ]]; then
-      echo "  • Host URL: ${SELF_TEST_HOST_URL}  [${SELF_TEST_HOST_CODE:----}]"
-    fi
-  fi
-    echo "Docker did not install correctly." >&2
-    exit 1
-  }
+  command -v docker >/dev/null 2>&1 || { echo "Docker did not install correctly." >&2; exit 1; }
   if ! docker compose version >/dev/null 2>&1; then
     echo "Docker Compose plugin is unavailable. Please ensure docker-compose-plugin is installed." >&2
     exit 1
