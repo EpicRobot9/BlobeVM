@@ -1048,6 +1048,7 @@ domain_ready() {
 wait_for_dns_propagation() {
   # Only relevant when TLS is enabled and HTTP_PORT is 80 (ACME requires 80)
   [[ "${NO_TRAEFIK:-0}" -eq 1 ]] && return 0
+  [[ "${BLOBEVM_SKIP_DNS_CHECK:-0}" -eq 1 ]] && return 0
   [[ "${TLS_ENABLED:-0}" -eq 1 ]] || return 0
   [[ "${HTTP_PORT:-80}" == "80" ]] || return 0
   domain_ready && return 0
@@ -1448,6 +1449,9 @@ print_success() {
       echo "- VM URLs:  http://<name>.${BLOBEVM_DOMAIN}${http_suffix}/ (path fallback ${base_path}/<name>/)"
     fi
     echo "- Ensure DNS: *.${BLOBEVM_DOMAIN} and traefik.${BLOBEVM_DOMAIN} → this server's IP."
+    if [[ "${BLOBEVM_SKIP_DNS_CHECK:-0}" -eq 1 ]]; then
+      echo "  (Using path-based routing. Live now: http://${BLOBEVM_DOMAIN}${http_suffix}${base_path}/<name>/ and http://${BLOBEVM_DOMAIN}${http_suffix}/traefik/)"
+    fi
   else
     if [[ "${ENABLE_DASHBOARD:-0}" -eq 1 && -n "$dport" ]]; then
       echo "- Dashboard: http://${ip}:${dport}/dashboard"
@@ -1535,7 +1539,9 @@ main() {
   validate_skip_traefik || true
   ensure_network
   if [[ "${NO_TRAEFIK:-0}" -ne 1 ]]; then
-    check_domain_dns || true
+    if [[ "${BLOBEVM_SKIP_DNS_CHECK:-0}" -ne 1 ]]; then
+      check_domain_dns || true
+    fi
   fi
   # If reusing an external Traefik, skip our port detection and TLS prompts entirely
   if [[ "${SKIP_TRAEFIK:-0}" -ne 1 && "${NO_TRAEFIK:-0}" -ne 1 ]]; then
