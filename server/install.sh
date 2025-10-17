@@ -1105,17 +1105,14 @@ setup_traefik() {
   echo "Writing Traefik docker-compose.yml to $compose_file"
 
   if [[ "${TLS_ENABLED:-0}" -eq 1 ]]; then
-    cat > "$compose_file" <<YAML
-services:
-  traefik:
-    image: traefik:v2.11
-    command:
-      - --providers.docker=true
-      - --providers.docker.exposedbydefault=false
-      - --entrypoints.web.address=:80
-      - --entrypoints.websecure.address=:443
-      - --accesslog=true
-      - --api.dashboard=true
+    cat >> "$compose_file" <<'YAML'
+    labels:
+      - traefik.enable=true
+      # Expose Traefik dashboard/API via path prefix on web (HTTP) entrypoint
+      - traefik.http.routers.traefik.rule=PathPrefix(`/traefik`)
+      - traefik.http.routers.traefik.entrypoints=web
+      - traefik.http.routers.traefik.service=api@internal
+YAML
       - --certificatesresolvers.myresolver.acme.email=${BLOBEVM_EMAIL}
       - --certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json
       - --certificatesresolvers.myresolver.acme.httpchallenge=true
@@ -1174,16 +1171,14 @@ networks:
     external: true
 YAML
   else
-    cat > "$compose_file" <<YAML
-services:
-  traefik:
-    image: traefik:v2.11
-    command:
-      - --providers.docker=true
-      - --providers.docker.exposedbydefault=false
-      - --entrypoints.web.address=:80
-      - --accesslog=true
-      - --api.dashboard=true
+    cat >> "$compose_file" <<'YAML'
+    labels:
+      - traefik.enable=true
+      # Expose the Traefik dashboard/API via path prefix on web (HTTP) entrypoint
+      - traefik.http.routers.traefik.rule=PathPrefix(`/traefik`)
+      - traefik.http.routers.traefik.entrypoints=web
+      - traefik.http.routers.traefik.service=api@internal
+YAML
 YAML
     {
       echo "    ports:";
