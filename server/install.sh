@@ -36,6 +36,17 @@ detect_repo_root() {
   local script_dir
   script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
   REPO_DIR="$(cd "$script_dir/.." && pwd)"
+  # If that path does not contain a Dockerfile (as expected by build_image), try to locate it
+  if [[ ! -f "$REPO_DIR/Dockerfile" ]]; then
+    # Common install layout: /opt/blobe-vm/repo is a working copy, parent holds Dockerfile
+    if [[ -d /opt/blobe-vm/repo && -f /opt/blobe-vm/Dockerfile ]]; then
+      REPO_DIR="/opt/blobe-vm"
+    elif [[ -f "$script_dir/../Dockerfile" ]]; then
+      REPO_DIR="$(cd "$script_dir/.." && pwd)"
+    elif [[ -f "$script_dir/../../Dockerfile" ]]; then
+      REPO_DIR="$(cd "$script_dir/../.." && pwd)"
+    fi
+  fi
 }
 
 # Load existing settings if present (update-safe)
