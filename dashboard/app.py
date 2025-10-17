@@ -829,19 +829,19 @@ def _disable_single_port(dash_port: int | None):
         # Fallback: start direct dashboard on the provided port or choose one
         port = dash_port or direct_start
         # Free any existing blobedash
-    _docker('rm', '-f', 'blobedash')
-    _docker('run', '-d', '--name', 'blobedash', '--restart', 'unless-stopped',
-        '-p', f'{port}:5000',
-        '-v', f'{_state_dir()}:/opt/blobe-vm',
-        '-v', '/usr/local/bin/blobe-vm-manager:/usr/local/bin/blobe-vm-manager:ro',
-        '-v', DOCKER_VOLUME_BIND,
-        '-v', '/var/run/docker.sock:/var/run/docker.sock',
-        '-v', f'{_state_dir()}/dashboard/app.py:/app/app.py:ro',
-        '-e', f'BLOBEDASH_USER={os.environ.get("BLOBEDASH_USER","")}',
-        '-e', f'BLOBEDASH_PASS={os.environ.get("BLOBEDASH_PASS","")}',
-        '-e', f'HOST_DOCKER_BIN={HOST_DOCKER_BIN}',
-    'python:3.11-slim',
-        'bash', '-c', 'pip install --no-cache-dir flask && python /app/app.py')
+        _docker('rm', '-f', 'blobedash')
+        _docker('run', '-d', '--name', 'blobedash', '--restart', 'unless-stopped',
+            '-p', f'{port}:5000',
+            '-v', f'{_state_dir()}:/opt/blobe-vm',
+            '-v', '/usr/local/bin/blobe-vm-manager:/usr/local/bin/blobe-vm-manager:ro',
+            '-v', DOCKER_VOLUME_BIND,
+            '-v', '/var/run/docker.sock:/var/run/docker.sock',
+            '-v', f'{_state_dir()}/dashboard/app.py:/app/app.py:ro',
+            '-e', f'BLOBEDASH_USER={os.environ.get("BLOBEDASH_USER","")}',
+            '-e', f'BLOBEDASH_PASS={os.environ.get("BLOBEDASH_PASS","")}',
+            '-e', f'HOST_DOCKER_BIN={HOST_DOCKER_BIN}',
+        'python:3.11-slim',
+            'bash', '-c', 'pip install --no-cache-dir flask && python /app/app.py')
 
 @app.get('/dashboard')
 @auth_required
@@ -1162,10 +1162,10 @@ def api_disable_single_port():
         except Exception:
             pass
     threading.Thread(target=worker, daemon=True).start()
-    msg = 'Disabling single-port mode; dashboard will run directly on a high port.'
-    if dash_port:
-        msg = f'Disabling single-port mode; dashboard will move to http://<host>:{dash_port}/dashboard.'
-    return jsonify({'ok': True, 'message': msg})
+    env = _read_env()
+    effective_port = str(dash_port) if dash_port else env.get('DASHBOARD_PORT','') or env.get('DIRECT_PORT_START','20000')
+    msg = f'Disabling single-port mode; dashboard will run on http://<host>:{effective_port}/dashboard.'
+    return jsonify({'ok': True, 'message': msg, 'port': effective_port})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
