@@ -1105,19 +1105,7 @@ setup_traefik() {
   echo "Writing Traefik docker-compose.yml to $compose_file"
 
   if [[ "${TLS_ENABLED:-0}" -eq 1 ]]; then
-    cat >> "$compose_file" <<'YAML'
-    labels:
-      - traefik.enable=true
-      # Expose Traefik dashboard/API via path prefix on web (HTTP) entrypoint
-      - traefik.http.routers.traefik.rule=PathPrefix(`/traefik`)
-      - traefik.http.routers.traefik.entrypoints=web
-      - traefik.http.routers.traefik.service=api@internal
-YAML
-      - --certificatesresolvers.myresolver.acme.email=${BLOBEVM_EMAIL}
-      - --certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json
-      - --certificatesresolvers.myresolver.acme.httpchallenge=true
-      - --certificatesresolvers.myresolver.acme.httpchallenge.entrypoint=web
-YAML
+    # ...existing code...
     if [[ "$FORCE_HTTPS" -eq 1 ]]; then
       cat >> "$compose_file" <<'YAML'
       - --entrypoints.web.http.redirections.entryPoint.to=websecure
@@ -1139,32 +1127,7 @@ YAML
       echo "    networks:";
       echo "      - ${net_name}";
     } >> "$compose_file"
-    cat >> "$compose_file" <<'YAML'
-    labels:
-      - traefik.enable=true
-      # Expose Traefik dashboard/API via path prefix on web (HTTP) entrypoint
-      - traefik.http.routers.traefik.rule=PathPrefix(`/traefik`)
-      - traefik.http.routers.traefik.entrypoints=web
-      - traefik.http.middlewares.traefik-stripprefix.stripprefix.prefixes=/traefik
-      - traefik.http.middlewares.traefik-redirectregex.redirectregex.regex=^/traefik/?$
-      - traefik.http.middlewares.traefik-redirectregex.redirectregex.replacement=/traefik/dashboard/
-      - traefik.http.middlewares.traefik-redirectregex.redirectregex.permanent=true
-      - traefik.http.routers.traefik.service=api@internal
-YAML
-    if [[ -n "$TRAEFIK_DASHBOARD_AUTH" ]]; then
-      # Escape $ to $$ to prevent docker compose from treating bcrypt parts as env variables
-      local SAFE_AUTH
-      SAFE_AUTH="${TRAEFIK_DASHBOARD_AUTH//$/\$\$}"
-      # Add auth middleware labels
-      cat >> "$compose_file" <<YAML
-  - traefik.http.middlewares.traefik-auth.basicauth.users=${SAFE_AUTH}
-      - traefik.http.routers.traefik.middlewares=traefik-auth,traefik-redirectregex,traefik-stripprefix
-YAML
-    else
-      cat >> "$compose_file" <<'YAML'
-      - traefik.http.routers.traefik.middlewares=traefik-redirectregex,traefik-stripprefix
-YAML
-    fi
+    # ...existing code...
     cat >> "$compose_file" <<YAML
 networks:
   ${net_name}:
@@ -1178,7 +1141,6 @@ YAML
       - traefik.http.routers.traefik.rule=PathPrefix(`/traefik`)
       - traefik.http.routers.traefik.entrypoints=web
       - traefik.http.routers.traefik.service=api@internal
-YAML
 YAML
     {
       echo "    ports:";
