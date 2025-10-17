@@ -822,6 +822,28 @@ auto_test_traefik() {
   rm -rf "/opt/blobe-vm/instances/${name}" 2>/dev/null || true
   # Create test VM
   blobe-vm-manager create "$name" >/dev/null 2>&1 || blobe-vm-manager start "$name" >/dev/null 2>&1 || true
+  # Wait for backend HTTP service to be ready inside the proxy network
+  local cname="blobevm_${name}"
+  local net_name="${TRAEFIK_NETWORK:-proxy}"
+  local ready=0 tries=0 max_tries=30
+  echo "[self-test] Waiting for backend service (http://${cname}:3000/) to be ready..."
+  docker pull -q curlimages/curl:8.8.0 >/dev/null 2>&1 || true
+  while [[ $tries -lt $max_tries ]]; do
+    if docker ps -a --format '{{.Names}}' | grep -qx "$cname"; then
+      code=$(docker run --rm --network "$net_name" curlimages/curl:8.8.0 -sS -o /dev/null -m 5 -L -w '%{http_code}' "http://${cname}:3000/" 2>/dev/null || echo 000)
+      if [[ "$code" =~ ^[23]..$ ]]; then
+        ready=1; break
+      fi
+    fi
+    tries=$((tries+1))
+    sleep 1
+  done
+  if [[ $ready -ne 1 ]]; then
+    echo "[self-test] Backend not ready after $max_tries seconds; continuing with Traefik probe anyway..."
+  else
+    echo "[self-test] Backend ready."
+  fi
+
   # Determine URLs to test
   local base_path="${BASE_PATH:-/vm}"; [[ "$base_path" != /* ]] && base_path="/$base_path"; base_path="${base_path%/}"
   local http_port="${HTTP_PORT:-80}" https_port="${HTTPS_PORT:-443}"
@@ -844,7 +866,7 @@ auto_test_traefik() {
   # Probe function
   _probe() {
     local url="$1"; [[ -z "$url" ]] && return 1
-    curl -sS -o /dev/null -m 8 -L -w '%{http_code}' "$url" 2>/dev/null || echo 000
+    curl -sS -o /dev/null -m 12 -L -w '%{http_code}' "$url" 2>/dev/null || echo 000
   }
   # Try path and host
   local ok=0 code
