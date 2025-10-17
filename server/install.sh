@@ -1091,6 +1091,12 @@ EOF
       - traefik.http.routers.traefik.entrypoints=web
       - traefik.http.routers.traefik.middlewares=traefik-redirectregex,traefik-stripprefix
       - traefik.http.routers.traefik.service=api@internal
+      # Secure router for dashboard/API over HTTPS
+      - traefik.http.routers.traefik-secure.rule=PathPrefix(`/traefik`)
+      - traefik.http.routers.traefik-secure.entrypoints=websecure
+      - traefik.http.routers.traefik-secure.tls=true
+      - traefik.http.routers.traefik-secure.middlewares=traefik-redirectregex,traefik-stripprefix
+      - traefik.http.routers.traefik-secure.service=api@internal
       - traefik.http.middlewares.traefik-stripprefix.stripprefix.prefixes=/traefik
       - traefik.http.middlewares.traefik-redirectregex.redirectregex.regex=^/traefik/?$
       - traefik.http.middlewares.traefik-redirectregex.redirectregex.replacement=/traefik/dashboard/
@@ -1225,6 +1231,11 @@ traefik_canonicalize_labels() {
       print "      - traefik.http.routers.apidash.entrypoints=web";
       print "      - traefik.http.routers.apidash.middlewares=apidash-redirect,apidash-stripprefix";
       print "      - traefik.http.routers.apidash.service=api@internal";
+      print "      - traefik.http.routers.apidash-secure.rule=PathPrefix(`/traefik`)";
+      print "      - traefik.http.routers.apidash-secure.entrypoints=websecure";
+      print "      - traefik.http.routers.apidash-secure.tls=true";
+      print "      - traefik.http.routers.apidash-secure.middlewares=apidash-redirect,apidash-stripprefix";
+      print "      - traefik.http.routers.apidash-secure.service=api@internal";
       print "      - traefik.http.middlewares.apidash-stripprefix.stripprefix.prefixes=/traefik";
       print "      - traefik.http.middlewares.apidash-redirect.redirectregex.regex=^/traefik/?$";
       print "      - traefik.http.middlewares.apidash-redirect.redirectregex.replacement=/traefik/dashboard/";
