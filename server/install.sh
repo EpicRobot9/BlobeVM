@@ -398,6 +398,10 @@ ensure_network() {
 # clear SKIP_TRAEFIK so we deploy ours.
 validate_skip_traefik() {
   [[ "${NO_TRAEFIK:-0}" -eq 1 ]] && return 0
+  if [[ "${MANAGE_TRAEFIK:-0}" -eq 1 ]]; then
+    SKIP_TRAEFIK=0
+    return 0
+  fi
   if [[ "${SKIP_TRAEFIK:-0}" -eq 1 ]]; then
     local net_name="${TRAEFIK_NETWORK:-proxy}"
     local has_tr=0 has_net=0
@@ -681,6 +685,9 @@ handle_tls_port_conflict() {
 }
 
 detect_external_traefik() {
+  if [[ "${MANAGE_TRAEFIK:-0}" -eq 1 ]]; then
+    return 0
+  fi
   # Look for a running Traefik container and offer to reuse it
   local tid
   tid=$(docker ps --filter=ancestor=traefik --format '{{.ID}}' | head -n1 || true)
@@ -1042,8 +1049,9 @@ deploy_dashboard_direct() {
   fi
   echo "[dashboard] Removing old dashboard image (if any)..."
   docker image rm -f ghcr.io/library/python:3.11-slim 2>/dev/null || true
+  docker image rm -f python:3.11-slim 2>/dev/null || true
   echo "[dashboard] Pulling latest dashboard base image..."
-  docker pull ghcr.io/library/python:3.11-slim
+  docker pull python:3.11-slim
   docker run -d --name blobedash --restart unless-stopped \
     -p "${DASHBOARD_PORT}:5000" \
     -v /opt/blobe-vm:/opt/blobe-vm \
@@ -1054,7 +1062,7 @@ deploy_dashboard_direct() {
     -e BLOBEDASH_USER="${BLOBEDASH_USER:-}" \
     -e BLOBEDASH_PASS="${BLOBEDASH_PASS:-}" \
     -e HOST_DOCKER_BIN="${docker_bin}" \
-  ghcr.io/library/python:3.11-slim \
+  python:3.11-slim \
   bash -c "apt-get update && apt-get install -y curl jq && pip install --no-cache-dir flask && python /app/app.py" \
     >/dev/null
 }
@@ -1183,7 +1191,7 @@ preflight_dashboard_runtime() {
       -v "/usr/local/bin/blobe-vm-manager:/usr/local/bin/blobe-vm-manager:ro" \
       -v "$docker_bin:/usr/bin/docker:ro" \
       -v "/var/run/docker.sock:/var/run/docker.sock" \
-      ghcr.io/library/python:3.11-slim bash -lc "docker ps >/dev/null 2>&1"; then
+    python:3.11-slim bash -lc "docker ps >/dev/null 2>&1"; then
     echo "[preflight] docker ps failed inside probe container. Check docker socket permissions." >&2
     return 1
   fi
