@@ -135,6 +135,8 @@ async function load(){
                  `<button onclick="installChrome('${i.name}')">Install Chrome</button>`+
                  `<select id="appsel-${i.name}" class="btn-gray" style="background:#1f2937;color:#fff;padding:.35rem .4rem;margin-left:.25rem"><option value="">App…</option>${appOpts}</select>`+
                  `<button onclick="installSelectedApp('${i.name}')">Install</button>`+
+                 `<button onclick="uninstallSelectedApp('${i.name}')" class="btn-red">Uninstall</button>`+
+                 `<button onclick="reinstallSelectedApp('${i.name}')" class="btn-gray">Reinstall</button>`+
                  `<button onclick="appStatusSelected('${i.name}')" class="btn-gray">Status</button>`+
                  `<button onclick="recreateVM('${i.name}')">Recreate</button>`+
                  `<button onclick="rebuildVM('${i.name}')">Rebuild</button>`+
@@ -241,6 +243,40 @@ async function appStatusSelected(name){
     }catch(e){
         alert('Status error: '+e);
     }
+}
+async function uninstallSelectedApp(name){
+    const app = selectedApp(name);
+    if(!app){ alert('Select an app first.'); return; }
+    if(!confirm(`Uninstall ${app} from ${name}?`)) return;
+    try{
+        const r = await fetch(`/dashboard/api/app-uninstall/${encodeURIComponent(name)}/${encodeURIComponent(app)}`,{method:'POST'});
+        const j = await r.json().catch(()=>({}));
+        if(j && j.ok){
+            alert(`${app} uninstall requested.`);
+        }else{
+            alert(`${app} uninstall failed:\n`+((j && (j.error||j.output))||'unknown error'));
+        }
+    }catch(e){
+        alert('Uninstall error: '+e);
+    }
+    load();
+}
+async function reinstallSelectedApp(name){
+    const app = selectedApp(name);
+    if(!app){ alert('Select an app first.'); return; }
+    if(!confirm(`Reinstall ${app} in ${name}? This will uninstall first.`)) return;
+    try{
+        const r = await fetch(`/dashboard/api/app-reinstall/${encodeURIComponent(name)}/${encodeURIComponent(app)}`,{method:'POST'});
+        const j = await r.json().catch(()=>({}));
+        if(j && j.ok){
+            alert(`${app} reinstall requested.`);
+        }else{
+            alert(`${app} reinstall failed:\n`+((j && (j.error||j.output))||'unknown error'));
+        }
+    }catch(e){
+        alert('Reinstall error: '+e);
+    }
+    load();
 }
 function bulkRecreate(){
     if(!confirm('Recreate ALL VMs?'))return;
@@ -865,6 +901,24 @@ def api_app_status(name, app):
     try:
         ok, out, err, _ = _run_manager('app-status', name, app)
         # Try to parse a simple status from stdout, else return as-is
+        return jsonify({'ok': ok, 'output': out, 'error': err})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+@app.post('/dashboard/api/app-uninstall/<name>/<app>')
+@auth_required
+def api_app_uninstall(name, app):
+    try:
+        ok, out, err, _ = _run_manager('app-uninstall', name, app)
+        return jsonify({'ok': ok, 'output': out, 'error': err})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+@app.post('/dashboard/api/app-reinstall/<name>/<app>')
+@auth_required
+def api_app_reinstall(name, app):
+    try:
+        ok, out, err, _ = _run_manager('app-reinstall', name, app)
         return jsonify({'ok': ok, 'output': out, 'error': err})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500

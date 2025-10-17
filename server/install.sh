@@ -966,7 +966,18 @@ build_image() {
 
 install_manager() {
   echo "Installing blobe-vm-manager CLI..."
-  install -Dm755 "$REPO_DIR/server/blobe-vm-manager" /usr/local/bin/blobe-vm-manager
+  # Only replace if changed to preserve running processes and avoid unnecessary writes
+  local src="$REPO_DIR/server/blobe-vm-manager" dst="/usr/local/bin/blobe-vm-manager"
+  if [[ -f "$dst" ]]; then
+    if ! cmp -s "$src" "$dst"; then
+      install -Dm755 "$src" "$dst"
+    else
+      # Ensure permissions are correct even if unchanged
+      chmod 755 "$dst"
+    fi
+  else
+    install -Dm755 "$src" "$dst"
+  fi
   mkdir -p /opt/blobe-vm/instances
   # Ensure dashboard app is available under /opt for both modes
   mkdir -p /opt/blobe-vm/dashboard

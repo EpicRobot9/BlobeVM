@@ -117,6 +117,8 @@ Commands:
   update-vm <name>           # apt update/upgrade inside VM container
   app-install <name> <app>   # install an app inside the VM (if script exists)
   app-status <name> <app>    # check if an app binary exists in VM
+  app-uninstall <name> <app> # uninstall/remove an app from the VM
+  app-reinstall <name> <app> # uninstall then install the app
 USAGE
   exit 1
 }
@@ -684,6 +686,7 @@ cmd_app_status() {
     vscodium|code) bin="/usr/bin/codium" ;;
     steam) bin="/usr/games/steam" ;;
     discord) bin="/usr/bin/discord" ;;
+    spotify|spotify-client) bin="/usr/bin/spotify" ;;
     *) bin="" ;;
   esac
   if [[ -n "$bin" ]]; then
@@ -692,6 +695,95 @@ cmd_app_status() {
   else
     echo "unknown"; return 0
   fi
+}
+
+# Map app name to likely apt/dpkg package names for removal
+_app_packages_for() {
+  local app="$1"
+  case "$app" in
+    chrome|google-chrome|google-chrome-stable) echo "google-chrome-stable" ;;
+    discord) echo "discord" ;;
+    vlc) echo "vlc" ;;
+    vscodium|codium|code) echo "codium" ;;
+    steam) echo "steam steam-launcher" ;;
+    minecraft|minecraft-launcher) echo "minecraft-launcher" ;;
+    synaptic) echo "synaptic" ;;
+    aqemu) echo "aqemu" ;;
+    xarchiver) echo "xarchiver" ;;
+    wine|wine64) echo "wine*" ;;
+    openjdk-17-jre) echo "openjdk-17-jre" ;;
+    openjdk-8-jre) echo "openjdk-8-jre" ;;
+    spotify|spotify-client) echo "spotify-client" ;;
+    *) echo "" ;;
+  esac
+}
+
+_app_uninstall_cleanup_script() {
+  local app="$1"
+  case "$app" in
+    chrome|google-chrome|google-chrome-stable)
+      cat <<'CLEAN'
+set -e
+rm -f /etc/apt/sources.list.d/google-chrome.list || true
+rm -f /etc/apt/keyrings/google-chrome.gpg || true
+CLEAN
+      ;;
+    vscodium|codium|code)
+      cat <<'CLEAN'
+set -e
+rm -f /etc/apt/sources.list.d/vscodium.list || true
+rm -f /usr/share/keyrings/vscodium-archive-keyring.gpg || true
+CLEAN
+      ;;
+    spotify|spotify-client)
+      cat <<'CLEAN'
+set -e
+rm -f /etc/apt/sources.list.d/spotify.list || true
+rm -f /etc/apt/keyrings/spotify.gpg || true
+CLEAN
+      ;;
+    *) : ;;
+  esac
+}
+
+cmd_app_uninstall() {
+  local name="$1" app="$2"
+  [[ -z "$name" || -z "$app" ]] && usage
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  local cname; cname="$(container_name "$name")"
+  if ! docker ps -a --format '{{.Names}}' | grep -qx "$cname"; then
+    echo "Container for '$name' not running; starting..."
+    cmd_start "$name" >/dev/null
+  fi
+  local pkgs; pkgs="$(_app_packages_for "$app")"
+  if [[ -z "$pkgs" ]]; then
+    echo "Unknown app: $app" >&2; exit 1
+  fi
+  echo "Uninstalling app '$app' in '$name' (packages: $pkgs)..."
+  # Build uninstall script to run inside the container as root
+  local script
+  script="$(mktemp)"
+  {
+    echo "export DEBIAN_FRONTEND=noninteractive"
+    echo "apt-get update || true"
+    echo "apt-get -y purge $pkgs || apt-get -y remove $pkgs || true"
+    _app_uninstall_cleanup_script "$app"
+    echo "apt-get -y autoremove || true"
+    echo "apt-get -y autoclean || true"
+  } >"$script"
+  docker cp "$script" "$cname:/tmp/uninstall-$app.sh"
+  docker exec -u 0 "$cname" bash -lc "chmod +x /tmp/uninstall-$app.sh && /tmp/uninstall-$app.sh" || {
+    echo "Uninstall failed for '$app'" >&2; rm -f "$script"; exit 1; }
+  rm -f "$script"
+  echo "Uninstalled '$app' from '$name'."
+}
+
+cmd_app_reinstall() {
+  local name="$1" app="$2"
+  [[ -z "$name" || -z "$app" ]] && usage
+  cmd_app_uninstall "$name" "$app" || true
+  cmd_app_install "$name" "$app"
 }
 
 cmd_recreate_targets() {
@@ -1042,6 +1134,10 @@ main() {
     clear-base-path) cmd_clear_base_path "$@" ;;
   set-limits) cmd_set_limits "$@" ;;
   clear-limits) cmd_clear_limits "$@" ;;
+  app-install) cmd_app_install "$@" ;;
+  app-status) cmd_app_status "$@" ;;
+  app-uninstall) cmd_app_uninstall "$@" ;;
+  app-reinstall) cmd_app_reinstall "$@" ;;
     *) usage ;;
   esac
 }
