@@ -112,7 +112,7 @@ YAML
     labels:
       - traefik.enable=true
       # Expose Traefik dashboard/API via path prefix on web (HTTP) entrypoint
-      - traefik.http.routers.traefik.rule=PathPrefix(`/traefik`)
+  - traefik.http.routers.traefik.rule=PathPrefix('/traefik')
       - traefik.http.routers.traefik.entrypoints=web
       - traefik.http.routers.traefik.service=api@internal
 YAML
