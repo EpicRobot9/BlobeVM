@@ -74,95 +74,16 @@ normalize_bool() {
 }
 
 apply_env_overrides() {
-  # Default: disable Traefik unless explicitly set
-  if [[ "${TLS_ENABLED:-0}" -eq 1 ]]; then
-    cat > "$compose_file" <<YAML
-services:
-  traefik:
-    image: traefik:v2.11
-    command:
-      - --providers.docker=true
-      - --providers.docker.exposedbydefault=false
-      - --entrypoints.web.address=:80
-      - --entrypoints.websecure.address=:443
-      - --accesslog=true
-      - --api.dashboard=true
-      - --certificatesresolvers.myresolver.acme.email=${BLOBEVM_EMAIL}
-      - --certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json
-      - --certificatesresolvers.myresolver.acme.httpchallenge=true
-      - --certificatesresolvers.myresolver.acme.httpchallenge.entrypoint=web
-YAML
-    if [[ "$FORCE_HTTPS" -eq 1 ]]; then
-      cat >> "$compose_file" <<YAML
-      - --entrypoints.web.http.redirections.entryPoint.to=websecure
-      - --entrypoints.web.http.redirections.entryPoint.scheme=https
-YAML
-    fi
-    {
-      echo "    ports:";
-      echo "      - \"${HTTP_PORT}:80\"";
-      echo "      - \"${HTTPS_PORT}:443\"";
-    } >> "$compose_file"
-    cat >> "$compose_file" <<YAML
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./letsencrypt:/letsencrypt
-    networks:
-      - ${net_name}
-    labels:
-      - traefik.enable=true
-      # Expose Traefik dashboard/API via path prefix on web (HTTP) entrypoint
-  - traefik.http.routers.traefik.rule=PathPrefix('/traefik')
-      - traefik.http.routers.traefik.entrypoints=web
-      - traefik.http.routers.traefik.service=api@internal
-YAML
-    cat >> "$compose_file" <<YAML
-networks:
-  ${net_name}:
-    external: true
-YAML
-  else
-    cat > "$compose_file" <<YAML
-services:
-  traefik:
-    image: traefik:v2.11
-    command:
-      - --providers.docker=true
-      - --providers.docker.exposedbydefault=false
-      - --entrypoints.web.address=:80
-      - --accesslog=true
-      - --api.dashboard=true
-YAML
-    {
-      echo "    ports:";
-      echo "      - \"${HTTP_PORT}:80\"";
-    } >> "$compose_file"
-    cat >> "$compose_file" <<YAML
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    networks:
-      - ${net_name}
-    labels:
-      - traefik.enable=true
-      # Expose the Traefik dashboard/API via path prefix on web (HTTP) entrypoint
-  - traefik.http.routers.traefik.rule=PathPrefix('/traefik')
-      - traefik.http.routers.traefik.entrypoints=web
-      - traefik.http.routers.traefik.service=api@internal
-YAML
-    cat >> "$compose_file" <<YAML
-networks:
-  ${net_name}:
-    external: true
-YAML
-  fi
+  # Read environment overrides and normalize values. Do NOT write compose here.
   if [[ -n "${BLOBEVM_HTTPS_PORT:-}" ]]; then
     HTTPS_PORT="${BLOBEVM_HTTPS_PORT}"
   fi
-
+  if [[ -n "${BLOBEVM_HTTP_PORT:-}" ]]; then
+    HTTP_PORT="${BLOBEVM_HTTP_PORT}"
+  fi
   if [[ -n "${BLOBEVM_TRAEFIK_NETWORK:-}" ]]; then
     TRAEFIK_NETWORK="${BLOBEVM_TRAEFIK_NETWORK}"
   fi
-
   if [[ -n "${BLOBEVM_BASE_PATH:-}" ]]; then
     BASE_PATH="${BLOBEVM_BASE_PATH}"
   fi
@@ -173,7 +94,6 @@ YAML
     nt="$(normalize_bool "${BLOBEVM_NO_TRAEFIK}")"
     [[ "${nt}" == "1" ]] && NO_TRAEFIK=1 || NO_TRAEFIK=0
   fi
-
   if [[ -n "${BLOBEVM_SKIP_TRAEFIK:-}" ]]; then
     local skip
     skip="$(normalize_bool "${BLOBEVM_SKIP_TRAEFIK}")"
@@ -202,11 +122,9 @@ YAML
   if [[ -n "${BLOBEVM_REUSE_SETTINGS:-}" ]]; then
     BLOBEVM_REUSE_SETTINGS="$(normalize_bool "${BLOBEVM_REUSE_SETTINGS}")"
   fi
-
   if [[ -n "${BLOBEDASH_USER:-}" ]]; then
     DASH_AUTH_USER="${BLOBEDASH_USER}"
   fi
-
   if [[ -n "${BLOBEVM_ASSUME_DEFAULTS:-}" ]]; then
     ASSUME_DEFAULTS="$(normalize_bool "${BLOBEVM_ASSUME_DEFAULTS}")"
   fi
