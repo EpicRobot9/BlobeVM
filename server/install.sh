@@ -801,6 +801,24 @@ auto_test_traefik() {
   if [[ "$ok" -ne 1 && -n "$host_url" ]]; then
     code=$(_probe "$host_url"); export SELF_TEST_HOST_CODE="$code"; [[ "$code" =~ ^[23]..$ ]] && ok=1
   fi
+  # If TLS is enabled, attempt an HTTPS probe to detect cert issues and auto-repair
+  if [[ "${TLS_ENABLED:-0}" -eq 1 && -n "${BLOBEVM_DOMAIN:-}" && -n "$host_url" ]]; then
+    local https_url
+    https_url="${host_url/http:/https:}"
+    # Try HTTPS and capture stderr to detect certificate problems
+    local curl_err
+    curl_err=$(curl -sS -o /dev/null -m 12 -L -w '%{http_code}' "$https_url" 2>&1) || true
+    # If curl returned a non-HTTP output containing 'SSL' or 'certificate', try to repair ACME storage
+    if echo "$curl_err" | grep -Ei "ssl|certificate|peer cert|certificate problem|SSL:" >/dev/null 2>&1; then
+      echo "[self-test] Detected TLS/certificate error when probing $https_url. Attempting ACME repair and Traefik restart..."
+      traefik_fix_acme || true
+      sleep 2
+      # Retry once after repair
+      code=$(curl -sS -o /dev/null -m 12 -L -w '%{http_code}' "$https_url" 2>/dev/null || echo 000)
+      export SELF_TEST_HOST_CODE="$code"
+      [[ "$code" =~ ^[23]..$ ]] && ok=1
+    fi
+  fi
   if [[ "$ok" -eq 1 ]]; then
     echo "[self-test] Traefik routing OK."; export SELF_TEST_STATUS="OK"
   else
@@ -836,6 +854,42 @@ auto_test_traefik() {
   # Clean up test VM (container and instance dir)
   docker rm -f "blobevm_${name}" >/dev/null 2>&1 || true
   rm -rf "/opt/blobe-vm/instances/${name}" >/dev/null 2>&1 || true
+}
+
+# Wait for Let's Encrypt issuance for the given hostnames or until timeout
+wait_for_issuance() {
+  local hosts=("$@")
+  local max_attempts=30 sleep_sec=10
+  local attempt=0 success=0
+  mkdir -p /opt/blobe-vm/logs || true
+  ACME_LOG="/opt/blobe-vm/logs/acme.log"
+  traefik_log_append "[issuance-wait] Waiting up to $((max_attempts*sleep_sec))s for cert issuance for: ${hosts[*]}"
+  while (( attempt < max_attempts )); do
+    for h in "${hosts[@]}"; do
+      # Check acme.json for hostname presence (best-effort)
+      if [[ -f /opt/blobe-vm/traefik/letsencrypt/acme.json && $(grep -F "${h}" /opt/blobe-vm/traefik/letsencrypt/acme.json || true) ]]; then
+        traefik_log_append "[issuance-wait] Found '${h}' referenced in acme.json (may indicate certificate issuance)."
+        success=1; break 2
+      fi
+      # Probe HTTPS directly (allow insecure to detect cert presence via HTTP status)
+      local code
+      code=$(curl -sS -o /dev/null -m 8 -L -k -w '%{http_code}' "https://${h}/" 2>/dev/null || echo 000)
+      if [[ "$code" =~ ^[23]..$ ]]; then
+        traefik_log_append "[issuance-wait] HTTPS probe for ${h} returned ${code} (likely issued)."
+        success=1; break 2
+      fi
+    done
+    attempt=$((attempt+1))
+    traefik_log_append "[issuance-wait] Attempt ${attempt}/${max_attempts}: not yet issued. Sleeping ${sleep_sec}s..."
+    sleep "$sleep_sec"
+  done
+  if [[ "$success" -eq 1 ]]; then
+    traefik_log_append "[issuance-wait] Certificate issuance detected for: ${hosts[*]}"
+    return 0
+  else
+    traefik_log_append "[issuance-wait] Timed out waiting for certificate issuance for: ${hosts[*]}"
+    return 1
+  fi
 }
 
 # --- Diagnostics: print container labels, network status, Traefik routers/services/logs ---
@@ -1034,6 +1088,36 @@ setup_traefik() {
 
   mkdir -p /opt/blobe-vm/traefik/letsencrypt
   chmod 700 /opt/blobe-vm/traefik/letsencrypt
+  # If an ACME email was provided and we're in proxy mode, attempt to enable TLS automatically
+  if [[ -n "${BLOBEVM_EMAIL:-}" && "${TLS_ENABLED:-0}" -ne 1 ]]; then
+    echo "ACME email provided; attempting to enable HTTPS automatically..."
+    # Try to free port 80 (required for HTTP-01 challenge). If we can, enable TLS and prefer 80/443.
+    if ensure_port_free 80; then
+      HTTP_PORT=80
+      # Try to free 443 as well (best-effort)
+      if ensure_port_free 443; then
+        HTTPS_PORT=443
+      fi
+      TLS_ENABLED=1
+      echo "Enabled TLS: HTTP ${HTTP_PORT}, HTTPS ${HTTPS_PORT:-<auto>}"
+    else
+      echo "Could not free port 80 automatically; TLS will remain disabled. You can enable it later after freeing port 80."
+    fi
+  fi
+
+  # Ensure ACME storage exists with safe permissions so Traefik can write certs
+  touch /opt/blobe-vm/traefik/letsencrypt/acme.json || true
+  chmod 600 /opt/blobe-vm/traefik/letsencrypt/acme.json || true
+  chown root:root /opt/blobe-vm/traefik/letsencrypt/acme.json || true
+
+  # Prepare logging for ACME/Traefik issuance & repairs
+  mkdir -p /opt/blobe-vm/logs
+  ACME_LOG="/opt/blobe-vm/logs/acme.log"
+  traefik_log_append() {
+    local msg="$1"; local ts
+    ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    echo "[$ts] $msg" | tee -a "$ACME_LOG" >/dev/null
+  }
 
   # Ensure network exists
   if ! docker network inspect "$net_name" >/dev/null 2>&1; then
@@ -1102,6 +1186,17 @@ EOF
       - traefik.http.middlewares.traefik-redirectregex.redirectregex.replacement=/traefik/dashboard/
       - traefik.http.middlewares.traefik-redirectregex.redirectregex.permanent=true
 EOF
+    # If a domain is configured and TLS is enabled, add a host-based secure router for traefik.<domain>
+    if [[ -n "${BLOBEVM_DOMAIN:-}" && "${TLS_ENABLED:-0}" -eq 1 ]]; then
+      cat >> "$compose_file" <<EOF
+      # Host-based router to obtain Let's Encrypt cert for the Traefik dashboard
+      - traefik.http.routers.traefik-host.rule=Host(\`traefik.${BLOBEVM_DOMAIN}\`)
+      - traefik.http.routers.traefik-host.entrypoints=websecure
+      - traefik.http.routers.traefik-host.tls=true
+      - traefik.http.routers.traefik-host.tls.certresolver=myresolver
+      - traefik.http.routers.traefik-host.service=api@internal
+EOF
+    fi
   else
     cat > "$compose_file" <<EOF
 services:
@@ -1155,6 +1250,41 @@ EOF
 
   # Attempt automatic self-heal if Traefik isn't exposing its API due to a common misquote
   traefik_self_heal || true
+
+  # If TLS is enabled and we have a domain, wait briefly for Let's Encrypt to issue certs
+  if [[ "${TLS_ENABLED:-0}" -eq 1 && -n "${BLOBEVM_DOMAIN:-}" ]]; then
+    traefik_log_append "Traefik started; waiting for Let's Encrypt issuance for traefik.${BLOBEVM_DOMAIN} and a sample VM host..."
+    wait_for_issuance "traefik.${BLOBEVM_DOMAIN}" "${BLOBEVM_DOMAIN}"
+  fi
+}
+
+# Attempt to repair common ACME/Let's Encrypt issues: bad acme.json permissions or corrupt file
+traefik_fix_acme() {
+  local dir="/opt/blobe-vm/traefik/letsencrypt"
+  local file="$dir/acme.json"
+  [[ -d "$dir" ]] || return 0
+  # Ensure log dir
+  mkdir -p /opt/blobe-vm/logs || true
+  # Ensure file exists
+  if [[ ! -f "$file" ]]; then
+    traefik_log_append "[traefik-acme-fix] Creating missing acme.json"
+    touch "$file" || true
+  fi
+  # If file is empty or not JSON-looking, replace with empty JSON object to avoid parse errors
+  if [[ ! -s "$file" || $(head -c 1 "$file" 2>/dev/null || echo "") != '{' ]]; then
+    traefik_log_append "[traefik-acme-fix] acme.json appears empty or invalid. Replacing with {}"
+    printf '{}' > "$file" || true
+  fi
+  # Fix permissions so Traefik can read/write it
+  chmod 600 "$file" || true
+  chown root:root "$file" || true
+  traefik_log_append "[traefik-acme-fix] Fixed acme.json permissions and contents"
+  # Restart Traefik stack to pick up fixed storage
+  if [[ -f /opt/blobe-vm/traefik/docker-compose.yml ]]; then
+    traefik_log_append "[traefik-acme-fix] Restarting Traefik stack to apply ACME fixes"
+    (cd /opt/blobe-vm/traefik && docker compose up -d) || true
+    sleep 2
+  fi
 }
 
 # -- Traefik self-heal: fix common misconfigurations automatically --
@@ -1184,6 +1314,12 @@ traefik_self_heal() {
     sed -i 's#traefik.http.routers.traefik.rule=PathPrefix()#traefik.http.routers.traefik.rule=PathPrefix(`/traefik`)#g' "$file"
     (cd "$dir" && docker compose up -d)
     sleep 1
+  fi
+
+  # Detect ACME/Let's Encrypt related errors and attempt to repair acme.json/permissions
+  if docker logs "$container" --since 60s 2>/dev/null | grep -Ei "acme:|unable to obtain certificate|failed to obtain certificate|challenge failed|no solution provided" >/dev/null 2>&1; then
+    traefik_log_append "[traefik-self-heal] Detected ACME/Let's Encrypt errors. Running acme repair..."
+    traefik_fix_acme || true
   fi
 
   # Quick health probe of the local API through the proxy

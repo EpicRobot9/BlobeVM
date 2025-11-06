@@ -216,7 +216,6 @@ common_labels() {
   local labels=()
   labels+=("--label=traefik.docker.network=${TRAEFIK_NETWORK:-proxy}")
   labels+=("--label=traefik.enable=true")
-  labels+=("--label=com.blobevm.managed=1")
 
   if [[ -n "$host_override" ]]; then
     # Host override + dual path router
@@ -235,11 +234,9 @@ common_labels() {
       "--label=traefik.http.routers.${name}.rule=Host(\`$host_override\`)"
       "--label=traefik.http.routers.${name}.entrypoints=web"
       "--label=traefik.http.services.${name}.loadbalancer.server.port=3000"
-      "--label=traefik.http.routers.${name}.service=${name}"
       "--label=traefik.http.routers.${name}-path.rule=PathPrefix(\`$prefix_path\`)"
       "--label=traefik.http.routers.${name}-path.entrypoints=web"
       "--label=traefik.http.services.${name}-path.loadbalancer.server.port=3000"
-      "--label=traefik.http.routers.${name}-path.service=${name}-path"
     )
     if [[ "${ENABLE_TLS:-0}" -eq 1 ]]; then
       # Add HTTPS routers; include certresolver only when TLS is enabled
@@ -248,12 +245,10 @@ common_labels() {
         "--label=traefik.http.routers.${name}-secure.entrypoints=websecure"
         "--label=traefik.http.routers.${name}-secure.tls=true"
         "--label=traefik.http.services.${name}.loadbalancer.server.port=3000"
-        "--label=traefik.http.routers.${name}-secure.service=${name}"
         "--label=traefik.http.routers.${name}-path-secure.rule=PathPrefix(\`$prefix_path\`)"
         "--label=traefik.http.routers.${name}-path-secure.entrypoints=websecure"
         "--label=traefik.http.routers.${name}-path-secure.tls=true"
         "--label=traefik.http.services.${name}-path-secure.loadbalancer.server.port=3000"
-        "--label=traefik.http.routers.${name}-path-secure.service=${name}-path"
       )
       labels+=(
         "--label=traefik.http.routers.${name}-secure.tls.certresolver=myresolver"
@@ -269,14 +264,9 @@ common_labels() {
       "--label=traefik.http.routers.${name}.rule=Host(\`$host\`)"
       "--label=traefik.http.routers.${name}.entrypoints=web"
       "--label=traefik.http.services.${name}.loadbalancer.server.port=3000"
-      "--label=traefik.http.routers.${name}.service=${name}"
       "--label=traefik.http.routers.${name}-path.rule=PathPrefix(\`$prefix_path\`)"
       "--label=traefik.http.routers.${name}-path.entrypoints=web"
       "--label=traefik.http.services.${name}-path.loadbalancer.server.port=3000"
-      "--label=traefik.http.routers.${name}-path.service=${name}-path"
-      # Strip the prefix for path router in domain mode since containers serve at '/'
-      "--label=traefik.http.middlewares.${name}-path-stripprefix.stripprefix.prefixes=${prefix_path}"
-      "--label=traefik.http.routers.${name}-path.middlewares=${name}-path-stripprefix"
     )
     if [[ "${ENABLE_TLS:-0}" -eq 1 ]]; then
       labels+=(
@@ -284,13 +274,10 @@ common_labels() {
         "--label=traefik.http.routers.${name}-secure.entrypoints=websecure"
         "--label=traefik.http.routers.${name}-secure.tls=true"
         "--label=traefik.http.services.${name}.loadbalancer.server.port=3000"
-        "--label=traefik.http.routers.${name}-secure.service=${name}"
         "--label=traefik.http.routers.${name}-path-secure.rule=PathPrefix(\`$prefix_path\`)"
         "--label=traefik.http.routers.${name}-path-secure.entrypoints=websecure"
         "--label=traefik.http.routers.${name}-path-secure.tls=true"
         "--label=traefik.http.services.${name}-path-secure.loadbalancer.server.port=3000"
-        "--label=traefik.http.routers.${name}-path-secure.service=${name}-path"
-        "--label=traefik.http.routers.${name}-path-secure.middlewares=${name}-path-stripprefix"
       )
       labels+=(
         "--label=traefik.http.routers.${name}-secure.tls.certresolver=myresolver"
@@ -312,7 +299,6 @@ common_labels() {
       "--label=traefik.http.routers.${name}.rule=PathPrefix(\`$prefix\`)"
       "--label=traefik.http.routers.${name}.entrypoints=web"
       "--label=traefik.http.services.${name}.loadbalancer.server.port=3000"
-      "--label=traefik.http.routers.${name}.service=${name}"
     )
     if [[ "${ENABLE_TLS:-0}" -eq 1 ]]; then
       labels+=(
@@ -320,7 +306,6 @@ common_labels() {
         "--label=traefik.http.routers.${name}-secure.entrypoints=websecure"
         "--label=traefik.http.routers.${name}-secure.tls=true"
         "--label=traefik.http.services.${name}-secure.loadbalancer.server.port=3000"
-        "--label=traefik.http.routers.${name}-secure.service=${name}-secure"
       )
       labels+=("--label=traefik.http.routers.${name}-secure.tls.certresolver=myresolver")
     fi
@@ -1044,18 +1029,27 @@ cmd_set_base_path() {
 
 # --- URL helpers ---
 dashboard_url() {
-  # Always report the direct-mode dashboard URL (IP:port), regardless of Traefik mode
-  local ip port
+  local ip http_port https_port https_suffix http_suffix
   ip="$(hostname -I | awk '{print $1}')"
-  port="${DASHBOARD_PORT:-}"
-  if [[ -z "$port" ]]; then
-    # Try to discover from running container mapping
-    port=$(docker ps --format '{{.Names}} {{.Ports}}' 2>/dev/null | awk '$1=="blobedash"{print $2}' | sed -n 's/.*:\([0-9]\+\)->5000.*/\1/p' | head -n1 || true)
+  http_port="${HTTP_PORT:-80}"; https_port="${HTTPS_PORT:-443}"
+  http_suffix=""; https_suffix=""
+  [[ "$http_port" != "80" ]] && http_suffix=":"$http_port
+  [[ "$https_port" != "443" ]] && https_suffix=":"$https_port
+  if [[ "${NO_TRAEFIK}" -eq 1 ]]; then
+    if [[ -n "${DASHBOARD_PORT:-}" ]]; then
+      echo "http://${ip}:${DASHBOARD_PORT}/dashboard"; return
+    fi
+    echo "(dashboard disabled or unknown port)"; return
   fi
-  if [[ -n "$port" ]]; then
-    echo "http://${ip}:${port}/dashboard"; return
+  if [[ -n "${BLOBEVM_DOMAIN:-}" ]]; then
+    if [[ "${ENABLE_TLS:-0}" -eq 1 ]]; then
+      echo "https://dashboard.${BLOBEVM_DOMAIN}${https_suffix}/"; return
+    else
+      echo "http://dashboard.${BLOBEVM_DOMAIN}${http_suffix}/"; return
+    fi
+  else
+    echo "http://${ip}${http_suffix}/dashboard"; return
   fi
-  echo "(dashboard disabled or unknown port)"
 }
 
 open_browser() {
