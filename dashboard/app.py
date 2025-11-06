@@ -43,6 +43,18 @@ TEMPLATE = r"""
     <button onclick="setCustomDomain()">Set domain</button>
     <span id=domainip style="margin-left:1.5rem"></span>
 </div>
+<div style="margin:1.5rem 0 .5rem 0">
+        <span class=badge>Cloudflare Tunnel</span>
+        <div style="margin:.5rem 0">
+            <input id=cf_domain placeholder="CF hostname (e.g. dash.example.com)" style="width:260px" />
+            <input id=cf_token placeholder="Tunnel token" style="width:340px; margin-left:.5rem" />
+        </div>
+        <div style="margin:.25rem 0">
+            <button onclick="setCFTunnel()">Enable Cloudflare Tunnel</button>
+            <button class="btn-gray" onclick="stopCFTunnel()">Disable Tunnel</button>
+            <span id=cfstatus class=muted style="margin-left:1rem"></span>
+        </div>
+</div>
 <script>
 // Debug helpers: enable extra logs with ?debug=1
 const DEBUG = new URLSearchParams(window.location.search).has('debug');
@@ -88,6 +100,14 @@ async function load(){
         dashIp = info.ip||'';
         document.getElementById('customdomain').value = customDomain;
         document.getElementById('domainip').textContent = `Point domain to: ${dashIp}`;
+            // Cloudflare Tunnel info
+            try {
+                const cf = info.cf_tunnel || {};
+                document.getElementById('cf_domain').value = cf.domain || '';
+                document.getElementById('cfstatus').textContent = cf.running ? 'Tunnel running' : (cf.enabled ? 'Configured (stopped)' : 'Not configured');
+            } catch (e) {
+                console.error('cf_tunnel parse error', e);
+            }
     vms = data.instances || [];
     const tb=document.getElementById('tbody');
         tb.innerHTML='';
@@ -345,6 +365,31 @@ function statusDot(st){
     else if(s.includes('up')) cls='green';
     else if(s.includes('exited')||s.includes('stopped')||s.includes('dead')) cls='red';
     return `<span class="dot ${cls}"></span>`;
+}
+async function setCFTunnel(){
+    const dom = document.getElementById('cf_domain').value.trim();
+    const token = document.getElementById('cf_token').value.trim();
+    if(!dom || !token) return alert('Enter Cloudflare hostname and tunnel token.');
+    try{
+        const r = await fetch('/dashboard/api/set-cftunnel',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:`domain=${encodeURIComponent(dom)}&token=${encodeURIComponent(token)}`});
+        const j = await r.json().catch(()=>({}));
+        if(j && j.ok){
+            alert('Cloudflare Tunnel requested. It may take a few seconds to start.');
+        }else{
+            alert('Failed to enable tunnel: ' + (j && (j.error||j.message) || 'unknown'));
+        }
+    }catch(e){alert('Error: '+e)}
+    setTimeout(load, 2000);
+}
+
+async function stopCFTunnel(){
+    if(!confirm('Stop Cloudflare Tunnel?')) return;
+    try{
+        const r = await fetch('/dashboard/api/stop-cftunnel',{method:'POST'});
+        const j = await r.json().catch(()=>({}));
+        if(j && j.ok) alert('Tunnel stop requested.'); else alert('Failed to stop tunnel.');
+    }catch(e){alert('Error: '+e)}
+    setTimeout(load, 1000);
 }
 async function act(cmd,name){await fetch(`/dashboard/api/${cmd}/${name}`,{method:'post'});load();}
 async function delvm(name){if(!confirm('Delete '+name+'?'))return;await fetch(`/dashboard/api/delete/${name}`,{method:'post'});load();}
@@ -692,7 +737,18 @@ def api_modeinfo():
     dash_port = env.get('DASHBOARD_PORT', '')
     # Show the host the user used to reach the dashboard
     ip = _request_host() or ''
-    return jsonify({'merged': merged, 'basePath': base_path, 'domain': domain, 'dashPort': dash_port, 'ip': ip})
+    # Cloudflare Tunnel info
+    cf_enabled = env.get('CF_TUNNEL_ENABLED', '0') == '1'
+    cf_domain = env.get('CF_TUNNEL_DOMAIN', '')
+    cf_running = False
+    try:
+        r = _docker('ps', '--filter', 'name=cloudflared', '--format', '{{.Names}}')
+        if r.returncode == 0 and 'cloudflared' in r.stdout.splitlines():
+            cf_running = True
+    except Exception:
+        cf_running = False
+    return jsonify({'merged': merged, 'basePath': base_path, 'domain': domain, 'dashPort': dash_port, 'ip': ip,
+                    'cf_tunnel': {'enabled': cf_enabled, 'domain': cf_domain, 'running': cf_running}})
 
 @app.post('/dashboard/api/set-domain')
 @auth_required
@@ -709,6 +765,53 @@ def api_set_domain():
         except Exception:
             ip = ''
     return jsonify({'ok': True, 'domain': dom, 'ip': ip})
+
+
+@app.post('/dashboard/api/set-cftunnel')
+@auth_required
+def api_set_cftunnel():
+    """Enable/configure Cloudflare Tunnel. Expects form values 'domain' and 'token'.
+    This will persist CF_TUNNEL_* vars to the env and start a 'cloudflared' container in host network.
+    """
+    dom = request.values.get('domain','').strip()
+    token = request.values.get('token','').strip()
+    if not dom or not token:
+        return jsonify({'ok': False, 'error': 'domain and token required'}), 400
+    # Persist values
+    ok = _write_env_kv({'CF_TUNNEL_ENABLED': '1', 'CF_TUNNEL_DOMAIN': dom, 'CF_TUNNEL_TOKEN': token})
+    # Ensure directory for cloudflared if needed
+    try:
+        os.makedirs(os.path.join(_state_dir(), '.cloudflared'), exist_ok=True)
+    except Exception:
+        pass
+
+    # Start cloudflared in background thread to avoid blocking
+    def worker(d, t):
+        try:
+            # Remove existing container if present
+            _docker('rm', '-f', 'cloudflared')
+        except Exception:
+            pass
+        try:
+            # Run cloudflared using host network and point to local HTTP (Traefik)
+            _docker('run', '-d', '--name', 'cloudflared', '--net', 'host', '--restart', 'unless-stopped',
+                    'cloudflare/cloudflared:latest', 'tunnel', '--no-autoupdate', 'run', '--token', t, '--url', 'http://127.0.0.1:80')
+        except Exception:
+            pass
+
+    threading.Thread(target=worker, args=(dom, token), daemon=True).start()
+    return jsonify({'ok': True, 'domain': dom})
+
+
+@app.post('/dashboard/api/stop-cftunnel')
+@auth_required
+def api_stop_cftunnel():
+    try:
+        _docker('rm', '-f', 'cloudflared')
+    except Exception:
+        pass
+    _write_env_kv({'CF_TUNNEL_ENABLED': '0'})
+    return jsonify({'ok': True})
 
 def _enable_single_port(port: int):
     """Enable single-port mode by launching a tiny Traefik and reattaching services.
