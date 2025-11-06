@@ -1521,6 +1521,20 @@ install_manager() {
     echo "DIRECT_PORT_START=$(sh_q "${BLOBEVM_DIRECT_PORT_START:-20000}")";
     echo "HOST_DOCKER_BIN=$(sh_q "${HOST_DOCKER_BIN}")";
   } > /opt/blobe-vm/.env
+
+  # Ensure the installed dashboard is updated and restarted so changes in the repo take effect.
+  # If systemd unit exists, reload and restart it; otherwise remove any running dashboard containers and recreate.
+  if [[ -f /etc/systemd/system/blobedash.service ]]; then
+    echo "Reloading and restarting blobedash.service to pick up dashboard updates..."
+    systemctl daemon-reload || true
+    systemctl enable blobedash.service || true
+    systemctl restart blobedash.service || systemctl start blobedash.service || true
+  else
+    echo "Restarting dashboard containers to pick up updated files..."
+    docker rm -f blobedash blobedash-proxy >/dev/null 2>&1 || true
+    # Use existing helper to deploy direct/dashboard as appropriate
+    deploy_dashboard_direct || true
+  fi
 }
 
 # Verify that the dashboard will be able to show VM status by ensuring
