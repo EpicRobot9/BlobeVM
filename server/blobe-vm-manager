@@ -39,6 +39,34 @@ STATE_DIR=/opt/blobe-vm
 INST_DIR="$STATE_DIR/instances"
 ENV_FILE="$STATE_DIR/.env"
 
+# Directory for cloudflared configs when running containerized fallback
+CF_STATE_DIR="$STATE_DIR/.cloudflared"
+
+ensure_cloudflared_state_dir() {
+  mkdir -p "$CF_STATE_DIR"
+}
+
+# Run cloudflared as a docker container (fallback when systemd not available)
+run_cloudflared_container() {
+  # args: container-name image-args...
+  local cname="$1"; shift
+  # Remove existing container
+  docker rm -f "$cname" >/dev/null 2>&1 || true
+  # Run with host networking so local backends (127.0.0.1:port) are reachable
+  docker run -d --name "$cname" --net host --restart unless-stopped \
+    -v "$CF_STATE_DIR":/etc/cloudflared:rw \
+    cloudflare/cloudflared:latest "$@" >/dev/null 2>&1 || return 1
+  return 0
+}
+
+use_systemd() {
+  # Return 0 if systemctl is present and appears usable
+  if command -v systemctl >/dev/null 2>&1 && [[ $EUID -eq 0 ]]; then
+    return 0
+  fi
+  return 1
+}
+
 if [[ -f "$ENV_FILE" ]]; then
   # shellcheck disable=SC1090,SC2155
   while IFS='=' read -r k v; do
@@ -1010,6 +1038,354 @@ cmd_set_host_interactive() {
   echo "NOTE: Ensure DNS A record resolves to this server and port 80 is reachable for HTTPS issuance if enabled."
 }
 
+cmd_cf_expose() {
+  # Expose a single VM through a Cloudflare tunnel using an ephemeral token.
+  # Usage: blobe-vm-manager cf-expose <name> <public-hostname> <token>
+  local name="$1" host="$2" token="$3"
+  [[ -z "$name" || -z "$host" || -z "$token" ]] && { echo "Usage: blobe-vm-manager cf-expose <name> <public-hostname> <token>" >&2; exit 1; }
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+
+  # Resolve the local URL to forward
+  local target
+  target="$(vm_url "$name")"
+  if [[ -z "$target" ]]; then
+    echo "Unable to determine target URL for '$name'" >&2; exit 1
+  fi
+
+  # Prefer systemd-managed service when available
+  if use_systemd; then
+    # Ensure cloudflared binary exists
+    if ! command -v cloudflared >/dev/null 2>&1; then
+      echo "cloudflared not found — please install cloudflared binary (or run cf-setup in dashboard to use container mode)." >&2
+      exit 1
+    fi
+    local svc_name="cloudflared-blobevm-${name}.service"
+    local svc_path="/etc/systemd/system/${svc_name}"
+    local exec_cmd
+    exec_cmd="/usr/local/bin/cloudflared tunnel --no-autoupdate run --token '${token}' --url '${target}' --hostname '${host}'"
+    cat > "$svc_path" <<EOF
+[Unit]
+Description=Cloudflared tunnel for BlobeVM instance ${name}
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=${exec_cmd}
+Restart=on-failure
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload || true
+    systemctl enable --now "$svc_name" || { echo "Failed to enable/start $svc_name" >&2; exit 1; }
+    sleep 1
+    if systemctl is-active --quiet "$svc_name"; then
+      echo "Cloudflared tunnel started for '$name' and should be available at: https://${host}/"
+      return 0
+    else
+      echo "Service ${svc_name} failed to start. Check 'journalctl -u ${svc_name} -n 200' for details." >&2
+      exit 1
+    fi
+  fi
+
+  # Fallback: run cloudflared in a docker container (host network)
+  ensure_cloudflared_state_dir
+  local cname="cloudflared-blobevm-${name}"
+  docker rm -f "$cname" >/dev/null 2>&1 || true
+  echo "Starting cloudflared in docker container '$cname' (host networking)..."
+  docker run -d --name "$cname" --net host --restart unless-stopped \
+    cloudflare/cloudflared:latest tunnel --no-autoupdate run --token "$token" --url "$target" --hostname "$host" >/dev/null 2>&1 || {
+    echo "Failed to start cloudflared container for '$name'" >&2; exit 1; }
+  echo "Cloudflared container started for '$name' and should be available at: https://${host}/"
+}
+
+cmd_cf_setup() {
+  # Interactive helper that walks through exposing a VM via Cloudflare tunnel.
+  # Usage: blobe-vm-manager cf-setup [<name> <public-hostname> <token>]
+  local name="${1:-}" host="${2:-}" token="${3:-}"
+  if [[ -z "$name" ]]; then
+    read -rp "Instance name to expose: " name || true
+  fi
+  if [[ -z "$host" ]]; then
+    read -rp "Public hostname to assign (e.g. myvm.example.com): " host || true
+  fi
+  if [[ -z "$token" ]]; then
+    read -rp "Cloudflare Tunnel token (ephemeral token): " token || true
+  fi
+  [[ -z "$name" || -z "$host" || -z "$token" ]] && { echo "Missing values; aborting." >&2; exit 1; }
+
+  echo "Setting up Cloudflare tunnel for instance '$name' -> $host"
+  cmd_cf_expose "$name" "$host" "$token"
+}
+
+cmd_cf_create_tunnel() {
+  # Create a named tunnel and store credentials under CF_STATE_DIR
+  # Usage: blobe-vm-manager cf-create-tunnel <tunnel-name>
+  local tname="$1"
+  [[ -z "$tname" ]] && { echo "Usage: blobe-vm-manager cf-create-tunnel <tunnel-name>" >&2; exit 1; }
+  ensure_cloudflared_state_dir
+  if command -v cloudflared >/dev/null 2>&1; then
+    (cd "$CF_STATE_DIR" && cloudflared tunnel create "$tname") || { echo "Failed to create tunnel with cloudflared binary." >&2; exit 1; }
+    echo "Created tunnel '$tname' and wrote credentials to $CF_STATE_DIR"; return 0
+  fi
+  # Fallback: try docker run to create tunnel (requires docker and cloudflared image)
+  if command -v docker >/dev/null 2>&1; then
+    docker run --rm -v "$CF_STATE_DIR":/etc/cloudflared -w /etc/cloudflared cloudflare/cloudflared:latest tunnel create "$tname" || { echo "Failed to create tunnel in docker container." >&2; exit 1; }
+    echo "Created tunnel '$tname' (docker) and wrote credentials to $CF_STATE_DIR"; return 0
+  fi
+  echo "cloudflared binary or docker required to create named tunnel." >&2; exit 1
+}
+
+cmd_cf_remove() {
+  # Remove a single-instance cloudflared service/container
+  # Usage: blobe-vm-manager cf-remove <name>
+  local name="$1"; [[ -z "$name" ]] && { echo "Usage: blobe-vm-manager cf-remove <name>" >&2; exit 1; }
+  local svc_name="cloudflared-blobevm-${name}"
+  if use_systemd; then
+    systemctl stop "${svc_name}.service" >/dev/null 2>&1 || true
+    systemctl disable "${svc_name}.service" >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/${svc_name}.service >/dev/null 2>&1 || true
+    systemctl daemon-reload || true
+    echo "Stopped and removed systemd service ${svc_name}.service"
+  else
+    docker rm -f "$svc_name" >/dev/null 2>&1 || true
+    echo "Removed docker container $svc_name"
+  fi
+  # Clear metadata
+  del_meta "$name" cf_exposed || true
+  del_meta "$name" cf_path || true
+  del_meta "$name" cf_tunnel_host || true
+  del_meta "$name" cf_tunnel_name || true
+}
+
+# --- Merged-tunnel helpers (single Cloudflared tunnel, multiple ingress rules) ---
+regenerate_cf_merged_config() {
+  # Build /etc/cloudflared/blobevm.yml from instances marked with cf_exposed=merged
+  local cfg_dir="/etc/cloudflared"
+  local cfg_file="$cfg_dir/blobevm.yml"
+  mkdir -p "$cfg_dir"
+  # Determine tunnel host: prefer metadata on any merged instance, else BLOBEVM_DOMAIN
+  local merge_host="${BLOBEVM_DOMAIN:-}"
+  shopt -s nullglob
+  for d in "$INST_DIR"/*; do
+    [[ -d "$d" ]] || continue
+    local n; n="$(basename "$d")"
+    local ex; ex="$(get_meta "$n" cf_exposed || true)"
+    if [[ "$ex" == "merged" ]]; then
+      local h; h="$(get_meta "$n" cf_tunnel_host || true)"
+      if [[ -n "$h" ]]; then merge_host="$h"; break; fi
+    fi
+  done
+  if [[ -z "$merge_host" ]]; then
+    echo "No merged tunnel host configured (BLOBEVM_DOMAIN or cf_tunnel_host required)." >&2
+    return 1
+  fi
+  # Start YAML
+  cat > "$cfg_file" <<YAML
+proxy_address: 127.0.0.1
+ingress:
+YAML
+  # Append ingress entries
+  for d in "$INST_DIR"/*; do
+    [[ -d "$d" ]] || continue
+    local n; n="$(basename "$d")"
+    local ex; ex="$(get_meta "$n" cf_exposed || true)"
+    if [[ "$ex" == "merged" ]]; then
+      local pfx; pfx="$(get_meta "$n" cf_path || true)"
+      [[ -z "$pfx" ]] && pfx="/vm/${n}"
+      [[ "$pfx" != /* ]] && pfx="/$pfx"
+      # Determine an explicit loopback backend for reliability.
+      # - Direct (NO_TRAEFIK=1): use per-instance host_port metadata (assign if missing)
+      # - Traefik mode: forward to Traefik HTTP port on localhost (HTTP_PORT, default 80)
+      local target_port=""
+      if [[ "${NO_TRAEFIK:-0}" -eq 1 ]]; then
+        target_port="$(get_meta "$n" host_port || true)"
+        if [[ -z "$target_port" ]]; then
+          # Try to assign a port if one isn't persisted yet
+          target_port="$(find_free_port "${DIRECT_PORT_START}" 1000 || true)"
+          [[ -n "$target_port" ]] && set_meta "$n" host_port "$target_port"
+        fi
+      else
+        target_port="${HTTP_PORT:-80}"
+      fi
+      if [[ -z "$target_port" ]]; then
+        # fallback to 3000 (container internal) if no port could be determined
+        target_port=3000
+      fi
+      local target="http://127.0.0.1:${target_port}"
+      # cloudflared will route requests for hostname+path to this backend; path is preserved by ingress
+      cat >> "$cfg_file" <<YAML
+  - hostname: ${merge_host}
+    path: ${pfx}
+    service: "${target}"
+YAML
+    fi
+  done
+  # fallback
+  cat >> "$cfg_file" <<'YAML'
+  - service: http_status:404
+YAML
+  echo "Wrote merged cloudflared config: $cfg_file"
+}
+
+cmd_cf_merge_add() {
+  # Add an ingress mapping for a VM to the central merged tunnel config
+  # Usage: blobe-vm-manager cf-merge-add <name> <path-prefix> <tunnel-host> [tunnel-name]
+  local name="$1" path_prefix="$2" tunnel_host="$3" tunnel_name="${4:-blobevm}"
+  [[ -z "$name" || -z "$path_prefix" || -z "$tunnel_host" ]] && { echo "Usage: blobe-vm-manager cf-merge-add <name> <path-prefix> <tunnel-host> [tunnel-name]" >&2; exit 1; }
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  # Validate backend is reachable before adding merged rule
+  local pfx="$path_prefix"
+  [[ "$pfx" != /* ]] && pfx="/$pfx"
+  # Determine backend port similarly to regenerate_cf_merged_config
+  local target_port=""
+  if [[ "${NO_TRAEFIK:-0}" -eq 1 ]]; then
+    # Try persisted host_port first
+    target_port="$(get_meta "$name" host_port || true)"
+    if [[ -z "$target_port" ]]; then
+      # If container exists, try docker port mapping
+      local cname
+      cname="$(container_name "$name")"
+      if docker ps -a --format '{{.Names}}' | grep -qx "$cname"; then
+        target_port="$(docker port "$cname" 3000 2>/dev/null | sed -n 's/.*:\([0-9]\+\)$/\1/p' || true)"
+        if [[ -n "$target_port" ]]; then set_meta "$name" host_port "$target_port"; fi
+      fi
+    fi
+  else
+    target_port="${HTTP_PORT:-80}"
+  fi
+  if [[ -z "$target_port" ]]; then
+    echo "Unable to determine backend port for '$name'. Start the VM or ensure a port is assigned before adding merged mapping." >&2
+    exit 1
+  fi
+  # Test backend
+  local test_url
+  # Ensure trailing slash on path
+  [[ "$pfx" != */ ]] && pfx="$pfx/"
+  test_url="http://127.0.0.1:${target_port}${pfx}"
+  echo "Checking backend at ${test_url} ..."
+  if command -v curl >/dev/null 2>&1; then
+    code=$(curl -sS -m 5 -L -o /dev/null -w '%{http_code}' "$test_url" || echo "000")
+  else
+    # Use python one-liner as fallback
+    code=$(python3 - <<PY - "$test_url"
+import sys, urllib.request
+url=sys.argv[1]
+try:
+    r=urllib.request.urlopen(url, timeout=5)
+    print(r.getcode())
+except Exception:
+    print('000')
+PY
+)
+  fi
+  if [[ ! "$code" =~ ^[23][0-9][0-9]$ ]]; then
+    echo "Backend check failed (HTTP ${code}) for ${test_url}. Not adding merged mapping." >&2
+    exit 1
+  fi
+
+  set_meta "$name" cf_exposed "merged"
+  set_meta "$name" cf_path "$path_prefix"
+  set_meta "$name" cf_tunnel_host "$tunnel_host"
+  set_meta "$name" cf_tunnel_name "$tunnel_name"
+  regenerate_cf_merged_config || { echo "Failed to write merged config." >&2; exit 1; }
+  # Ensure central service: prefer systemd, otherwise run docker container reading config from $CF_STATE_DIR
+  local cfg_file="/etc/cloudflared/blobevm.yml"
+  if use_systemd; then
+    local svc_name="cloudflared-blobevm-merged.service"
+    local svc_path="/etc/systemd/system/${svc_name}"
+    local exec_cmd="/usr/local/bin/cloudflared tunnel --config '${cfg_file}' run '${tunnel_name}'"
+    cat > "$svc_path" <<EOF
+[Unit]
+Description=Cloudflared merged tunnel for BlobeVM
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=${exec_cmd}
+Restart=on-failure
+User=root
+WorkingDirectory=/etc/cloudflared
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload || true
+    systemctl enable --now "$svc_name" || { echo "Failed to enable/start $svc_name" >&2; exit 1; }
+    echo "Added merged ingress for '$name' -> ${tunnel_host}${path_prefix} and started merged tunnel service."
+  else
+    ensure_cloudflared_state_dir
+    # write merged config into CF_STATE_DIR so container can mount it
+    mkdir -p "$CF_STATE_DIR" || true
+    cp -f /etc/cloudflared/blobevm.yml "$CF_STATE_DIR/blobevm.yml" 2>/dev/null || cp -f "$CFG_FILE" "$CF_STATE_DIR/blobevm.yml" 2>/dev/null || true
+    local cname="cloudflared-blobevm-merged"
+    docker rm -f "$cname" >/dev/null 2>&1 || true
+    echo "Starting cloudflared merged tunnel in docker container '$cname' (host networking)..."
+    docker run -d --name "$cname" --net host --restart unless-stopped -v "$CF_STATE_DIR":/etc/cloudflared:ro \
+      cloudflare/cloudflared:latest tunnel --config /etc/cloudflared/blobevm.yml run "$tunnel_name" >/dev/null 2>&1 || { echo "Failed to start merged cloudflared container" >&2; exit 1; }
+    echo "Merged cloudflared container started for host ${tunnel_host}. Paths registered for instance '$name'."
+  fi
+}
+
+cmd_cf_merge_remove() {
+  # Remove merged ingress for a VM
+  # Usage: blobe-vm-manager cf-merge-remove <name>
+  local name="$1"
+  [[ -z "$name" ]] && { echo "Usage: blobe-vm-manager cf-merge-remove <name>" >&2; exit 1; }
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  del_meta "$name" cf_exposed || true
+  del_meta "$name" cf_path || true
+  del_meta "$name" cf_tunnel_host || true
+  del_meta "$name" cf_tunnel_name || true
+  # Rebuild config
+  if ! regenerate_cf_merged_config; then
+    # If no merged entries remain, disable service and remove config
+    local svc_name="cloudflared-blobevm-merged"
+    if use_systemd; then
+      systemctl stop "${svc_name}.service" >/dev/null 2>&1 || true
+      systemctl disable "${svc_name}.service" >/dev/null 2>&1 || true
+      rm -f /etc/cloudflared/blobevm.yml >/dev/null 2>&1 || true
+    else
+      docker rm -f "$svc_name" >/dev/null 2>&1 || true
+      rm -f "$CF_STATE_DIR/blobevm.yml" >/dev/null 2>&1 || true
+    fi
+    echo "Removed merged ingress for '$name' and stopped merged tunnel (no merged entries remain)."
+    return 0
+  fi
+  # Otherwise reload/restart the merged service
+  if use_systemd; then
+    systemctl restart cloudflared-blobevm-merged.service || true
+  else
+    docker rm -f cloudflared-blobevm-merged >/dev/null 2>&1 || true
+    # restart container with updated config
+    docker run -d --name cloudflared-blobevm-merged --net host --restart unless-stopped -v "$CF_STATE_DIR":/etc/cloudflared:ro \
+      cloudflare/cloudflared:latest tunnel --config /etc/cloudflared/blobevm.yml run "${tunnel_name:-blobevm}" >/dev/null 2>&1 || true
+  fi
+  echo "Removed merged ingress for '$name' and reloaded merged tunnel service."
+}
+
+cmd_cf_merge_list() {
+  echo "Merged Cloudflare ingress mappings:"
+  shopt -s nullglob
+  local found=0
+  for d in "$INST_DIR"/*; do
+    [[ -d "$d" ]] || continue
+    local n; n="$(basename "$d")"
+    local ex; ex="$(get_meta "$n" cf_exposed || true)"
+    if [[ "$ex" == "merged" ]]; then
+      local pfx; pfx="$(get_meta "$n" cf_path || true)"
+      local host; host="$(get_meta "$n" cf_tunnel_host || true)"
+      local tn; tn="$(get_meta "$n" cf_tunnel_name || true)"
+      echo "- $n -> ${host}${pfx} (tunnel: ${tn:-blobevm})"
+      found=1
+    fi
+  done
+  [[ "$found" -eq 0 ]] && echo "  <none>"
+}
+
 cmd_set_base_path() {
   local base="${1:-}"; [[ -z "$base" ]] && usage
   [[ "$base" != /* ]] && base="/$base"
@@ -1124,6 +1500,11 @@ main() {
     open)   cmd_open "$@" ;;
     dashboard-url) cmd_dashboard_url "$@" ;;
     open-dashboard) cmd_open_dashboard "$@" ;;
+    cf-expose) cmd_cf_expose "$@" ;;
+    cf-setup) cmd_cf_setup "$@" ;;
+    cf-merge-add) cmd_cf_merge_add "$@" ;;
+    cf-merge-remove) cmd_cf_merge_remove "$@" ;;
+    cf-merge-list) cmd_cf_merge_list "$@" ;;
   rebuild-image) cmd_rebuild_image "$@" ;;
   recreate-all) cmd_recreate_all "$@" ;;
   recreate) cmd_recreate_targets "$@" ;;

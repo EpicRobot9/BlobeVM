@@ -28,7 +28,7 @@ TEMPLATE = r"""
 <input id=dashport placeholder="direct dash port (optional)" style="width:260px" />
 <button class="btn-gray" onclick="disableSinglePort()">Disable single-port (direct mode)</button>
 </div>
-<table><thead><tr><th>Name</th><th>Status</th><th>Port/Path</th><th>URL</th><th>Actions</th></tr></thead><tbody id=tbody></tbody></table>
+<table><thead><tr><th>Name</th><th>Status</th><th>Port/Path</th><th>Backend</th><th>URL</th><th>Actions</th></tr></thead><tbody id=tbody></tbody></table>
 <div style="margin:1rem 0 2rem 0">
         <button onclick="bulkRecreate()">Recreate ALL VMs</button>
         <button onclick="bulkRebuildAll()">Rebuild ALL VMs</button>
@@ -53,6 +53,19 @@ TEMPLATE = r"""
             <button onclick="setCFTunnel()">Enable Cloudflare Tunnel</button>
             <button class="btn-gray" onclick="stopCFTunnel()">Disable Tunnel</button>
             <span id=cfstatus class=muted style="margin-left:1rem"></span>
+        </div>
+        <div style="margin:.5rem 0">
+            <div style="margin:.25rem 0">
+                <input id=cf_vm placeholder="VM name (e.g. epic)" style="width:140px" />
+                <input id=cf_path placeholder="Path (e.g. /vm/epic)" style="width:160px; margin-left:.5rem" />
+                <input id=cf_tunnel_name placeholder="Tunnel name (optional)" style="width:160px; margin-left:.5rem" />
+            </div>
+            <div style="margin:.25rem 0">
+                <button onclick="cfMergeAdd()">Add merged mapping</button>
+                <button class="btn-gray" onclick="cfMergeRemove()">Remove mapping</button>
+                <button class="btn-gray" onclick="cfMergeList()">List mappings</button>
+                <div id=cf_mappings style="margin-top:.5rem;color:#ddd"></div>
+            </div>
         </div>
 </div>
 <script>
@@ -116,10 +129,12 @@ async function load(){
             const tr=document.createElement('tr');
             const dot = statusDot(i.status);
             let portOrPath = '';
+            let backendPort = '';
             let openUrl = i.url;
             if(mergedMode){
                 // merged: show /vm/<name> or domain
                 portOrPath = `${basePath}/${i.name}`;
+                backendPort = info.httpPort || '80';
                 if(customDomain){
                     openUrl = `http://${customDomain}${basePath}/${i.name}/`;
                 }
@@ -140,12 +155,16 @@ async function load(){
                     const proto = window.location.protocol;
                     const host = window.location.hostname;
                     openUrl = `${proto}//${host}:${portOrPath}/`;
+                    backendPort = portOrPath;
                 } else {
                     openUrl = '';
                 }
             }
             dbg('row', { name: i.name, status: i.status, rawUrl: i.url, mergedMode, portOrPath, openUrl });
-             tr.innerHTML=`<td>${i.name}</td><td>${dot}<span class=muted>${i.status||''}</span></td><td>${portOrPath}</td><td><a href="${openUrl}" target="_blank" rel="noopener noreferrer">${openUrl}</a></td>`+
+             tr.innerHTML=`<td>${i.name}</td><td>${dot}<span class=muted>${i.status||''}</span></td><td>${portOrPath}</td><td>${backendPort ? backendPort : ''}</td><td><a href="${openUrl}" target="_blank" rel="noopener noreferrer">${openUrl}</a></td>`+
+                `<td><button onclick="testBackend('${i.name}')">Test backend</button>`+
+                 `<span id="test-${i.name}" style="margin-left:.5rem;color:#ddd"></span>`+
+                 `</td>`+
                  `<td>`+
                  `<button onclick="openLink('${openUrl}')">Open</button>`+
                  `<button onclick="act('start','${i.name}')">Start</button>`+
@@ -383,6 +402,68 @@ async function setCFTunnel(){
 }
 
 async function stopCFTunnel(){
+    if(!confirm('Stop Cloudflare Tunnel?')) return;
+    try{
+        const r = await fetch('/dashboard/api/stop-cftunnel',{method:'POST'});
+        const j = await r.json().catch(()=>({}));
+        if(j && j.ok) alert('Tunnel stop requested.'); else alert('Failed to stop tunnel.');
+    }catch(e){alert('Error: '+e)}
+    setTimeout(load, 1000);
+}
+
+async function cfMergeAdd(){
+    const name = document.getElementById('cf_vm').value.trim();
+    const path = document.getElementById('cf_path').value.trim();
+    const tunnel = document.getElementById('cf_tunnel_name').value.trim() || 'blobevm';
+    const host = document.getElementById('cf_domain').value.trim();
+    if(!name || !path || !host) return alert('Enter VM name, path, and CF hostname.');
+    try{
+        const r = await fetch('/dashboard/api/cf-merge-add',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:`name=${encodeURIComponent(name)}&path=${encodeURIComponent(path)}&host=${encodeURIComponent(host)}&tunnel=${encodeURIComponent(tunnel)}`});
+        const j = await r.json().catch(()=>({}));
+        if(j && j.ok){ alert('Merged mapping added.'); } else { alert('Failed: ' + (j && (j.error||j.output) || 'unknown')); }
+    }catch(e){ alert('Error: '+e); }
+    setTimeout(load,1000);
+}
+
+async function cfMergeRemove(){
+    const name = document.getElementById('cf_vm').value.trim();
+    if(!name) return alert('Enter VM name to remove mapping for');
+    if(!confirm('Remove merged mapping for '+name+'?')) return;
+    try{
+        const r = await fetch('/dashboard/api/cf-merge-remove',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:`name=${encodeURIComponent(name)}`});
+        const j = await r.json().catch(()=>({}));
+        if(j && j.ok) alert('Removed mapping.'); else alert('Failed: ' + (j && (j.error||j.output) || 'unknown'));
+    }catch(e){ alert('Error: '+e); }
+    setTimeout(load,1000);
+}
+
+async function cfMergeList(){
+    try{
+        const r = await fetch('/dashboard/api/cf-merge-list');
+        const j = await r.json().catch(()=>({}));
+        const el = document.getElementById('cf_mappings');
+        if(!j || !j.ok){ el.textContent = 'Unable to fetch mappings'; return; }
+        if(!j.mappings || j.mappings.length===0){ el.textContent = '<none>'; return; }
+        el.innerHTML = j.mappings.map(m=>`<div>${m.name} -> ${m.hostpath} (tunnel: ${m.tunnel||'blobevm'})</div>`).join('');
+    }catch(e){ alert('Error: '+e); }
+}
+async function testBackend(name){
+    const el = document.getElementById(`test-${name}`);
+    if(el) el.textContent = 'Checking...';
+    try{
+        const r = await fetch(`/dashboard/api/test-backend/${encodeURIComponent(name)}`,{method:'POST'});
+        const j = await r.json().catch(()=>({}));
+        if(!j || !j.ok){
+            if(el) el.textContent = `Failed: ${j && (j.error||'no response')}`;
+            else alert('Failed: ' + (j && (j.error||'no response')));
+            return;
+        }
+        const status = j.code || 'N/A';
+        const url = j.url || '';
+        if(el) el.textContent = `${status} — ${url}`;
+        else alert(`Backend test: ${status} — ${url}`);
+    }catch(e){ if(el) el.textContent = 'Error'; else alert('Error: '+e); }
+}
     if(!confirm('Stop Cloudflare Tunnel?')) return;
     try{
         const r = await fetch('/dashboard/api/stop-cftunnel',{method:'POST'});
@@ -735,6 +816,7 @@ def api_modeinfo():
     base_path = env.get('BASE_PATH', '/vm')
     domain = env.get('BLOBEVM_DOMAIN', '')
     dash_port = env.get('DASHBOARD_PORT', '')
+    http_port = env.get('HTTP_PORT', '80')
     # Show the host the user used to reach the dashboard
     ip = _request_host() or ''
     # Cloudflare Tunnel info
@@ -747,7 +829,7 @@ def api_modeinfo():
             cf_running = True
     except Exception:
         cf_running = False
-    return jsonify({'merged': merged, 'basePath': base_path, 'domain': domain, 'dashPort': dash_port, 'ip': ip,
+    return jsonify({'merged': merged, 'basePath': base_path, 'domain': domain, 'dashPort': dash_port, 'ip': ip, 'httpPort': http_port,
                     'cf_tunnel': {'enabled': cf_enabled, 'domain': cf_domain, 'running': cf_running}})
 
 @app.post('/dashboard/api/set-domain')
@@ -801,6 +883,168 @@ def api_set_cftunnel():
 
     threading.Thread(target=worker, args=(dom, token), daemon=True).start()
     return jsonify({'ok': True, 'domain': dom})
+
+
+@app.post('/dashboard/api/cf-expose')
+@auth_required
+def api_cf_expose():
+    name = request.values.get('name','').strip()
+    host = request.values.get('host','').strip()
+    token = request.values.get('token','').strip()
+    if not name or not host or not token:
+        return jsonify({'ok': False, 'error': 'name, host and token required'}), 400
+    try:
+        r = subprocess.run([MANAGER, 'cf-expose', name, host, token], capture_output=True, text=True)
+        if r.returncode != 0:
+            return jsonify({'ok': False, 'error': r.stderr.strip() or r.stdout.strip()}), 500
+        return jsonify({'ok': True, 'output': r.stdout.strip()})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.post('/dashboard/api/cf-create-tunnel')
+@auth_required
+def api_cf_create_tunnel():
+    tname = request.values.get('name','').strip()
+    if not tname:
+        return jsonify({'ok': False, 'error': 'name required'}), 400
+    try:
+        r = subprocess.run([MANAGER, 'cf-create-tunnel', tname], capture_output=True, text=True)
+        if r.returncode != 0:
+            return jsonify({'ok': False, 'error': r.stderr.strip() or r.stdout.strip()}), 500
+        return jsonify({'ok': True, 'output': r.stdout.strip()})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.post('/dashboard/api/cf-remove')
+@auth_required
+def api_cf_remove():
+    name = request.values.get('name','').strip()
+    if not name:
+        return jsonify({'ok': False, 'error': 'name required'}), 400
+    try:
+        r = subprocess.run([MANAGER, 'cf-remove', name], capture_output=True, text=True)
+        if r.returncode != 0:
+            return jsonify({'ok': False, 'error': r.stderr.strip() or r.stdout.strip()}), 500
+        return jsonify({'ok': True, 'output': r.stdout.strip()})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.post('/dashboard/api/cf-merge-add')
+@auth_required
+def api_cf_merge_add():
+    name = request.values.get('name','').strip()
+    path = request.values.get('path','').strip()
+    host = request.values.get('host','').strip()
+    tname = request.values.get('tunnel','').strip() or 'blobevm'
+    if not name or not path or not host:
+        return jsonify({'ok': False, 'error': 'name, path and host required'}), 400
+    try:
+        r = subprocess.run([MANAGER, 'cf-merge-add', name, path, host, tname], capture_output=True, text=True)
+        if r.returncode != 0:
+            return jsonify({'ok': False, 'error': r.stderr.strip() or r.stdout.strip()}), 500
+        return jsonify({'ok': True, 'output': r.stdout.strip()})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.post('/dashboard/api/cf-merge-remove')
+@auth_required
+def api_cf_merge_remove():
+    name = request.values.get('name','').strip()
+    if not name:
+        return jsonify({'ok': False, 'error': 'name required'}), 400
+    try:
+        r = subprocess.run([MANAGER, 'cf-merge-remove', name], capture_output=True, text=True)
+        if r.returncode != 0:
+            return jsonify({'ok': False, 'error': r.stderr.strip() or r.stdout.strip()}), 500
+        return jsonify({'ok': True, 'output': r.stdout.strip()})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.post('/dashboard/api/test-backend/<name>')
+@auth_required
+def api_test_backend(name):
+    """Test the local backend for a VM by requesting the loopback URL used by merged config.
+    Returns JSON with {ok, code, url}.
+    """
+    name = name.strip()
+    if not name:
+        return jsonify({'ok': False, 'error': 'name required'}), 400
+    # Determine if direct mode
+    env = _read_env()
+    direct = env.get('NO_TRAEFIK','0') == '1'
+    base_path = env.get('BASE_PATH','/vm')
+    if not base_path.startswith('/'):
+        base_path = '/' + base_path
+    base_path = base_path.rstrip('/')
+    # find port
+    port = None
+    if direct:
+        # try manager 'port' command
+        try:
+            out = subprocess.check_output([MANAGER, 'port', name], text=True).strip()
+            if out and out.isdigit():
+                port = out
+        except Exception:
+            port = None
+        # try instance metadata (fallback)
+        if not port:
+            try:
+                # try to read from instance.json
+                inst = os.path.join(_state_dir(), 'instances', name, 'instance.json')
+                if os.path.isfile(inst):
+                    jd = json.load(open(inst))
+                    port = jd.get('host_port') or jd.get('host_port') or None
+            except Exception:
+                port = None
+    else:
+        port = env.get('HTTP_PORT','80')
+    if not port:
+        return jsonify({'ok': False, 'error': 'backend port not found or VM not started'}), 400
+    # compute path
+    path = f"{base_path}/{name}/"
+    url = f"http://127.0.0.1:{port}{path}"
+    # perform request
+    try:
+        req = urlrequest.Request(url, headers={'User-Agent': 'BlobeVM-Dashboard/1.0'})
+        with urlrequest.urlopen(req, timeout=5) as resp:
+            code = resp.getcode()
+            # read small snippet
+            snippet = resp.read(512).decode('utf-8', errors='replace')
+        return jsonify({'ok': True, 'code': code, 'url': url, 'snippet': snippet})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e), 'url': url}), 500
+
+
+@app.get('/dashboard/api/cf-merge-list')
+@auth_required
+def api_cf_merge_list():
+    try:
+        r = subprocess.run([MANAGER, 'cf-merge-list'], capture_output=True, text=True)
+        out = r.stdout.strip()
+        items = []
+        for line in out.splitlines():
+            line = line.strip()
+            if not line or line.startswith('<'):
+                continue
+            if line.startswith('- '):
+                # parse "- name -> host/path (tunnel: name)"
+                parts = line[2:].split('->')
+                if len(parts) >= 2:
+                    nm = parts[0].strip()
+                    rest = parts[1].strip()
+                    hostpath = rest.split('(')[0].strip()
+                    tunnel = ''
+                    if '(' in rest and 'tunnel:' in rest:
+                        tunnel = rest.split('tunnel:')[-1].strip(' )')
+                    items.append({'name': nm, 'hostpath': hostpath, 'tunnel': tunnel})
+        return jsonify({'ok': True, 'mappings': items})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
 
 
 @app.post('/dashboard/api/stop-cftunnel')
