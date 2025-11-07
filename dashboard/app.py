@@ -464,14 +464,7 @@ async function testBackend(name){
         else alert(`Backend test: ${status} — ${url}`);
     }catch(e){ if(el) el.textContent = 'Error'; else alert('Error: '+e); }
 }
-    if(!confirm('Stop Cloudflare Tunnel?')) return;
-    try{
-        const r = await fetch('/dashboard/api/stop-cftunnel',{method:'POST'});
-        const j = await r.json().catch(()=>({}));
-        if(j && j.ok) alert('Tunnel stop requested.'); else alert('Failed to stop tunnel.');
-    }catch(e){alert('Error: '+e)}
-    setTimeout(load, 1000);
-}
+
 async function act(cmd,name){await fetch(`/dashboard/api/${cmd}/${name}`,{method:'post'});load();}
 async function delvm(name){if(!confirm('Delete '+name+'?'))return;await fetch(`/dashboard/api/delete/${name}`,{method:'post'});load();}
 async function createVM(e){
