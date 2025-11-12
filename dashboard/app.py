@@ -57,13 +57,9 @@ TEMPLATE = r"""
         <div style="margin:.5rem 0">
             <div style="margin:.25rem 0">
                 <input id=cf_api_token placeholder="Cloudflare API Token (for DNS)" style="width:420px" />
-                <input id=cf_zone placeholder="Zone name (example.com) or Zone ID (optional)" style="width:340px; margin-left:.5rem" />
+                <button onclick="setCFApiToken()" class="btn-gray">Save API token</button>
             </div>
-            <div style="margin:.25rem 0">
-                <label style="font-size:.9rem"><input type=checkbox id=cf_dns_toggle style="vertical-align:middle;margin-right:.4rem" /> Enable API DNS creation</label>
-                <button onclick="setCFApiToken()" class="btn-gray" style="margin-left:.75rem">Save token & settings</button>
-            </div>
-            <div class=muted style="font-size:.85rem;margin-top:.25rem">Provide a Cloudflare API Token with permissions to read zones and edit DNS. Optionally supply a Zone name (e.g. example.com) or a Zone ID to avoid ambiguous zone detection (required for multi-label TLDs like co.uk). When "Enable API DNS creation" is checked, the dashboard will attempt to create the CNAME for a tunnel automatically.</div>
+            <div class=muted style="font-size:.85rem;margin-top:.25rem">Provide a Cloudflare API Token with permissions to read zones and edit DNS. This allows the dashboard to automatically create the required CNAME when a tunnel is created. The token is stored in the dashboard environment (.env).</div>
         </div>
         <div style="margin:.5rem 0">
             <div style="margin:.25rem 0">
