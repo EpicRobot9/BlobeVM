@@ -56,6 +56,17 @@ TEMPLATE = r"""
         </div>
         <div style="margin:.5rem 0">
             <div style="margin:.25rem 0">
+                <input id=cf_api_token placeholder="Cloudflare API Token (for DNS)" style="width:420px" />
+                <input id=cf_zone placeholder="Zone name (example.com) or Zone ID (optional)" style="width:340px; margin-left:.5rem" />
+            </div>
+            <div style="margin:.25rem 0">
+                <label style="font-size:.9rem"><input type=checkbox id=cf_dns_toggle style="vertical-align:middle;margin-right:.4rem" /> Enable API DNS creation</label>
+                <button onclick="setCFApiToken()" class="btn-gray" style="margin-left:.75rem">Save token & settings</button>
+            </div>
+            <div class=muted style="font-size:.85rem;margin-top:.25rem">Provide a Cloudflare API Token with permissions to read zones and edit DNS. Optionally supply a Zone name (e.g. example.com) or a Zone ID to avoid ambiguous zone detection (required for multi-label TLDs like co.uk). When "Enable API DNS creation" is checked, the dashboard will attempt to create the CNAME for a tunnel automatically.</div>
+        </div>
+        <div style="margin:.5rem 0">
+            <div style="margin:.25rem 0">
                 <input id=cf_vm placeholder="VM name (e.g. epic)" style="width:140px" />
                 <input id=cf_path placeholder="Path (e.g. /vm/epic)" style="width:160px; margin-left:.5rem" />
                 <input id=cf_tunnel_name placeholder="Tunnel name (optional)" style="width:160px; margin-left:.5rem" />
@@ -457,6 +468,16 @@ async function cfMergeList(){
         if(!j || !j.ok){ el.textContent = 'Unable to fetch mappings'; return; }
         if(!j.mappings || j.mappings.length===0){ el.textContent = '<none>'; return; }
         el.innerHTML = j.mappings.map(m=>`<div>${m.name} -> ${m.hostpath} (tunnel: ${m.tunnel||'blobevm'})</div>`).join('');
+    }catch(e){ alert('Error: '+e); }
+}
+async function setCFApiToken(){
+    const token = document.getElementById('cf_api_token').value.trim();
+    if(!token) return alert('Enter an API token.');
+    try{
+        const r = await fetch('/dashboard/api/set-cf-api-token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:`token=${encodeURIComponent(token)}`});
+        const j = await r.json().catch(()=>({}));
+        if(j && j.ok){ alert('API token saved and verified.'); }
+        else { alert('Failed to save token: '+(j && (j.error||j.message)||'unknown') + '\n\nSuggested fix: create a token with Zone:Read and Zone:DNS:Edit permissions, or provide account-level token.'); }
     }catch(e){ alert('Error: '+e); }
 }
 async function tunnelCreate(name){
@@ -1074,6 +1095,40 @@ def api_tunnel_status(name):
             return jsonify({'ok': True, 'output': txt})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.post('/dashboard/api/set-cf-api-token')
+@auth_required
+def api_set_cf_api_token():
+    """Store and validate a Cloudflare API token. Returns helpful error messages if token invalid or lacks permissions."""
+    token = request.values.get('token','').strip()
+    if not token:
+        return jsonify({'ok': False, 'error': 'token required'}), 400
+    # Persist token to .env
+    ok = _write_env_kv({'CF_API_TOKEN': token})
+    if not ok:
+        return jsonify({'ok': False, 'error': 'Failed to persist token to .env (permission error?)'}), 500
+    # Try to verify token via Cloudflare API (user tokens verify endpoint)
+    verify_url = 'https://api.cloudflare.com/client/v4/user/tokens/verify'
+    try:
+        req = urlrequest.Request(verify_url, headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'})
+        with urlrequest.urlopen(req, timeout=8) as resp:
+            body = resp.read().decode('utf-8')
+            j = json.loads(body)
+            if j.get('success'):
+                return jsonify({'ok': True, 'message': 'Token verified'})
+            else:
+                return jsonify({'ok': False, 'error': 'Token verify failed', 'details': j}), 400
+    except urlerror.HTTPError as e:
+        try:
+            txt = e.read().decode('utf-8')
+        except Exception:
+            txt = str(e)
+        # Provide suggestions
+        msg = 'Cloudflare API returned error while verifying token. Ensure the token is valid and has Zone:Read and Zone:DNS:Edit permissions.'
+        return jsonify({'ok': False, 'error': msg, 'details': txt}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': f'Error verifying token: {e}'}), 500
 
 
 @app.post('/dashboard/api/cf-merge-add')

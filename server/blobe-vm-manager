@@ -1473,6 +1473,74 @@ cmd_tunnel_create() {
       set_meta "$name" tunnel_route_error ""
     fi
   fi
+  # If user provided CF_API_TOKEN, attempt to create DNS record via Cloudflare API
+  if [[ -n "${CF_API_TOKEN:-}" && -n "$host" ]]; then
+    # Try to obtain the tunnel's CF DNS cname from cloudflared list
+    local list_json=""
+    if command -v cloudflared >/dev/null 2>&1; then
+      list_json=$(cd "$CF_STATE_DIR" && cloudflared tunnel list --output json 2>/dev/null || true)
+    elif command -v docker >/dev/null 2>&1; then
+      list_json=$(docker run --rm -v "$CF_STATE_DIR":/etc/cloudflared -w /etc/cloudflared cloudflare/cloudflared:latest tunnel list --output json 2>/dev/null || true)
+    fi
+    local tunnel_cname=""
+    if [[ -n "$list_json" ]]; then
+      tunnel_cname=$(printf "%s" "$list_json" | python3 - <<PY 2>/dev/null
+import sys, json
+try:
+    data=json.load(sys.stdin)
+    for x in data:
+        if x.get('name') == '${tname}':
+            cfdns = x.get('cfdns') or {}
+            if isinstance(cfdns, dict):
+                print(cfdns.get('cname') or '')
+            elif isinstance(cfdns, list) and len(cfdns) > 0:
+                print(cfdns[0].get('cname',''))
+            else:
+                print('')
+            break
+except Exception:
+    pass
+PY
+)
+    fi
+    if [[ -n "$tunnel_cname" ]]; then
+      # Determine zone to use for DNS record
+      local zone_name="${BLOBEVM_DOMAIN:-}"
+      if [[ -z "$zone_name" ]]; then
+        # Fallback: derive zone by stripping first label
+        zone_name=$(echo "$host" | awk -F. '{print $(NF-1)"."$NF}')
+      fi
+      if [[ -n "$zone_name" ]]; then
+        # Find zone id via Cloudflare API
+        local zone_api_out
+        zone_api_out=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=${zone_name}&status=active" -H "Authorization: Bearer ${CF_API_TOKEN}" -H "Content-Type: application/json") || true
+        local zone_id
+        zone_id=$(printf "%s" "$zone_api_out" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('result',[{}])[0].get('id',''))" 2>/dev/null || true)
+        if [[ -n "$zone_id" ]]; then
+          # Create DNS CNAME record pointing host -> tunnel_cname
+          local create_out
+          create_out=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${zone_id}/dns_records" -H "Authorization: Bearer ${CF_API_TOKEN}" -H "Content-Type: application/json" --data '{"type":"CNAME","name":"'"$host"'","content":"'"$tunnel_cname"'","ttl":120,"proxied":true}') || true
+          local create_ok
+          create_ok=$(printf "%s" "$create_out" | python3 -c "import sys,json; d=json.load(sys.stdin); print('1' if d.get('success') else '0')" 2>/dev/null || true)
+          if [[ "$create_ok" == "1" ]]; then
+            set_meta "$name" tunnel_dns_ok "1"
+            set_meta "$name" tunnel_dns_error ""
+          else
+            set_meta "$name" tunnel_dns_ok "0"
+            # store a short snippet of create_out
+            local ctxt
+            ctxt=$(printf "%s" "$create_out" | sed -n '1,200p')
+            set_meta "$name" tunnel_dns_error "$ctxt"
+            echo "Warning: DNS API create returned error for ${name}: ${ctxt}" >&2
+          fi
+        else
+          set_meta "$name" tunnel_dns_ok "0"
+          set_meta "$name" tunnel_dns_error "Unable to find zone id for ${zone_name}"
+          echo "Warning: Unable to find zone id for ${zone_name}" >&2
+        fi
+      fi
+    fi
+  fi
   # Start a runtime cloudflared service/container for this tunnel (host network) so it proxies to local backend
   local svc_name="cloudflared-blobevm-${name}"
   if use_systemd; then
