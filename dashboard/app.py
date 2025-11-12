@@ -861,6 +861,30 @@ def manager_json_list():
         pass
     return instances
 
+def _resolve_public_host():
+    """Resolve public host for backend URLs: prefer PUBLIC_HOST env, then request host, 
+    then hostname resolution (skip Docker bridge IPs 172.17-31.x or 10.x.x)."""
+    env = _read_env()
+    if env.get('PUBLIC_HOST'):
+        return env['PUBLIC_HOST']
+    # Try request host
+    req_host = _request_host()
+    if req_host and not (req_host.startswith('172.') or req_host.startswith('10.')):
+        return req_host
+    # Try hostname resolution (skip Docker IPs)
+    try:
+        import socket
+        ips = socket.gethostbyname_ex(socket.gethostname())[2]
+        for ip in ips:
+            if not (ip.startswith('172.') or ip.startswith('10.')):
+                return ip
+        # If all are Docker-ish, return first one anyway
+        if ips:
+            return ips[0]
+    except Exception:
+        pass
+    return '127.0.0.1'
+
 def _read_env():
     env_path = os.path.join(_state_dir(), '.env')
     data = {}
@@ -967,18 +991,11 @@ def api_set_cftunnel():
         except Exception:
             pass
         try:
-            # Run cloudflared using host network and point to local HTTP (Traefik).
-            # Use configured HTTP_PORT if present (set when enabling single-port mode),
-            # otherwise fall back to 80. This prevents cloudflared from pointing to
-            # the wrong port when traefik/dashboard run on a non-80 host port.
+            # Run cloudflared using host network and point to public backend.
+            # Use configured HTTP_PORT if present, otherwise fall back to 80.
             http_port = _read_env().get('HTTP_PORT', '80') or '80'
-            # Prefer an explicit PUBLIC_HOST env if set, otherwise use the host the browser used to reach the dashboard
-            host = _read_env().get('PUBLIC_HOST') or _request_host() or ''
-            if not host:
-                try:
-                    host = socket.gethostbyname(socket.gethostname())
-                except Exception:
-                    host = '127.0.0.1'
+            # Resolve public host (skip Docker IPs)
+            host = _resolve_public_host()
             target_url = f'http://{host}:{http_port}'
             _docker('run', '-d', '--name', 'cloudflared', '--net', 'host', '--restart', 'unless-stopped',
                     'cloudflare/cloudflared:latest', 'tunnel', '--no-autoupdate', 'run', '--token', t, '--url', target_url)

@@ -59,6 +59,34 @@ run_cloudflared_container() {
   return 0
 }
 
+resolve_public_host() {
+  # Resolve the public/external host for backend URLs.
+  # Priority: PUBLIC_HOST env > first non-Docker IP from hostname -I > localhost
+  # Avoid Docker bridge IPs (172.x.x.x, 10.x.x.x unless it's the primary one)
+  if [[ -n "${PUBLIC_HOST:-}" ]]; then
+    echo "$PUBLIC_HOST"
+    return 0
+  fi
+  # Try to get first non-Docker IP
+  if command -v hostname >/dev/null 2>&1; then
+    local ips
+    ips=$(hostname -I 2>/dev/null || true)
+    for ip in $ips; do
+      # Skip Docker bridge IPs (typically 172.17-31.x.x or 10.x.x.x)
+      if [[ ! "$ip" =~ ^172\.(1[7-9]|2[0-9]|3[0-1])\. ]] && [[ ! "$ip" =~ ^10\. ]]; then
+        echo "$ip"
+        return 0
+      fi
+    done
+    # If all IPs are Docker-ish, return the first one anyway (better than nothing)
+    if [[ -n "$ips" ]]; then
+      echo $ips | awk '{print $1}'
+      return 0
+    fi
+  fi
+  echo "127.0.0.1"
+}
+
 use_systemd() {
   # Return 0 if systemctl is present and appears usable
   if command -v systemctl >/dev/null 2>&1 && [[ $EUID -eq 0 ]]; then
@@ -1182,12 +1210,9 @@ regenerate_cf_merged_config() {
     echo "No merged tunnel host configured (BLOBEVM_DOMAIN or cf_tunnel_host required)." >&2
     return 1
   fi
-  # Determine server/public host to use for backend targets. Prefer explicit PUBLIC_HOST env,
-  # otherwise fallback to the primary IP address from hostname -I.
+  # Determine server/public host to use for backend targets (skip Docker IPs)
   local server_host
-  server_host="${PUBLIC_HOST:-$(hostname -I | awk '{print $1}' 2>/dev/null)}"
-  # If server_host empty, fall back to localhost as last resort
-  [[ -z "$server_host" ]] && server_host="127.0.0.1"
+  server_host="$(resolve_public_host)"
   # Start YAML
   cat > "$cfg_file" <<YAML
 proxy_address: ${server_host}
@@ -1267,13 +1292,12 @@ cmd_cf_merge_add() {
     echo "Unable to determine backend port for '$name'. Start the VM or ensure a port is assigned before adding merged mapping." >&2
     exit 1
   fi
-  # Test backend using server/public host (not loopback)
+  # Test backend using server/public host (not loopback or Docker IP)
   local test_url
   # Ensure trailing slash on path
   [[ "$pfx" != */ ]] && pfx="$pfx/"
   local server_host
-  server_host="${PUBLIC_HOST:-$(hostname -I | awk '{print $1}' 2>/dev/null)}"
-  [[ -z "$server_host" ]] && server_host="127.0.0.1"
+  server_host="$(resolve_public_host)"
   test_url="http://${server_host}:${target_port}${pfx}"
   echo "Checking backend at ${test_url} ..."
   if command -v curl >/dev/null 2>&1; then
@@ -1457,10 +1481,9 @@ cmd_tunnel_create() {
   if [[ -z "$backend_port" ]]; then
     backend_port="${HTTP_PORT:-80}"
   fi
-  # Determine server/public host to use for runtime --url targets
+  # Determine server/public host to use for runtime --url targets (skip Docker IPs)
   local server_host
-  server_host="${PUBLIC_HOST:-$(hostname -I | awk '{print $1}' 2>/dev/null)}"
-  [[ -z "$server_host" ]] && server_host="127.0.0.1"
+  server_host="$(resolve_public_host)"
   # Persist public-facing service URL so the dashboard can show it
   set_meta "$name" cf_service_url "http://${server_host}:${backend_port}/"
   # Register DNS route (requires cloudflared binary or docker)
