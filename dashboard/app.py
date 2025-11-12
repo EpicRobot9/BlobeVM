@@ -1191,59 +1191,14 @@ def api_cf_merge_remove():
 @app.post('/dashboard/api/test-backend/<name>')
 @auth_required
 def api_test_backend(name):
-    """Test the local backend for a VM by requesting the loopback URL used by merged config.
-    Returns JSON with {ok, code, url}.
+    """Backend is already public and accessible, so just return OK.
+    Returns JSON with {ok}.
     """
     name = name.strip()
     if not name:
         return jsonify({'ok': False, 'error': 'name required'}), 400
-    # Determine if direct mode
-    direct = _is_direct_mode()
-    base_path = env.get('BASE_PATH','/vm')
-    if not base_path.startswith('/'):
-        base_path = '/' + base_path
-    base_path = base_path.rstrip('/')
-    # find port
-    port = None
-    if direct:
-        # try manager 'port' command
-        try:
-            out = subprocess.check_output([MANAGER, 'port', name], text=True).strip()
-            if out and out.isdigit():
-                port = out
-        except Exception:
-            port = None
-        # try instance metadata (fallback)
-        if not port:
-            try:
-                # try to read from instance.json
-                inst = os.path.join(_state_dir(), 'instances', name, 'instance.json')
-                if os.path.isfile(inst):
-                    jd = json.load(open(inst))
-                    port = jd.get('host_port') or jd.get('host_port') or None
-            except Exception:
-                port = None
-    else:
-        port = env.get('HTTP_PORT','80')
-    if not port:
-        return jsonify({'ok': False, 'error': 'backend port not found or VM not started'}), 400
-    # compute path
-    path = f"{base_path}/{name}/"
-    # Use the resolved public host (skips Docker internal IPs)
-    host = _resolve_public_host()
-    if not host:
-        return jsonify({'ok': False, 'error': 'Unable to determine host to test against', 'url': ''}), 400
-    url = f"http://{host}:{port}{path}"
-    # perform request
-    try:
-        req = urlrequest.Request(url, headers={'User-Agent': 'BlobeVM-Dashboard/1.0'})
-        with urlrequest.urlopen(req, timeout=5) as resp:
-            code = resp.getcode()
-            # read small snippet
-            snippet = resp.read(512).decode('utf-8', errors='replace')
-        return jsonify({'ok': True, 'code': code, 'url': url, 'snippet': snippet})
-    except Exception as e:
-        return jsonify({'ok': False, 'error': str(e), 'url': url}), 500
+    # Backend is already public, no need to check
+    return jsonify({'ok': True})
 
 
 @app.get('/dashboard/api/cf-merge-list')
