@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, json, subprocess, shlex, base64, socket, threading, time
+import os, json, subprocess, shlex, base64, socket, threading, time, re
 from urllib import request as urlrequest, error as urlerror
 from functools import wraps
 from flask import Flask, jsonify, request, abort, send_from_directory, render_template_string, Response
@@ -28,7 +28,7 @@ TEMPLATE = r"""
 <input id=dashport placeholder="direct dash port (optional)" style="width:260px" />
 <button class="btn-gray" onclick="disableSinglePort()">Disable single-port (direct mode)</button>
 </div>
-<table><thead><tr><th>Name</th><th>Status</th><th>Port/Path</th><th>Backend</th><th>URL</th><th>Actions</th></tr></thead><tbody id=tbody></tbody></table>
+<table><thead><tr><th>Name</th><th>Status</th><th>Port/Path</th><th>Backend</th><th>URL</th><th>Tunnel</th><th>Actions</th></tr></thead><tbody id=tbody></tbody></table>
 <div style="margin:1rem 0 2rem 0">
         <button onclick="bulkRecreate()">Recreate ALL VMs</button>
         <button onclick="bulkRebuildAll()">Rebuild ALL VMs</button>
@@ -161,28 +161,40 @@ async function load(){
                 }
             }
             dbg('row', { name: i.name, status: i.status, rawUrl: i.url, mergedMode, portOrPath, openUrl });
-             tr.innerHTML=`<td>${i.name}</td><td>${dot}<span class=muted>${i.status||''}</span></td><td>${portOrPath}</td><td>${backendPort ? backendPort : ''}</td><td><a href="${openUrl}" target="_blank" rel="noopener noreferrer">${openUrl}</a></td>`+
-                `<td><button onclick="testBackend('${i.name}')">Test backend</button>`+
-                 `<span id="test-${i.name}" style="margin-left:.5rem;color:#ddd"></span>`+
-                 `</td>`+
-                 `<td>`+
-                 `<button onclick="openLink('${openUrl}')">Open</button>`+
-                 `<button onclick="act('start','${i.name}')">Start</button>`+
-                 `<button onclick="act('stop','${i.name}')">Stop</button>`+
-                 `<button onclick="act('restart','${i.name}')">Restart</button>`+
-                 `<button title="Shift-click for no-fix" onclick="checkVM(event,'${i.name}')" class="btn-gray">Check</button>`+
-                 `<button onclick="updateVM('${i.name}')" class="btn-gray">Update</button>`+
-                 `<button onclick="installChrome('${i.name}')">Install Chrome</button>`+
-                 `<select id="appsel-${i.name}" class="btn-gray" style="background:#1f2937;color:#fff;padding:.35rem .4rem;margin-left:.25rem"><option value="">App…</option>${appOpts}</select>`+
-                 `<button onclick="installSelectedApp('${i.name}')">Install</button>`+
-                 `<button onclick="uninstallSelectedApp('${i.name}')" class="btn-red">Uninstall</button>`+
-                 `<button onclick="reinstallSelectedApp('${i.name}')" class="btn-gray">Reinstall</button>`+
-                 `<button onclick="appStatusSelected('${i.name}')" class="btn-gray">Status</button>`+
-                 `<button onclick="recreateVM('${i.name}')">Recreate</button>`+
-                 `<button onclick="rebuildVM('${i.name}')">Rebuild</button>`+
-                 `<button onclick=\"cleanVM('${i.name}')\" class=\"btn-gray\">Clean</button>`+
-                 `<button onclick="delvm('${i.name}')" class="btn-red">Delete</button>`+
-                 `</td>`;
+                 // Build tunnel cell content with any errors
+                 let tunnelCell = '';
+                 if(i.tunnel){
+                     if(i.tunnel.tunnel_status) tunnelCell += `<div style=\"margin-bottom:.25rem\">${i.tunnel.tunnel_status}</div>`;
+                     if(i.tunnel.cf_tunnel_host) tunnelCell += `<div><a href=\"https://${i.tunnel.cf_tunnel_host}\" target=\"_blank\">https://${i.tunnel.cf_tunnel_host}</a></div>`;
+                     if(i.tunnel.tunnel_route_error) tunnelCell += `<div style=\"color:#fca5a5;margin-top:.25rem\">DNS error: ${i.tunnel.tunnel_route_error}</div>`;
+                     if(i.tunnel.tunnel_runtime_error) tunnelCell += `<div style=\"color:#fca5a5;margin-top:.25rem\">Runtime error: ${i.tunnel.tunnel_runtime_error}</div>`;
+                     tunnelCell += `<div style=\"margin-top:.25rem\"><button onclick=\"tunnelRecreate('${i.name}')\">Regenerate Tunnel</button> <button class=\"btn-gray\" onclick=\"tunnelDelete('${i.name}')\">Delete</button></div>`;
+                 } else {
+                     tunnelCell = `<button onclick=\"tunnelCreate('${i.name}')\">Create Tunnel</button>`;
+                 }
+                 tr.innerHTML=`<td>${i.name}</td><td>${dot}<span class=muted>${i.status||''}</span></td><td>${portOrPath}</td><td>${backendPort ? backendPort : ''}</td><td><a href="${openUrl}" target="_blank" rel="noopener noreferrer">${openUrl}</a></td>`+
+                    `<td id="tunnel-${i.name}">${tunnelCell}</td>`+
+                     `<td><button onclick="testBackend('${i.name}')">Test backend</button>`+
+                      `<span id="test-${i.name}" style="margin-left:.5rem;color:#ddd"></span>`+
+                      `</td>`+
+                      `<td>`+
+                      `<button onclick="openLink('${openUrl}')">Open</button>`+
+                      `<button onclick="act('start','${i.name}')">Start</button>`+
+                      `<button onclick="act('stop','${i.name}')">Stop</button>`+
+                      `<button onclick="act('restart','${i.name}')">Restart</button>`+
+                      `<button title="Shift-click for no-fix" onclick="checkVM(event,'${i.name}')" class="btn-gray">Check</button>`+
+                      `<button onclick="updateVM('${i.name}')" class="btn-gray">Update</button>`+
+                      `<button onclick="installChrome('${i.name}')">Install Chrome</button>`+
+                      `<select id="appsel-${i.name}" class="btn-gray" style="background:#1f2937;color:#fff;padding:.35rem .4rem;margin-left:.25rem"><option value="">App…</option>${appOpts}</select>`+
+                      `<button onclick="installSelectedApp('${i.name}')">Install</button>`+
+                      `<button onclick="uninstallSelectedApp('${i.name}')" class="btn-red">Uninstall</button>`+
+                      `<button onclick="reinstallSelectedApp('${i.name}')" class="btn-gray">Reinstall</button>`+
+                      `<button onclick="appStatusSelected('${i.name}')" class="btn-gray">Status</button>`+
+                      `<button onclick="recreateVM('${i.name}')">Recreate</button>`+
+                      `<button onclick="rebuildVM('${i.name}')">Rebuild</button>`+
+                      `<button onclick=\"cleanVM('${i.name}')\" class=\"btn-gray\">Clean</button>`+
+                      `<button onclick="delvm('${i.name}')" class="btn-red">Delete</button>`+
+                      `</td>`;
           tb.appendChild(tr);
         });
     } catch (err) {
@@ -447,6 +459,35 @@ async function cfMergeList(){
         el.innerHTML = j.mappings.map(m=>`<div>${m.name} -> ${m.hostpath} (tunnel: ${m.tunnel||'blobevm'})</div>`).join('');
     }catch(e){ alert('Error: '+e); }
 }
+async function tunnelCreate(name){
+    if(!name) return alert('Enter a VM name');
+    try{
+        const r = await fetch('/dashboard/api/tunnel/create',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:`name=${encodeURIComponent(name)}`});
+        const j = await r.json().catch(()=>({}));
+        if(j && j.ok){ alert('Tunnel creation requested.'); } else { alert('Failed: '+(j && (j.error||j.output)||'unknown')); }
+    }catch(e){ alert('Error: '+e); }
+    setTimeout(load,1000);
+}
+async function tunnelDelete(name){
+    if(!name) return alert('Enter a VM name');
+    if(!confirm('Delete tunnel for '+name+'?')) return;
+    try{
+        const r = await fetch('/dashboard/api/tunnel/delete',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:`name=${encodeURIComponent(name)}`});
+        const j = await r.json().catch(()=>({}));
+        if(j && j.ok){ alert('Tunnel deleted.'); } else { alert('Failed: '+(j && (j.error||j.output)||'unknown')); }
+    }catch(e){ alert('Error: '+e); }
+    setTimeout(load,1000);
+}
+async function tunnelRecreate(name){
+    if(!name) return alert('Enter a VM name');
+    if(!confirm('Regenerate tunnel for '+name+'?')) return;
+    try{
+        const r = await fetch('/dashboard/api/tunnel/recreate',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:`name=${encodeURIComponent(name)}`});
+        const j = await r.json().catch(()=>({}));
+        if(j && j.ok){ alert('Tunnel regenerated.'); } else { alert('Failed: '+(j && (j.error||j.output)||'unknown')); }
+    }catch(e){ alert('Error: '+e); }
+    setTimeout(load,1500);
+}
 async function testBackend(name){
     const el = document.getElementById(`test-${name}`);
     if(el) el.textContent = 'Checking...';
@@ -613,7 +654,9 @@ def _run_manager(*args):
 
 def _is_direct_mode():
     env = _read_env()
-    return env.get('NO_TRAEFIK', '1') == '1'
+    # Default to Traefik-enabled mode unless NO_TRAEFIK is explicitly set to '1'.
+    # Keep this consistent with the manager script which defaults NO_TRAEFIK to 0.
+    return env.get('NO_TRAEFIK', '0') == '1'
 
 def _request_host():
     try:
@@ -697,6 +740,23 @@ def manager_json_list():
                         it['status'] = 'Updating...'
                 except Exception:
                     pass
+            # Enrich with per-instance tunnel metadata if present
+            try:
+                for it in instances:
+                    try:
+                        mf = os.path.join(_state_dir(), 'instances', it['name'], 'instance.json')
+                        if os.path.isfile(mf):
+                            jd = json.load(open(mf))
+                            tunnel = {}
+                            for k in ('tunnel_id', 'tunnel_name', 'tunnel_status', 'cf_tunnel_host', 'cf_exposed'):
+                                if k in jd:
+                                    tunnel[k] = jd.get(k)
+                            if tunnel:
+                                it['tunnel'] = tunnel
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             return instances
     except Exception:
         # likely docker CLI not present inside container -> fall back
@@ -761,6 +821,23 @@ def manager_json_list():
         if port:
             inst['port'] = port
         instances.append(inst)
+    # Enrich with per-instance tunnel metadata if present (fallback path)
+    try:
+        for it in instances:
+            try:
+                mf = os.path.join(_state_dir(), 'instances', it['name'], 'instance.json')
+                if os.path.isfile(mf):
+                    jd = json.load(open(mf))
+                    tunnel = {}
+                    for k in ('tunnel_id', 'tunnel_name', 'tunnel_status', 'cf_tunnel_host', 'cf_exposed'):
+                        if k in jd:
+                            tunnel[k] = jd.get(k)
+                    if tunnel:
+                        it['tunnel'] = tunnel
+            except Exception:
+                pass
+    except Exception:
+        pass
     return instances
 
 def _read_env():
@@ -805,7 +882,8 @@ def _docker(*args):
 @auth_required
 def api_modeinfo():
     env = _read_env()
-    merged = env.get('NO_TRAEFIK', '1') == '0'
+    # merged mode is simply the inverse of direct (NO_TRAEFIK) mode
+    merged = not _is_direct_mode()
     base_path = env.get('BASE_PATH', '/vm')
     domain = env.get('BLOBEVM_DOMAIN', '')
     dash_port = env.get('DASHBOARD_PORT', '')
@@ -868,9 +946,14 @@ def api_set_cftunnel():
         except Exception:
             pass
         try:
-            # Run cloudflared using host network and point to local HTTP (Traefik)
+            # Run cloudflared using host network and point to local HTTP (Traefik).
+            # Use configured HTTP_PORT if present (set when enabling single-port mode),
+            # otherwise fall back to 80. This prevents cloudflared from pointing to
+            # the wrong port when traefik/dashboard run on a non-80 host port.
+            http_port = _read_env().get('HTTP_PORT', '80') or '80'
+            target_url = f'http://127.0.0.1:{http_port}'
             _docker('run', '-d', '--name', 'cloudflared', '--net', 'host', '--restart', 'unless-stopped',
-                    'cloudflare/cloudflared:latest', 'tunnel', '--no-autoupdate', 'run', '--token', t, '--url', 'http://127.0.0.1:80')
+                    'cloudflare/cloudflared:latest', 'tunnel', '--no-autoupdate', 'run', '--token', t, '--url', target_url)
         except Exception:
             pass
 
@@ -925,6 +1008,74 @@ def api_cf_remove():
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
+@app.post('/dashboard/api/tunnel/create')
+@auth_required
+def api_tunnel_create():
+    name = request.values.get('name','').strip()
+    if not name:
+        return jsonify({'ok': False, 'error': 'name required'}), 400
+    try:
+        r = subprocess.run([MANAGER, 'tunnel-create', name], capture_output=True, text=True)
+        if r.returncode != 0:
+            return jsonify({'ok': False, 'error': r.stderr.strip() or r.stdout.strip()}), 500
+        return jsonify({'ok': True, 'output': r.stdout.strip()})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.post('/dashboard/api/tunnel/delete')
+@auth_required
+def api_tunnel_delete():
+    name = request.values.get('name','').strip()
+    if not name:
+        return jsonify({'ok': False, 'error': 'name required'}), 400
+    try:
+        r = subprocess.run([MANAGER, 'tunnel-delete', name], capture_output=True, text=True)
+        if r.returncode != 0:
+            return jsonify({'ok': False, 'error': r.stderr.strip() or r.stdout.strip()}), 500
+        return jsonify({'ok': True, 'output': r.stdout.strip()})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.post('/dashboard/api/tunnel/recreate')
+@auth_required
+def api_tunnel_recreate():
+    name = request.values.get('name','').strip()
+    if not name:
+        return jsonify({'ok': False, 'error': 'name required'}), 400
+    try:
+        r = subprocess.run([MANAGER, 'tunnel-recreate', name], capture_output=True, text=True)
+        if r.returncode != 0:
+            return jsonify({'ok': False, 'error': r.stderr.strip() or r.stdout.strip()}), 500
+        return jsonify({'ok': True, 'output': r.stdout.strip()})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.get('/dashboard/api/tunnel/status/<name>')
+@auth_required
+def api_tunnel_status(name):
+    name = name.strip()
+    if not name:
+        return jsonify({'ok': False, 'error': 'name required'}), 400
+    try:
+        r = subprocess.run([MANAGER, 'tunnel-status', name], capture_output=True, text=True)
+        if r.returncode != 0:
+            # If manager returns non-zero but printed JSON to stdout, try to return it
+            out = r.stdout.strip() or r.stderr.strip()
+            return jsonify({'ok': False, 'error': out}), 500
+        # Try to parse JSON output
+        txt = r.stdout.strip()
+        try:
+            j = json.loads(txt)
+            return jsonify({'ok': True, 'status': j})
+        except Exception:
+            return jsonify({'ok': True, 'output': txt})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
 @app.post('/dashboard/api/cf-merge-add')
 @auth_required
 def api_cf_merge_add():
@@ -968,8 +1119,7 @@ def api_test_backend(name):
     if not name:
         return jsonify({'ok': False, 'error': 'name required'}), 400
     # Determine if direct mode
-    env = _read_env()
-    direct = env.get('NO_TRAEFIK','0') == '1'
+    direct = _is_direct_mode()
     base_path = env.get('BASE_PATH','/vm')
     if not base_path.startswith('/'):
         base_path = '/' + base_path
@@ -1038,6 +1188,92 @@ def api_cf_merge_list():
         return jsonify({'ok': True, 'mappings': items})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.get('/dashboard/api/diag')
+@auth_required
+def api_diag():
+    """Diagnostic endpoint: summarize Traefik and Cloudflared state, key env vars,
+    and recent cloudflared logs/config snippets to help debug merged-mode issues.
+    """
+    env = _read_env()
+    # Basic env summary
+    env_summary = {k: env.get(k, '') for k in ('NO_TRAEFIK', 'HTTP_PORT', 'BASE_PATH', 'BLOBEVM_DOMAIN', 'DASHBOARD_PORT')}
+
+    # Traefik presence
+    traefik_running = False
+    try:
+        r = _docker('ps', '--filter', 'name=traefik', '--format', '{{.Names}}')
+        traefik_running = (r.returncode == 0 and bool(r.stdout.strip()))
+    except Exception:
+        traefik_running = False
+
+    # Cloudflared containers
+    cf_containers = []
+    try:
+        r2 = _docker('ps', '--filter', 'name=cloudflared', '--format', '{{.Names}}')
+        if r2.returncode == 0 and r2.stdout:
+            cf_containers = [ln.strip() for ln in r2.stdout.splitlines() if ln.strip()]
+    except Exception:
+        cf_containers = []
+
+    # Tail logs for cloudflared (best-effort)
+    cf_logs = ''
+    try:
+        cf_logs = subprocess.check_output(['docker', 'logs', 'cloudflared', '--tail', '200'], text=True, stderr=subprocess.STDOUT)
+    except Exception as e:
+        cf_logs = f'Error reading cloudflared logs: {e}'
+
+    # Extract any 'Updated to new configuration' JSON blobs from logs
+    ingresses = []
+    try:
+        for line in cf_logs.splitlines():
+            if 'Updated to new configuration config=' in line:
+                try:
+                    cfg_txt = line.split('Updated to new configuration config=', 1)[1].strip()
+                    # Try to find a JSON object in the remainder
+                    first = cfg_txt.find('{')
+                    last = cfg_txt.rfind('}')
+                    if first != -1 and last != -1 and last > first:
+                        jtxt = cfg_txt[first:last+1]
+                        cfg = json.loads(jtxt)
+                        for ing in cfg.get('ingress', []) if isinstance(cfg.get('ingress', []), list) else []:
+                            hostname = ing.get('hostname') or ''
+                            service = ing.get('service') or ''
+                            ingresses.append({'hostname': hostname, 'service': service})
+                except Exception:
+                    # ignore parse errors
+                    pass
+    except Exception:
+        pass
+
+    # Also, try to read manager cf-merge-list for repo-managed mappings
+    cf_merge = []
+    try:
+        r3 = subprocess.run([MANAGER, 'cf-merge-list'], capture_output=True, text=True)
+        if r3.returncode == 0 and r3.stdout:
+            for line in r3.stdout.splitlines():
+                line = line.strip()
+                if line.startswith('- '):
+                    parts = line[2:].split('->')
+                    if len(parts) >= 2:
+                        nm = parts[0].strip()
+                        hostpath = parts[1].split('(')[0].strip()
+                        cf_merge.append({'name': nm, 'hostpath': hostpath})
+    except Exception:
+        pass
+
+    return jsonify({
+        'env': env_summary,
+        'is_direct': _is_direct_mode(),
+        'traefik': {'running': traefik_running},
+        'cloudflared': {
+            'containers': cf_containers,
+            'ingress_rules_from_logs': ingresses,
+            'recent_logs_tail': cf_logs[:8000]
+        },
+        'manager_cf_merge': cf_merge
+    })
 
 
 @app.post('/dashboard/api/stop-cftunnel')

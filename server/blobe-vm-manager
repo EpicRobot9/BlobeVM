@@ -1386,6 +1386,200 @@ cmd_cf_merge_list() {
   [[ "$found" -eq 0 ]] && echo "  <none>"
 }
 
+# --- Per-VM tunnel helpers (create/delete/status/recreate) -----------------
+cmd_tunnel_create() {
+  # Create a per-VM named tunnel, persist credentials to /etc/blobe/tunnels/<vm>.json,
+  # save tunnel_id and mark status in instance metadata.
+  # Usage: blobe-vm-manager tunnel-create <vm-name>
+  local name="$1"
+  [[ -z "$name" ]] && { echo "Usage: blobe-vm-manager tunnel-create <vm-name>" >&2; exit 1; }
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  ensure_cloudflared_state_dir
+  local tname="blobevm-${name}"
+  local outdir="/etc/blobe/tunnels"
+  mkdir -p "$outdir"
+  # Try local cloudflared binary first
+  if command -v cloudflared >/dev/null 2>&1; then
+    (cd "$CF_STATE_DIR" && cloudflared tunnel create "$tname") || { echo "cloudflared tunnel create failed" >&2; exit 1; }
+  elif command -v docker >/dev/null 2>&1; then
+    docker run --rm -v "$CF_STATE_DIR":/etc/cloudflared -w /etc/cloudflared cloudflare/cloudflared:latest tunnel create "$tname" || { echo "docker cloudflared tunnel create failed" >&2; exit 1; }
+  else
+    echo "cloudflared binary or docker required to create tunnel." >&2; exit 1
+  fi
+  # Find most-recent credentials file under CF_STATE_DIR
+  local cred
+  cred=$(ls -t "$CF_STATE_DIR"/*.json 2>/dev/null | head -n1 || true)
+  if [[ -z "$cred" || ! -f "$cred" ]]; then
+    echo "Unable to locate created tunnel credentials in $CF_STATE_DIR" >&2; exit 1
+  fi
+  # Copy credentials to outdir with vm-name.json
+  cp -f "$cred" "$outdir/${name}.json" || { echo "Failed to copy credentials to $outdir" >&2; exit 1; }
+  chmod 600 "$outdir/${name}.json" || true
+  # Try to extract tunnel id from the credential JSON
+  local tid
+  if command -v jq >/dev/null 2>&1; then
+    tid=$(jq -r '.TunnelID // .Tunnel.ID // .tunnel_id // .id // .Tunnel.ID' "$outdir/${name}.json" 2>/dev/null || true)
+  else
+    tid=$(grep -Eo '"(TunnelID|id|tunnel_id)"\s*:\s*"[0-9a-fA-F-]+"' "$outdir/${name}.json" 2>/dev/null | head -n1 | sed -E 's/.*:\s*"([^"]+)"/\1/' || true)
+  fi
+  # Persist metadata
+  if [[ -n "$tid" && "$tid" != "null" ]]; then
+    set_meta "$name" tunnel_id "$tid"
+  fi
+  set_meta "$name" tunnel_name "$tname"
+  set_meta "$name" tunnel_status "created"
+  # If a global domain is configured, also set a default cf_tunnel_host for convenience
+  if [[ -n "${BLOBEVM_DOMAIN:-}" ]]; then
+    set_meta "$name" cf_tunnel_host "${name}.${BLOBEVM_DOMAIN}"
+  fi
+  # Try to register DNS route and run the tunnel (best-effort)
+  local host=""
+  host=$(get_meta "$name" cf_tunnel_host || true)
+  if [[ -z "$host" && -n "${BLOBEVM_DOMAIN:-}" ]]; then
+    host="${name}.${BLOBEVM_DOMAIN}"
+    set_meta "$name" cf_tunnel_host "$host"
+  fi
+  # Determine backend port: direct mode use host_port metadata, otherwise HTTP_PORT
+  local backend_port=""
+  if [[ "${NO_TRAEFIK:-0}" -eq 1 ]]; then
+    backend_port=$(get_meta "$name" host_port || true)
+  fi
+  if [[ -z "$backend_port" ]]; then
+    backend_port="${HTTP_PORT:-80}"
+  fi
+  # Register DNS route (requires cloudflared binary or docker)
+  if [[ -n "$host" ]]; then
+    # Attempt to create DNS route and capture output for error reporting
+    local route_out=""; local route_rc=0
+    if command -v cloudflared >/dev/null 2>&1; then
+      route_out=$(cd "$CF_STATE_DIR" && cloudflared tunnel route dns "$tname" "$host" 2>&1) || route_rc=$?
+    elif command -v docker >/dev/null 2>&1; then
+      route_out=$(docker run --rm -v "$CF_STATE_DIR":/etc/cloudflared -w /etc/cloudflared cloudflare/cloudflared:latest tunnel route dns "$tname" "$host" 2>&1) || route_rc=$?
+    else
+      route_out="cloudflared binary or docker not available"
+      route_rc=127
+    fi
+    if [[ $route_rc -ne 0 ]]; then
+      # Persist route error for dashboard visibility
+      set_meta "$name" tunnel_status "created:route-error"
+      # truncate error to 1000 chars to avoid huge metadata
+      local routetxt
+      routetxt=$(printf "%s" "$route_out" | sed -n '1,200p')
+      set_meta "$name" tunnel_route_error "$routetxt"
+      echo "Warning: DNS route creation failed for ${name}: ${routetxt}" >&2
+    else
+      set_meta "$name" tunnel_status "created:route-ok"
+      set_meta "$name" tunnel_route_error ""
+    fi
+  fi
+  # Start a runtime cloudflared service/container for this tunnel (host network) so it proxies to local backend
+  local svc_name="cloudflared-blobevm-${name}"
+  if use_systemd; then
+    # Create a simple systemd service that runs the tunnel
+    local svc_path="/etc/systemd/system/${svc_name}.service"
+    local exec_cmd="/usr/local/bin/cloudflared tunnel --no-autoupdate run --url 'http://127.0.0.1:${backend_port}' '${tname}'"
+    cat > "$svc_path" <<EOF
+[Unit]
+Description=Cloudflared tunnel for BlobeVM instance ${name}
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=${exec_cmd}
+Restart=on-failure
+User=root
+WorkingDirectory=/etc/cloudflared
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload || true
+    systemctl enable --now "$svc_name" >/dev/null 2>&1 || true
+    # Check runtime status
+    if systemctl is-active --quiet "$svc_name"; then
+      set_meta "$name" tunnel_status "active"
+      set_meta "$name" tunnel_runtime_error ""
+    else
+      set_meta "$name" tunnel_status "runtime-error"
+      # capture recent journal entries for the service
+      local jr
+      jr=$(journalctl -u "$svc_name" -n 200 --no-pager 2>/dev/null || true)
+      jr=$(printf "%s" "$jr" | sed -n '1,200p')
+      set_meta "$name" tunnel_runtime_error "$jr"
+      echo "Warning: cloudflared service failed to start for ${name}. Journal: ${jr}" >&2
+    fi
+  else
+    ensure_cloudflared_state_dir
+    docker rm -f "$svc_name" >/dev/null 2>&1 || true
+    local drun
+    drun=$(docker run -d --name "$svc_name" --net host --restart unless-stopped -v "$CF_STATE_DIR":/etc/cloudflared:ro \
+      cloudflare/cloudflared:latest tunnel --no-autoupdate run --url "http://127.0.0.1:${backend_port}" "${tname}" 2>&1) || true
+    if [[ "$drun" =~ ^[0-9a-fA-F]+$ ]]; then
+      set_meta "$name" tunnel_status "active"
+      set_meta "$name" tunnel_runtime_error ""
+    else
+      set_meta "$name" tunnel_status "runtime-error"
+      drun=$(printf "%s" "$drun" | sed -n '1,200p')
+      set_meta "$name" tunnel_runtime_error "$drun"
+      echo "Warning: cloudflared docker container failed to start for ${name}: ${drun}" >&2
+    fi
+  fi
+  echo "Created tunnel for '$name' -> credentials: $outdir/${name}.json (tunnel: ${tname}) (host: ${host}, backend: ${backend_port})"
+}
+
+cmd_tunnel_delete() {
+  # Delete tunnel credentials and stop related runtime container/service
+  # Usage: blobe-vm-manager tunnel-delete <vm-name>
+  local name="$1"
+  [[ -z "$name" ]] && { echo "Usage: blobe-vm-manager tunnel-delete <vm-name>" >&2; exit 1; }
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  local outdir="/etc/blobe/tunnels"
+  local svc_name="cloudflared-blobevm-${name}"
+  if use_systemd; then
+    systemctl stop "${svc_name}.service" >/dev/null 2>&1 || true
+    systemctl disable "${svc_name}.service" >/dev/null 2>&1 || true
+  else
+    docker rm -f "$svc_name" >/dev/null 2>&1 || true
+  fi
+  rm -f "$outdir/${name}.json" || true
+  del_meta "$name" tunnel_id || true
+  del_meta "$name" tunnel_name || true
+  del_meta "$name" tunnel_status || true
+  echo "Removed tunnel for '$name'"
+}
+
+cmd_tunnel_status() {
+  # Report tunnel metadata
+  # Usage: blobe-vm-manager tunnel-status <vm-name>
+  local name="$1"; [[ -z "$name" ]] && { echo "Usage: blobe-vm-manager tunnel-status <vm-name>" >&2; exit 1; }
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  local mf
+  mf="$(meta_file "$name")"
+  if [[ -f "$mf" ]]; then
+    if command -v jq >/dev/null 2>&1; then
+      jq -r '{tunnel_id: .tunnel_id, tunnel_name: .tunnel_name, tunnel_status: .tunnel_status, cf_tunnel_host: .cf_tunnel_host, cf_exposed: .cf_exposed} | tojson' "$mf" 2>/dev/null || cat "$mf"
+    else
+      cat "$mf"
+    fi
+    return 0
+  fi
+  echo "{}"
+}
+
+cmd_tunnel_recreate() {
+  # Recreate (regenerate) credentials and restart runtime container for the VM tunnel
+  # Usage: blobe-vm-manager tunnel-recreate <vm-name>
+  local name="$1"; [[ -z "$name" ]] && { echo "Usage: blobe-vm-manager tunnel-recreate <vm-name>" >&2; exit 1; }
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  # Delete existing then create anew
+  cmd_tunnel_delete "$name"
+  cmd_tunnel_create "$name"
+}
+
 cmd_set_base_path() {
   local base="${1:-}"; [[ -z "$base" ]] && usage
   [[ "$base" != /* ]] && base="/$base"
@@ -1505,6 +1699,10 @@ main() {
     cf-merge-add) cmd_cf_merge_add "$@" ;;
     cf-merge-remove) cmd_cf_merge_remove "$@" ;;
     cf-merge-list) cmd_cf_merge_list "$@" ;;
+  tunnel-create) cmd_tunnel_create "$@" ;;
+  tunnel-delete) cmd_tunnel_delete "$@" ;;
+  tunnel-status) cmd_tunnel_status "$@" ;;
+  tunnel-recreate) cmd_tunnel_recreate "$@" ;;
   rebuild-image) cmd_rebuild_image "$@" ;;
   recreate-all) cmd_recreate_all "$@" ;;
   recreate) cmd_recreate_targets "$@" ;;
