@@ -870,8 +870,8 @@ def _enable_single_port(port: int):
             '--label', 'traefik.http.routers.blobe-dashboard.rule=PathPrefix(`/dashboard`)',
             '--label', 'traefik.http.routers.blobe-dashboard.entrypoints=web',
             '--label', 'traefik.http.services.blobe-dashboard.loadbalancer.server.port=5000',
-            'blobevm-dashboard:latest',
-            'python', '/app/app.py')
+            'python:3.11-slim',
+            'bash', '-c', 'pip install --no-cache-dir flask && python /app/app.py')
 
     # Recreate VM containers into proxy network
     inst_root = os.path.join(_state_dir(), 'instances')
@@ -945,8 +945,8 @@ def _disable_single_port(dash_port: int | None):
             '-e', f'BLOBEDASH_USER={os.environ.get("BLOBEDASH_USER","")}',
             '-e', f'BLOBEDASH_PASS={os.environ.get("BLOBEDASH_PASS","")}',
             '-e', f'HOST_DOCKER_BIN={HOST_DOCKER_BIN}',
-        'blobevm-dashboard:latest',
-            'python', '/app/app.py')
+        'python:3.11-slim',
+            'bash', '-c', 'pip install --no-cache-dir flask && python /app/app.py')
 
 @app.get('/dashboard')
 @auth_required
@@ -1078,68 +1078,24 @@ def api_upload_logo():
         return jsonify({'ok': False, 'error': 'Unsupported file type'}), 400
     data = f.read()
     size = len(data)
-
-    # If SVG, we can't raster-resize; just enforce size limit
-    if ext == '.svg':
-        if size > MAX_BYTES:
-            return jsonify({'ok': False, 'error': f'File too large ({size} bytes). Max {MAX_BYTES} bytes for SVG.'}), 400
-        out_bytes = data
-    else:
-        # Try to auto-resize/optimize using Pillow when available
-        out_bytes = data
-        try:
-            from PIL import Image
-            img = Image.open(io.BytesIO(data))
-            img_format = img.format or ('PNG' if ext == '.png' else 'JPEG')
-            w, h = img.size
-            # If image exceeds dimensions or size, attempt to resize/compress
-            if w > MAX_W or h > MAX_H or size > MAX_BYTES:
-                # Compute thumbnail size preserving aspect ratio
-                img_copy = img.copy()
-                img_copy.thumbnail((MAX_W, MAX_H), Image.LANCZOS)
-                bio = io.BytesIO()
-                save_kwargs = {}
-                fmt = img_format.upper()
-                if fmt in ('JPEG', 'JPG'):
-                    save_kwargs['quality'] = 85
-                    save_kwargs['optimize'] = True
-                    fmt = 'JPEG'
-                elif fmt == 'PNG':
-                    save_kwargs['optimize'] = True
-                    fmt = 'PNG'
-                try:
-                    img_copy.save(bio, format=fmt, **save_kwargs)
-                except Exception:
-                    # Fallback: convert to PNG
-                    bio = io.BytesIO()
-                    img_copy = img_copy.convert('RGBA')
-                    img_copy.save(bio, format='PNG', optimize=True)
-                out_bytes = bio.getvalue()
-                # If still too large and JPEG, try reducing quality iteratively
-                if len(out_bytes) > MAX_BYTES and fmt == 'JPEG':
-                    for q in (75, 65, 55, 45):
-                        bio = io.BytesIO()
-                        try:
-                            img_copy.save(bio, format='JPEG', quality=q, optimize=True)
-                        except Exception:
-                            continue
-                        out_bytes = bio.getvalue()
-                        if len(out_bytes) <= MAX_BYTES:
-                            break
-            # final check
-            if len(out_bytes) > MAX_BYTES:
-                return jsonify({'ok': False, 'error': f'File too large after processing ({len(out_bytes)} bytes). Max {MAX_BYTES} bytes.'}), 400
-        except Exception:
-            # Pillow not available or processing failed; fall back to raw bytes but enforce size
-            if size > MAX_BYTES:
-                return jsonify({'ok': False, 'error': f'File too large ({size} bytes). Max {MAX_BYTES} bytes.'}), 400
-
+    if size > MAX_BYTES:
+        return jsonify({'ok': False, 'error': f'File too large ({size} bytes). Max {MAX_BYTES} bytes.'}), 400
+    # Optional image dimension check using Pillow if available
+    try:
+        from PIL import Image
+        img = Image.open(io.BytesIO(data))
+        w, h = img.size
+        if w > MAX_W or h > MAX_H:
+            return jsonify({'ok': False, 'error': f'Image dimensions too large ({w}x{h}). Max {MAX_W}x{MAX_H}.'}), 400
+    except Exception:
+        # Pillow not available or invalid image; skip dimension check for SVGs or when PIL missing
+        pass
     fname = f'site-logo{ext}'
     sd = _static_dir()
     savepath = os.path.join(sd, fname)
     try:
         with open(savepath, 'wb') as out:
-            out.write(out_bytes)
+            out.write(data)
         cfg = _load_site_config()
         cfg['logo'] = fname
         _write_site_config(cfg)
@@ -1164,60 +1120,22 @@ def api_upload_favicon():
         return jsonify({'ok': False, 'error': 'Unsupported file type'}), 400
     data = f.read()
     size = len(data)
-
-    if ext == '.svg':
-        if size > MAX_BYTES:
-            return jsonify({'ok': False, 'error': f'File too large ({size} bytes). Max {MAX_BYTES} bytes for SVG.'}), 400
-        out_bytes = data
-    else:
-        out_bytes = data
-        try:
-            from PIL import Image
-            img = Image.open(io.BytesIO(data))
-            img_format = img.format or ('PNG' if ext == '.png' else 'JPEG')
-            w, h = img.size
-            if w > MAX_W or h > MAX_H or size > MAX_BYTES:
-                img_copy = img.copy()
-                img_copy.thumbnail((MAX_W, MAX_H), Image.LANCZOS)
-                bio = io.BytesIO()
-                fmt = img_format.upper()
-                save_kwargs = {}
-                if fmt in ('JPEG', 'JPG'):
-                    save_kwargs['quality'] = 85
-                    save_kwargs['optimize'] = True
-                    fmt = 'JPEG'
-                elif fmt == 'PNG':
-                    save_kwargs['optimize'] = True
-                    fmt = 'PNG'
-                try:
-                    img_copy.save(bio, format=fmt, **save_kwargs)
-                except Exception:
-                    bio = io.BytesIO()
-                    img_copy = img_copy.convert('RGBA')
-                    img_copy.save(bio, format='PNG', optimize=True)
-                out_bytes = bio.getvalue()
-                if len(out_bytes) > MAX_BYTES and fmt == 'JPEG':
-                    for q in (75, 65, 55, 45):
-                        bio = io.BytesIO()
-                        try:
-                            img_copy.save(bio, format='JPEG', quality=q, optimize=True)
-                        except Exception:
-                            continue
-                        out_bytes = bio.getvalue()
-                        if len(out_bytes) <= MAX_BYTES:
-                            break
-            if len(out_bytes) > MAX_BYTES:
-                return jsonify({'ok': False, 'error': f'File too large after processing ({len(out_bytes)} bytes). Max {MAX_BYTES} bytes.'}), 400
-        except Exception:
-            if size > MAX_BYTES:
-                return jsonify({'ok': False, 'error': f'File too large ({size} bytes). Max {MAX_BYTES} bytes.'}), 400
-
+    if size > MAX_BYTES:
+        return jsonify({'ok': False, 'error': f'File too large ({size} bytes). Max {MAX_BYTES} bytes.'}), 400
+    try:
+        from PIL import Image
+        img = Image.open(io.BytesIO(data))
+        w, h = img.size
+        if w > MAX_W or h > MAX_H:
+            return jsonify({'ok': False, 'error': f'Favicon too large ({w}x{h}). Max {MAX_W}x{MAX_H}.'}), 400
+    except Exception:
+        pass
     fname = f'site-favicon{ext}'
     sd = _static_dir()
     savepath = os.path.join(sd, fname)
     try:
         with open(savepath, 'wb') as out:
-            out.write(out_bytes)
+            out.write(data)
         cfg = _load_site_config()
         cfg['favicon'] = fname
         _write_site_config(cfg)

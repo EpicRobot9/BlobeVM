@@ -4,10 +4,6 @@ pip install textual
 sleep 2
 python3 installer.py
 docker build -t blobevm . --no-cache
-# Build dashboard image so installer can run dashboard container without installing deps at runtime
-if [[ -d "BlobeVM/dashboard" ]]; then
-    docker build -t blobevm-dashboard:latest BlobeVM/dashboard || true
-fi
 cd ..
 
 sudo apt update

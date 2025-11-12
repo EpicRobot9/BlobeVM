@@ -353,14 +353,6 @@ Validation
 - Favicon max size: 128 KB. Max dimensions checked when Pillow is available: 128x128.
 - Allowed types: PNG, JPEG, SVG, GIF, ICO.
 
-Auto-resize behavior
-- If the Python Imaging Library (Pillow) is installed in the environment where the dashboard runs, uploaded images that exceed the configured maximum dimensions will be automatically resized to fit within the limits, and JPEGs will be recompressed to reduce size. This helps keep logos and favicons small for faster load times.
-- If Pillow is not available, the dashboard will enforce file-size limits but will not perform automatic resizing. To enable auto-resize, install Pillow in the dashboard environment (e.g., inside the container or virtualenv):
-
-```bash
-pip install Pillow
-```
-
 If you need different limits or want to add image processing (auto-resize or crop), I can add that behavior.
 
 ---
