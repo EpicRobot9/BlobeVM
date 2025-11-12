@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, json, subprocess, shlex, base64, socket, threading, time
+import os, json, subprocess, shlex, base64, socket, threading, time, io
 from urllib import request as urlrequest, error as urlerror
 from functools import wraps
 from flask import Flask, jsonify, request, abort, send_from_directory, render_template_string, Response
@@ -10,10 +10,28 @@ HOST_DOCKER_BIN = os.environ.get('HOST_DOCKER_BIN') or '/usr/bin/docker'
 CONTAINER_DOCKER_BIN = os.environ.get('CONTAINER_DOCKER_BIN') or '/usr/bin/docker'
 DOCKER_VOLUME_BIND = f'{HOST_DOCKER_BIN}:{CONTAINER_DOCKER_BIN}:ro'
 TEMPLATE = r"""
-<!doctype html><html><head><title>BlobeVM Dashboard</title>
+<!doctype html><html><head><title>{{ title|e }}</title>
+{% if favicon_url %}<link rel="icon" href="{{ favicon_url }}">{% endif %}
 <style>body{font-family:system-ui,Arial;margin:1.5rem;background:#111;color:#eee}table{border-collapse:collapse;width:100%;}th,td{padding:.5rem;border-bottom:1px solid #333}a,button{background:#2563eb;color:#fff;border:none;padding:.4rem .8rem;border-radius:4px;text-decoration:none;cursor:pointer}form{display:inline}h1{margin-top:0} .badge{background:#444;padding:.15rem .4rem;border-radius:3px;font-size:.65rem;text-transform:uppercase;margin-left:.3rem} .muted{opacity:.75} .btn-red{background:#dc2626} .btn-gray{background:#374151} .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}.green{background:#10b981}.red{background:#ef4444}.gray{background:#6b7280}.amber{background:#f59e0b}</style>
 </head><body>
-<h1>BlobeVM Dashboard</h1>
+<div style="display:flex;align-items:center;gap:.6rem">
+{% if logo_url %}<img src="{{ logo_url }}" alt="logo" style="height:40px;width:auto;border-radius:6px;margin-right:.5rem">{% endif %}
+<h1 id="site-title">{{ title|e }}</h1>
+</div>
+<div style="margin-top:.5rem;margin-bottom:1rem">
+    <form id="siteconfig-form" onsubmit="return saveSiteConfig(event)" style="display:inline;margin-right:.6rem">
+        <input id="site-title-input" name="title" placeholder="Site title" value="{{ title|e }}" />
+        <button type="submit">Save title</button>
+    </form>
+    <form id="logo-form" enctype="multipart/form-data" onsubmit="return uploadLogo(event)" style="display:inline;margin-right:.6rem">
+        <input type="file" name="file" id="logo-file" accept="image/*" />
+        <button type="submit">Upload logo</button>
+    </form>
+    <form id="favicon-form" enctype="multipart/form-data" onsubmit="return uploadFavicon(event)" style="display:inline">
+        <input type="file" name="file" id="favicon-file" accept="image/*,.ico" />
+        <button type="submit">Upload favicon</button>
+    </form>
+</div>
 <div id=errbox style="display:none;background:#7f1d1d;color:#fff;padding:.5rem .75rem;border-radius:4px;margin:.5rem 0"></div>
 <form method=post action="/dashboard/api/create" onsubmit="return createVM(event)">
 <input name=name placeholder="name" required pattern="[a-zA-Z0-9-]+" />
@@ -49,6 +67,79 @@ const DEBUG = new URLSearchParams(window.location.search).has('debug');
 const dbg = (...args) => { if (DEBUG) console.log('[BLOBEDASH]', ...args); };
 window.addEventListener('error', (e) => console.error('[BLOBEDASH] window error', e.message, e.error || e));
 window.addEventListener('unhandledrejection', (e) => console.error('[BLOBEDASH] unhandledrejection', e.reason));
+
+// Site config helpers (client-side)
+async function fetchSiteConfig(){
+    try{
+        const r = await fetch('/dashboard/api/site-config');
+        if(!r.ok) return null;
+        return await r.json().catch(()=>null);
+    }catch(e){ return null; }
+}
+
+async function saveSiteConfig(ev){
+    ev && ev.preventDefault && ev.preventDefault();
+    const title = document.getElementById('site-title-input').value || '';
+    try{
+        const r = await fetch('/dashboard/api/site-config', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({title})});
+        const j = await r.json().catch(()=>({}));
+        if(j && j.ok){
+            document.getElementById('site-title').textContent = title;
+            alert('Title saved');
+        }else{
+            alert('Failed to save title: ' + (j && j.error || r.status));
+        }
+    }catch(e){ alert('Save error: '+e); }
+    return false;
+}
+
+async function uploadLogo(ev){
+    ev && ev.preventDefault && ev.preventDefault();
+    const f = document.getElementById('logo-file').files[0];
+    if(!f){ alert('Select a logo file first'); return false; }
+    const fd = new FormData(); fd.append('file', f);
+    try{
+        const r = await fetch('/dashboard/api/upload-logo', {method:'POST', body: fd});
+        const j = await r.json().catch(()=>({}));
+        if(j && j.ok){
+            const url = j.logo_url;
+            // update displayed logo if present
+            let img = document.querySelector('img[alt="logo"]');
+            if(img) img.src = url + '?v=' + Date.now();
+            else {
+                const div = document.querySelector('div');
+            }
+            alert('Logo uploaded');
+        }else{
+            alert('Upload failed: ' + (j && j.error || r.status));
+        }
+    }catch(e){ alert('Upload error: '+e); }
+    return false;
+}
+
+async function uploadFavicon(ev){
+    ev && ev.preventDefault && ev.preventDefault();
+    const f = document.getElementById('favicon-file').files[0];
+    if(!f){ alert('Select a favicon file first'); return false; }
+    const fd = new FormData(); fd.append('file', f);
+    try{
+        const r = await fetch('/dashboard/api/upload-favicon', {method:'POST', body: fd});
+        const j = await r.json().catch(()=>({}));
+        if(j && j.ok){
+            const url = j.favicon_url;
+            // update favicon link
+            let l = document.querySelector('link[rel="icon"]');
+            if(l) l.href = url + '?v=' + Date.now();
+            else{
+                l = document.createElement('link'); l.rel='icon'; l.href=url; document.head.appendChild(l);
+            }
+            alert('Favicon uploaded');
+        }else{
+            alert('Upload failed: ' + (j && j.error || r.status));
+        }
+    }catch(e){ alert('Upload error: '+e); }
+    return false;
+}
 
 let mergedMode = false, basePath = '/vm', customDomain = '', dashPort = '', dashIp = '';
 let vms = [];
@@ -779,8 +870,8 @@ def _enable_single_port(port: int):
             '--label', 'traefik.http.routers.blobe-dashboard.rule=PathPrefix(`/dashboard`)',
             '--label', 'traefik.http.routers.blobe-dashboard.entrypoints=web',
             '--label', 'traefik.http.services.blobe-dashboard.loadbalancer.server.port=5000',
-            'python:3.11-slim',
-            'bash', '-c', 'pip install --no-cache-dir flask && python /app/app.py')
+            'blobevm-dashboard:latest',
+            'python', '/app/app.py')
 
     # Recreate VM containers into proxy network
     inst_root = os.path.join(_state_dir(), 'instances')
@@ -854,13 +945,285 @@ def _disable_single_port(dash_port: int | None):
             '-e', f'BLOBEDASH_USER={os.environ.get("BLOBEDASH_USER","")}',
             '-e', f'BLOBEDASH_PASS={os.environ.get("BLOBEDASH_PASS","")}',
             '-e', f'HOST_DOCKER_BIN={HOST_DOCKER_BIN}',
-        'python:3.11-slim',
-            'bash', '-c', 'pip install --no-cache-dir flask && python /app/app.py')
+        'blobevm-dashboard:latest',
+            'python', '/app/app.py')
 
 @app.get('/dashboard')
 @auth_required
 def root():
-    return render_template_string(TEMPLATE)
+    cfg = _load_site_config()
+    title = cfg.get('title') or 'BlobeVM Dashboard'
+    logo = cfg.get('logo')
+    favicon = cfg.get('favicon')
+    logo_url = f"/dashboard/static/{logo}" if logo else ''
+    favicon_url = f"/dashboard/static/{favicon}" if favicon else ''
+    return render_template_string(TEMPLATE, title=title, logo_url=logo_url, favicon_url=favicon_url)
+
+
+# --- Site config (title, logo, favicon) helpers and routes -----------------
+def _site_config_path():
+    return os.path.join(_state_dir(), 'dashboard', 'site_config.json')
+
+def _static_dir():
+    p = os.path.join(_state_dir(), 'dashboard', 'static')
+    try:
+        os.makedirs(p, exist_ok=True)
+    except Exception:
+        pass
+    return p
+
+def _load_site_config():
+    path = _site_config_path()
+    data = {'title': 'BlobeVM Dashboard', 'logo': '', 'favicon': ''}
+    try:
+        if os.path.isfile(path):
+            with open(path, 'r') as f:
+                j = json.load(f)
+                if isinstance(j, dict):
+                    data.update(j)
+    except Exception:
+        pass
+    return data
+
+def _write_site_config(cfg: dict) -> bool:
+    path = _site_config_path()
+    try:
+        d = os.path.dirname(path)
+        os.makedirs(d, exist_ok=True)
+        with open(path, 'w') as f:
+            json.dump(cfg, f)
+        return True
+    except Exception:
+        return False
+
+
+@app.get('/dashboard/static/<path:filename>')
+@auth_required
+def dashboard_static(filename):
+    """Serve static files stored under the persistent state dashboard/static folder."""
+    sd = _static_dir()
+    return send_from_directory(sd, filename)
+
+
+@app.get('/dashboard/api/site-config')
+@auth_required
+def api_site_config_get():
+    cfg = _load_site_config()
+    # Convert filenames to served URLs if present
+    if cfg.get('logo'):
+        cfg['logo_url'] = f"/dashboard/static/{cfg.get('logo')}"
+    else:
+        cfg['logo_url'] = ''
+    if cfg.get('favicon'):
+        cfg['favicon_url'] = f"/dashboard/static/{cfg.get('favicon')}"
+    else:
+        cfg['favicon_url'] = ''
+    return jsonify(cfg)
+
+
+@app.post('/dashboard/api/site-config')
+@auth_required
+def api_site_config_set():
+    # Accept either form or JSON body for 'title'
+    title = request.form.get('title') if request.form else None
+    if not title:
+        try:
+            j = request.get_json(silent=True) or {}
+            title = j.get('title')
+        except Exception:
+            title = None
+    if title is None:
+        return jsonify({'ok': False, 'error': 'No title provided'}), 400
+    cfg = _load_site_config()
+    cfg['title'] = str(title)
+    ok = _write_site_config(cfg)
+    return jsonify({'ok': ok, 'title': cfg['title']})
+
+
+def _allowed_ext(filename: str) -> bool:
+    ext = os.path.splitext(filename or '')[1].lower()
+    return ext in ('.png', '.jpg', '.jpeg', '.svg', '.ico', '.gif')
+
+
+def _safe_ext_from_mimetype(mimetype: str, orig: str) -> str:
+    mapping = {
+        'image/png': '.png',
+        'image/jpeg': '.jpg',
+        'image/jpg': '.jpg',
+        'image/svg+xml': '.svg',
+        'image/x-icon': '.ico',
+        'image/vnd.microsoft.icon': '.ico',
+        'image/gif': '.gif',
+    }
+    if mimetype in mapping:
+        return mapping[mimetype]
+    ext = os.path.splitext(orig or '')[1].lower()
+    return ext if ext else ''
+
+
+@app.post('/dashboard/api/upload-logo')
+@auth_required
+def api_upload_logo():
+    # Limits
+    MAX_BYTES = 512 * 1024
+    MAX_W = 1024
+    MAX_H = 1024
+    if 'file' not in request.files:
+        return jsonify({'ok': False, 'error': 'No file provided'}), 400
+    f = request.files['file']
+    if not f or not f.filename:
+        return jsonify({'ok': False, 'error': 'Invalid file'}), 400
+    ext = _safe_ext_from_mimetype(f.mimetype, f.filename)
+    if not ext or ext not in ('.png', '.jpg', '.jpeg', '.svg', '.ico', '.gif'):
+        return jsonify({'ok': False, 'error': 'Unsupported file type'}), 400
+    data = f.read()
+    size = len(data)
+
+    # If SVG, we can't raster-resize; just enforce size limit
+    if ext == '.svg':
+        if size > MAX_BYTES:
+            return jsonify({'ok': False, 'error': f'File too large ({size} bytes). Max {MAX_BYTES} bytes for SVG.'}), 400
+        out_bytes = data
+    else:
+        # Try to auto-resize/optimize using Pillow when available
+        out_bytes = data
+        try:
+            from PIL import Image
+            img = Image.open(io.BytesIO(data))
+            img_format = img.format or ('PNG' if ext == '.png' else 'JPEG')
+            w, h = img.size
+            # If image exceeds dimensions or size, attempt to resize/compress
+            if w > MAX_W or h > MAX_H or size > MAX_BYTES:
+                # Compute thumbnail size preserving aspect ratio
+                img_copy = img.copy()
+                img_copy.thumbnail((MAX_W, MAX_H), Image.LANCZOS)
+                bio = io.BytesIO()
+                save_kwargs = {}
+                fmt = img_format.upper()
+                if fmt in ('JPEG', 'JPG'):
+                    save_kwargs['quality'] = 85
+                    save_kwargs['optimize'] = True
+                    fmt = 'JPEG'
+                elif fmt == 'PNG':
+                    save_kwargs['optimize'] = True
+                    fmt = 'PNG'
+                try:
+                    img_copy.save(bio, format=fmt, **save_kwargs)
+                except Exception:
+                    # Fallback: convert to PNG
+                    bio = io.BytesIO()
+                    img_copy = img_copy.convert('RGBA')
+                    img_copy.save(bio, format='PNG', optimize=True)
+                out_bytes = bio.getvalue()
+                # If still too large and JPEG, try reducing quality iteratively
+                if len(out_bytes) > MAX_BYTES and fmt == 'JPEG':
+                    for q in (75, 65, 55, 45):
+                        bio = io.BytesIO()
+                        try:
+                            img_copy.save(bio, format='JPEG', quality=q, optimize=True)
+                        except Exception:
+                            continue
+                        out_bytes = bio.getvalue()
+                        if len(out_bytes) <= MAX_BYTES:
+                            break
+            # final check
+            if len(out_bytes) > MAX_BYTES:
+                return jsonify({'ok': False, 'error': f'File too large after processing ({len(out_bytes)} bytes). Max {MAX_BYTES} bytes.'}), 400
+        except Exception:
+            # Pillow not available or processing failed; fall back to raw bytes but enforce size
+            if size > MAX_BYTES:
+                return jsonify({'ok': False, 'error': f'File too large ({size} bytes). Max {MAX_BYTES} bytes.'}), 400
+
+    fname = f'site-logo{ext}'
+    sd = _static_dir()
+    savepath = os.path.join(sd, fname)
+    try:
+        with open(savepath, 'wb') as out:
+            out.write(out_bytes)
+        cfg = _load_site_config()
+        cfg['logo'] = fname
+        _write_site_config(cfg)
+        return jsonify({'ok': True, 'logo_url': f"/dashboard/static/{fname}"})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.post('/dashboard/api/upload-favicon')
+@auth_required
+def api_upload_favicon():
+    MAX_BYTES = 128 * 1024
+    MAX_W = 128
+    MAX_H = 128
+    if 'file' not in request.files:
+        return jsonify({'ok': False, 'error': 'No file provided'}), 400
+    f = request.files['file']
+    if not f or not f.filename:
+        return jsonify({'ok': False, 'error': 'Invalid file'}), 400
+    ext = _safe_ext_from_mimetype(f.mimetype, f.filename)
+    if not ext or ext not in ('.png', '.jpg', '.jpeg', '.svg', '.ico', '.gif'):
+        return jsonify({'ok': False, 'error': 'Unsupported file type'}), 400
+    data = f.read()
+    size = len(data)
+
+    if ext == '.svg':
+        if size > MAX_BYTES:
+            return jsonify({'ok': False, 'error': f'File too large ({size} bytes). Max {MAX_BYTES} bytes for SVG.'}), 400
+        out_bytes = data
+    else:
+        out_bytes = data
+        try:
+            from PIL import Image
+            img = Image.open(io.BytesIO(data))
+            img_format = img.format or ('PNG' if ext == '.png' else 'JPEG')
+            w, h = img.size
+            if w > MAX_W or h > MAX_H or size > MAX_BYTES:
+                img_copy = img.copy()
+                img_copy.thumbnail((MAX_W, MAX_H), Image.LANCZOS)
+                bio = io.BytesIO()
+                fmt = img_format.upper()
+                save_kwargs = {}
+                if fmt in ('JPEG', 'JPG'):
+                    save_kwargs['quality'] = 85
+                    save_kwargs['optimize'] = True
+                    fmt = 'JPEG'
+                elif fmt == 'PNG':
+                    save_kwargs['optimize'] = True
+                    fmt = 'PNG'
+                try:
+                    img_copy.save(bio, format=fmt, **save_kwargs)
+                except Exception:
+                    bio = io.BytesIO()
+                    img_copy = img_copy.convert('RGBA')
+                    img_copy.save(bio, format='PNG', optimize=True)
+                out_bytes = bio.getvalue()
+                if len(out_bytes) > MAX_BYTES and fmt == 'JPEG':
+                    for q in (75, 65, 55, 45):
+                        bio = io.BytesIO()
+                        try:
+                            img_copy.save(bio, format='JPEG', quality=q, optimize=True)
+                        except Exception:
+                            continue
+                        out_bytes = bio.getvalue()
+                        if len(out_bytes) <= MAX_BYTES:
+                            break
+            if len(out_bytes) > MAX_BYTES:
+                return jsonify({'ok': False, 'error': f'File too large after processing ({len(out_bytes)} bytes). Max {MAX_BYTES} bytes.'}), 400
+        except Exception:
+            if size > MAX_BYTES:
+                return jsonify({'ok': False, 'error': f'File too large ({size} bytes). Max {MAX_BYTES} bytes.'}), 400
+
+    fname = f'site-favicon{ext}'
+    sd = _static_dir()
+    savepath = os.path.join(sd, fname)
+    try:
+        with open(savepath, 'wb') as out:
+            out.write(out_bytes)
+        cfg = _load_site_config()
+        cfg['favicon'] = fname
+        _write_site_config(cfg)
+        return jsonify({'ok': True, 'favicon_url': f"/dashboard/static/{fname}"})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
 
 @app.get('/dashboard/api/list')
 @auth_required

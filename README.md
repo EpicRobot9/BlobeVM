@@ -318,4 +318,49 @@ The web dashboard provides a modern UI for managing VMs and switching routing mo
 - You can always switch modes and update your domain as needed.
 - Enable browser debug logs by appending `?debug=1` to the dashboard URL, then open the browser console to see messages prefixed with `[BLOBEDASH]`.
 
+## Customizing the Dashboard Title, Logo and Favicon
+
+The dashboard now supports a persistent site title, logo and favicon that you can change from the UI or via the API. Files and config are stored under the BlobeVM "state" directory (by default `/opt/blobe-vm`).
+
+Using the UI
+- Open `http://<host>/dashboard` and use the new controls at the top of the page:
+  - Edit the site title and click "Save title".
+  - Upload a logo image (PNG/JPEG/SVG/GIF/ICO). The file is validated for size and, if Pillow (PIL) is available, image dimensions.
+  - Upload a favicon similarly.
+
+API endpoints
+- GET `/dashboard/api/site-config` — Returns JSON with `title`, `logo`, `favicon`, and `logo_url`/`favicon_url`.
+- POST `/dashboard/api/site-config` — Accepts JSON `{ "title": "My Title" }` or form data to update the title.
+- POST `/dashboard/api/upload-logo` — multipart/form-data with `file` field to upload a logo.
+- POST `/dashboard/api/upload-favicon` — multipart/form-data with `file` field to upload a favicon.
+
+Storage & permissions
+- Config file: `<state>/dashboard/site_config.json` (defaults to `/opt/blobe-vm/dashboard/site_config.json`).
+- Uploaded files: `<state>/dashboard/static/` (e.g. `/opt/blobe-vm/dashboard/static/site-logo.png`).
+
+If the dashboard process cannot write to `/opt/blobe-vm` (common when running as non-root), set a writable state directory before starting the dashboard:
+
+```bash
+export BLOBEDASH_STATE="$HOME/.blobe-vm-test"
+mkdir -p "$BLOBEDASH_STATE"
+python3 /opt/blobe-vm/dashboard/app.py   # or however you run the dashboard
+```
+
+This stores config and assets under the provided path instead of `/opt/blobe-vm` and avoids permission errors.
+
+Validation
+- Logo max size: 512 KB (bytes). Max dimensions checked when Pillow is available: 1024x1024.
+- Favicon max size: 128 KB. Max dimensions checked when Pillow is available: 128x128.
+- Allowed types: PNG, JPEG, SVG, GIF, ICO.
+
+Auto-resize behavior
+- If the Python Imaging Library (Pillow) is installed in the environment where the dashboard runs, uploaded images that exceed the configured maximum dimensions will be automatically resized to fit within the limits, and JPEGs will be recompressed to reduce size. This helps keep logos and favicons small for faster load times.
+- If Pillow is not available, the dashboard will enforce file-size limits but will not perform automatic resizing. To enable auto-resize, install Pillow in the dashboard environment (e.g., inside the container or virtualenv):
+
+```bash
+pip install Pillow
+```
+
+If you need different limits or want to add image processing (auto-resize or crop), I can add that behavior.
+
 ---

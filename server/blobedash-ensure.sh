@@ -88,6 +88,30 @@ if docker ps -a --format '{{.Names}}' | grep -qx "$NAME"; then
   docker rm -f "$NAME" >/dev/null 2>&1 || true
 fi
 
+# Ensure dashboard image exists (build from repo if possible)
+if ! docker image inspect blobevm-dashboard:latest >/dev/null 2>&1; then
+  echo "Building blobevm-dashboard:latest image..."
+  if [[ -n "${REPO_DIR:-}" && -f "${REPO_DIR}/dashboard/Dockerfile" ]]; then
+    docker build -t blobevm-dashboard:latest "${REPO_DIR}/dashboard" || true
+  elif [[ -f "/opt/blobe-vm/dashboard/Dockerfile" ]]; then
+    docker build -t blobevm-dashboard:latest "/opt/blobe-vm/dashboard" || true
+  else
+    # Last resort: build minimal image from this script's location
+    tmpdir=$(mktemp -d)
+    cp -f "$APP_PATH" "$tmpdir/app.py" || true
+    cat > "$tmpdir/Dockerfile" <<'DOCK'
+FROM python:3.11-slim
+RUN apt-get update && apt-get install -y --no-install-recommends libjpeg-dev zlib1g-dev && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir flask Pillow
+WORKDIR /app
+COPY app.py /app/app.py
+CMD ["python", "/app/app.py"]
+DOCK
+    docker build -t blobevm-dashboard:latest "$tmpdir" || true
+    rm -rf "$tmpdir"
+  fi
+fi
+
 docker run -d --name "$NAME" --restart unless-stopped \
   -p "${DASHBOARD_PORT}:5000" \
   -v "$STATE_DIR:/opt/blobe-vm" \
@@ -98,8 +122,7 @@ docker run -d --name "$NAME" --restart unless-stopped \
   -e BLOBEDASH_USER="${BLOBEDASH_USER:-}" \
   -e BLOBEDASH_PASS="${BLOBEDASH_PASS:-}" \
   -e HOST_DOCKER_BIN="${HOST_DOCKER_BIN}" \
-  python:3.11-slim \
-    bash -c "apt-get update && apt-get install -y curl jq && pip install --no-cache-dir flask && python /app/app.py" \
+  blobevm-dashboard:latest \
   >/dev/null
 
 echo "Dashboard: http://$(hostname -I | awk '{print $1}'):${DASHBOARD_PORT}/dashboard"
