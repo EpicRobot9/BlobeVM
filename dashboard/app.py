@@ -1229,13 +1229,8 @@ def api_test_backend(name):
         return jsonify({'ok': False, 'error': 'backend port not found or VM not started'}), 400
     # compute path
     path = f"{base_path}/{name}/"
-    # Use the public/request host rather than loopback so checks reflect real access path
-    host = _request_host() or _read_env().get('PUBLIC_HOST') or ''
-    if not host:
-        try:
-            host = socket.gethostbyname(socket.gethostname())
-        except Exception:
-            host = ''
+    # Use the resolved public host (skips Docker internal IPs)
+    host = _resolve_public_host()
     if not host:
         return jsonify({'ok': False, 'error': 'Unable to determine host to test against', 'url': ''}), 400
     url = f"http://{host}:{port}{path}"
