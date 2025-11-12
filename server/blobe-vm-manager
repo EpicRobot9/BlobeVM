@@ -1196,25 +1196,10 @@ YAML
       local pfx; pfx="$(get_meta "$n" cf_path || true)"
       [[ -z "$pfx" ]] && pfx="/vm/${n}"
       [[ "$pfx" != /* ]] && pfx="/$pfx"
-      # Determine an explicit loopback backend for reliability.
-      # - Direct (NO_TRAEFIK=1): use per-instance host_port metadata (assign if missing)
-      # - Traefik mode: forward to Traefik HTTP port on localhost (HTTP_PORT, default 80)
-      local target_port=""
-      if [[ "${NO_TRAEFIK:-0}" -eq 1 ]]; then
-        target_port="$(get_meta "$n" host_port || true)"
-        if [[ -z "$target_port" ]]; then
-          # Try to assign a port if one isn't persisted yet
-          target_port="$(find_free_port "${DIRECT_PORT_START}" 1000 || true)"
-          [[ -n "$target_port" ]] && set_meta "$n" host_port "$target_port"
-        fi
-      else
-        target_port="${HTTP_PORT:-80}"
-      fi
-      if [[ -z "$target_port" ]]; then
-        # fallback to 3000 (container internal) if no port could be determined
-        target_port=3000
-      fi
-  local target="http://${server_host}:${target_port}"
+      # In merged single-host mode route to the server HTTP port so paths like
+      # <tunnel-host>/vm/<name> are handled by the local reverse-proxy (Traefik).
+      local target_port="${HTTP_PORT:-80}"
+      local target="http://${server_host}:${target_port}"
       # cloudflared will route requests for hostname+path to this backend; path is preserved by ingress
       cat >> "$cfg_file" <<YAML
   - hostname: ${merge_host}
@@ -1240,27 +1225,9 @@ cmd_cf_merge_add() {
   # Validate backend is reachable before adding merged rule
   local pfx="$path_prefix"
   [[ "$pfx" != /* ]] && pfx="/$pfx"
-  # Determine backend port similarly to regenerate_cf_merged_config
-  local target_port=""
-  if [[ "${NO_TRAEFIK:-0}" -eq 1 ]]; then
-    # Try persisted host_port first
-    target_port="$(get_meta "$name" host_port || true)"
-    if [[ -z "$target_port" ]]; then
-      # If container exists, try docker port mapping
-      local cname
-      cname="$(container_name "$name")"
-      if docker ps -a --format '{{.Names}}' | grep -qx "$cname"; then
-        target_port="$(docker port "$cname" 3000 2>/dev/null | sed -n 's/.*:\([0-9]\+\)$/\1/p' || true)"
-        if [[ -n "$target_port" ]]; then set_meta "$name" host_port "$target_port"; fi
-      fi
-    fi
-  else
-    target_port="${HTTP_PORT:-80}"
-  fi
-  if [[ -z "$target_port" ]]; then
-    echo "Unable to determine backend port for '$name'. Start the VM or ensure a port is assigned before adding merged mapping." >&2
-    exit 1
-  fi
+  # In merged single-host mode route to the server HTTP port so paths like
+  # <tunnel-host>/vm/<name> are handled by the local reverse-proxy (Traefik).
+  local target_port="${HTTP_PORT:-80}"
   # Test backend using server/public host (not loopback or Docker IP)
   local test_url
   # Ensure trailing slash on path
