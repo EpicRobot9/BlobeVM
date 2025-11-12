@@ -67,28 +67,6 @@ resolve_public_host() {
     echo "$PUBLIC_HOST"
     return 0
   fi
-  # Provide clear instructions if automatic DNS creation was not possible/succeeded
-  local server_host
-  server_host="$(resolve_public_host)"
-  if [[ -z "${CF_API_TOKEN:-}" ]]; then
-    echo "Note: CF_API_TOKEN not set — automatic DNS creation was skipped."
-    if [[ -n "${tunnel_cname:-}" ]]; then
-      echo "Please create a CNAME record: ${tunnel_host} -> ${tunnel_cname}"
-    else
-      echo "Please point your DNS (A record) for ${tunnel_host} to this server's public IP: ${server_host}"
-    fi
-  else
-    if [[ -z "${tunnel_cname:-}" || "${create_ok:-0}" != "1" ]]; then
-      echo "Automatic DNS creation failed or could not determine tunnel target."
-      if [[ -n "${tunnel_cname:-}" ]]; then
-        echo "Please manually create a CNAME record: ${tunnel_host} -> ${tunnel_cname}"
-      else
-        echo "Please point your DNS (A record) for ${tunnel_host} to this server's public IP: ${server_host}"
-      fi
-    else
-      echo "DNS should be configured for ${tunnel_host} -> ${tunnel_cname}" >/dev/null
-    fi
-  fi
   # Try to get first non-Docker IP
   if command -v hostname >/dev/null 2>&1; then
     local ips
