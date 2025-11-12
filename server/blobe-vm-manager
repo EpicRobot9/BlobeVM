@@ -1182,9 +1182,15 @@ regenerate_cf_merged_config() {
     echo "No merged tunnel host configured (BLOBEVM_DOMAIN or cf_tunnel_host required)." >&2
     return 1
   fi
+  # Determine server/public host to use for backend targets. Prefer explicit PUBLIC_HOST env,
+  # otherwise fallback to the primary IP address from hostname -I.
+  local server_host
+  server_host="${PUBLIC_HOST:-$(hostname -I | awk '{print $1}' 2>/dev/null)}"
+  # If server_host empty, fall back to localhost as last resort
+  [[ -z "$server_host" ]] && server_host="127.0.0.1"
   # Start YAML
   cat > "$cfg_file" <<YAML
-proxy_address: 127.0.0.1
+proxy_address: ${server_host}
 ingress:
 YAML
   # Append ingress entries
@@ -1214,7 +1220,7 @@ YAML
         # fallback to 3000 (container internal) if no port could be determined
         target_port=3000
       fi
-      local target="http://127.0.0.1:${target_port}"
+  local target="http://${server_host}:${target_port}"
       # cloudflared will route requests for hostname+path to this backend; path is preserved by ingress
       cat >> "$cfg_file" <<YAML
   - hostname: ${merge_host}
@@ -1261,11 +1267,14 @@ cmd_cf_merge_add() {
     echo "Unable to determine backend port for '$name'. Start the VM or ensure a port is assigned before adding merged mapping." >&2
     exit 1
   fi
-  # Test backend
+  # Test backend using server/public host (not loopback)
   local test_url
   # Ensure trailing slash on path
   [[ "$pfx" != */ ]] && pfx="$pfx/"
-  test_url="http://127.0.0.1:${target_port}${pfx}"
+  local server_host
+  server_host="${PUBLIC_HOST:-$(hostname -I | awk '{print $1}' 2>/dev/null)}"
+  [[ -z "$server_host" ]] && server_host="127.0.0.1"
+  test_url="http://${server_host}:${target_port}${pfx}"
   echo "Checking backend at ${test_url} ..."
   if command -v curl >/dev/null 2>&1; then
     code=$(curl -sS -m 5 -L -o /dev/null -w '%{http_code}' "$test_url" || echo "000")
@@ -1448,6 +1457,12 @@ cmd_tunnel_create() {
   if [[ -z "$backend_port" ]]; then
     backend_port="${HTTP_PORT:-80}"
   fi
+  # Determine server/public host to use for runtime --url targets
+  local server_host
+  server_host="${PUBLIC_HOST:-$(hostname -I | awk '{print $1}' 2>/dev/null)}"
+  [[ -z "$server_host" ]] && server_host="127.0.0.1"
+  # Persist public-facing service URL so the dashboard can show it
+  set_meta "$name" cf_service_url "http://${server_host}:${backend_port}/"
   # Register DNS route (requires cloudflared binary or docker)
   if [[ -n "$host" ]]; then
     # Attempt to create DNS route and capture output for error reporting
@@ -1546,7 +1561,7 @@ PY
   if use_systemd; then
     # Create a simple systemd service that runs the tunnel
     local svc_path="/etc/systemd/system/${svc_name}.service"
-    local exec_cmd="/usr/local/bin/cloudflared tunnel --no-autoupdate run --url 'http://127.0.0.1:${backend_port}' '${tname}'"
+    local exec_cmd="/usr/local/bin/cloudflared tunnel --no-autoupdate run --url 'http://${server_host}:${backend_port}' '${tname}'"
     cat > "$svc_path" <<EOF
 [Unit]
 Description=Cloudflared tunnel for BlobeVM instance ${name}
@@ -1582,7 +1597,7 @@ EOF
     docker rm -f "$svc_name" >/dev/null 2>&1 || true
     local drun
     drun=$(docker run -d --name "$svc_name" --net host --restart unless-stopped -v "$CF_STATE_DIR":/etc/cloudflared:ro \
-      cloudflare/cloudflared:latest tunnel --no-autoupdate run --url "http://127.0.0.1:${backend_port}" "${tname}" 2>&1) || true
+      cloudflare/cloudflared:latest tunnel --no-autoupdate run --url "http://${server_host}:${backend_port}" "${tname}" 2>&1) || true
     if [[ "$drun" =~ ^[0-9a-fA-F]+$ ]]; then
       set_meta "$name" tunnel_status "active"
       set_meta "$name" tunnel_runtime_error ""

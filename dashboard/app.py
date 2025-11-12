@@ -171,11 +171,15 @@ async function load(){
                  // Build tunnel cell content with any errors
                  let tunnelCell = '';
                  if(i.tunnel){
-                     if(i.tunnel.tunnel_status) tunnelCell += `<div style=\"margin-bottom:.25rem\">${i.tunnel.tunnel_status}</div>`;
-                     if(i.tunnel.cf_tunnel_host) tunnelCell += `<div><a href=\"https://${i.tunnel.cf_tunnel_host}\" target=\"_blank\">https://${i.tunnel.cf_tunnel_host}</a></div>`;
-                     if(i.tunnel.tunnel_route_error) tunnelCell += `<div style=\"color:#fca5a5;margin-top:.25rem\">DNS error: ${i.tunnel.tunnel_route_error}</div>`;
-                     if(i.tunnel.tunnel_runtime_error) tunnelCell += `<div style=\"color:#fca5a5;margin-top:.25rem\">Runtime error: ${i.tunnel.tunnel_runtime_error}</div>`;
-                     tunnelCell += `<div style=\"margin-top:.25rem\"><button onclick=\"tunnelRecreate('${i.name}')\">Regenerate Tunnel</button> <button class=\"btn-gray\" onclick=\"tunnelDelete('${i.name}')\">Delete</button></div>`;
+                    if(i.tunnel.tunnel_status) tunnelCell += `<div style=\"margin-bottom:.25rem\">${i.tunnel.tunnel_status}</div>`;
+                    if(i.tunnel.cf_tunnel_host) tunnelCell += `<div><a href=\"https://${i.tunnel.cf_tunnel_host}\" target=\"_blank\">https://${i.tunnel.cf_tunnel_host}</a></div>`;
+                    // Show public service URL (if available) so users can access directly
+                    if(i.tunnel.cf_service_url) tunnelCell += `<div><a href=\"${i.tunnel.cf_service_url}\" target=\"_blank\">${i.tunnel.cf_service_url}</a></div>`;
+                    if(i.tunnel.tunnel_route_error) tunnelCell += `<div style=\"color:#fca5a5;margin-top:.25rem\">DNS error: ${i.tunnel.tunnel_route_error}</div>`;
+                    if(i.tunnel.tunnel_runtime_error) tunnelCell += `<div style=\"color:#fca5a5;margin-top:.25rem\">Runtime error: ${i.tunnel.tunnel_runtime_error}</div>`;
+                    tunnelCell += `<div style=\"margin-top:.25rem\"><button onclick=\"tunnelRecreate('${i.name}')\">Regenerate Tunnel</button> <button class=\"btn-gray\" onclick=\"tunnelDelete('${i.name}')\">Delete</button></div>`;
+                    // CLI hint for manual tunnel creation via manager
+                    tunnelCell += `<div style=\"margin-top:.25rem;font-size:.85rem;color:#cbd5e1\">CLI: blobe-vm-manager tunnel-create ${i.name}</div>`;
                  } else {
                      tunnelCell = `<button onclick=\"tunnelCreate('${i.name}')\">Create Tunnel</button>`;
                  }
@@ -765,7 +769,7 @@ def manager_json_list():
                         if os.path.isfile(mf):
                             jd = json.load(open(mf))
                             tunnel = {}
-                            for k in ('tunnel_id', 'tunnel_name', 'tunnel_status', 'cf_tunnel_host', 'cf_exposed'):
+                            for k in ('tunnel_id', 'tunnel_name', 'tunnel_status', 'cf_tunnel_host', 'cf_exposed', 'cf_service_url'):
                                 if k in jd:
                                     tunnel[k] = jd.get(k)
                             if tunnel:
@@ -846,7 +850,7 @@ def manager_json_list():
                 if os.path.isfile(mf):
                     jd = json.load(open(mf))
                     tunnel = {}
-                    for k in ('tunnel_id', 'tunnel_name', 'tunnel_status', 'cf_tunnel_host', 'cf_exposed'):
+                    for k in ('tunnel_id', 'tunnel_name', 'tunnel_status', 'cf_tunnel_host', 'cf_exposed', 'cf_service_url'):
                         if k in jd:
                             tunnel[k] = jd.get(k)
                     if tunnel:
@@ -968,7 +972,14 @@ def api_set_cftunnel():
             # otherwise fall back to 80. This prevents cloudflared from pointing to
             # the wrong port when traefik/dashboard run on a non-80 host port.
             http_port = _read_env().get('HTTP_PORT', '80') or '80'
-            target_url = f'http://127.0.0.1:{http_port}'
+            # Prefer an explicit PUBLIC_HOST env if set, otherwise use the host the browser used to reach the dashboard
+            host = _read_env().get('PUBLIC_HOST') or _request_host() or ''
+            if not host:
+                try:
+                    host = socket.gethostbyname(socket.gethostname())
+                except Exception:
+                    host = '127.0.0.1'
+            target_url = f'http://{host}:{http_port}'
             _docker('run', '-d', '--name', 'cloudflared', '--net', 'host', '--restart', 'unless-stopped',
                     'cloudflare/cloudflared:latest', 'tunnel', '--no-autoupdate', 'run', '--token', t, '--url', target_url)
         except Exception:
@@ -1201,7 +1212,16 @@ def api_test_backend(name):
         return jsonify({'ok': False, 'error': 'backend port not found or VM not started'}), 400
     # compute path
     path = f"{base_path}/{name}/"
-    url = f"http://127.0.0.1:{port}{path}"
+    # Use the public/request host rather than loopback so checks reflect real access path
+    host = _request_host() or _read_env().get('PUBLIC_HOST') or ''
+    if not host:
+        try:
+            host = socket.gethostbyname(socket.gethostname())
+        except Exception:
+            host = ''
+    if not host:
+        return jsonify({'ok': False, 'error': 'Unable to determine host to test against', 'url': ''}), 400
+    url = f"http://{host}:{port}{path}"
     # perform request
     try:
         req = urlrequest.Request(url, headers={'User-Agent': 'BlobeVM-Dashboard/1.0'})
