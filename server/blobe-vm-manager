@@ -1196,10 +1196,25 @@ YAML
       local pfx; pfx="$(get_meta "$n" cf_path || true)"
       [[ -z "$pfx" ]] && pfx="/vm/${n}"
       [[ "$pfx" != /* ]] && pfx="/$pfx"
-      # In merged single-host mode route to the server HTTP port so paths like
-      # <tunnel-host>/vm/<name> are handled by the local reverse-proxy (Traefik).
-      local target_port="${HTTP_PORT:-80}"
-      local target="http://${server_host}:${target_port}"
+      # Determine an explicit loopback backend for reliability.
+      # - Direct (NO_TRAEFIK=1): use per-instance host_port metadata (assign if missing)
+      # - Traefik mode: forward to Traefik HTTP port on localhost (HTTP_PORT, default 80)
+      local target_port=""
+      if [[ "${NO_TRAEFIK:-0}" -eq 1 ]]; then
+        target_port="$(get_meta "$n" host_port || true)"
+        if [[ -z "$target_port" ]]; then
+          # Try to assign a port if one isn't persisted yet
+          target_port="$(find_free_port "${DIRECT_PORT_START}" 1000 || true)"
+          [[ -n "$target_port" ]] && set_meta "$n" host_port "$target_port"
+        fi
+      else
+        target_port="${HTTP_PORT:-80}"
+      fi
+      if [[ -z "$target_port" ]]; then
+        # fallback to 3000 (container internal) if no port could be determined
+        target_port=3000
+      fi
+  local target="http://${server_host}:${target_port}"
       # cloudflared will route requests for hostname+path to this backend; path is preserved by ingress
       cat >> "$cfg_file" <<YAML
   - hostname: ${merge_host}
@@ -1225,9 +1240,27 @@ cmd_cf_merge_add() {
   # Validate backend is reachable before adding merged rule
   local pfx="$path_prefix"
   [[ "$pfx" != /* ]] && pfx="/$pfx"
-  # In merged single-host mode route to the server HTTP port so paths like
-  # <tunnel-host>/vm/<name> are handled by the local reverse-proxy (Traefik).
-  local target_port="${HTTP_PORT:-80}"
+  # Determine backend port similarly to regenerate_cf_merged_config
+  local target_port=""
+  if [[ "${NO_TRAEFIK:-0}" -eq 1 ]]; then
+    # Try persisted host_port first
+    target_port="$(get_meta "$name" host_port || true)"
+    if [[ -z "$target_port" ]]; then
+      # If container exists, try docker port mapping
+      local cname
+      cname="$(container_name "$name")"
+      if docker ps -a --format '{{.Names}}' | grep -qx "$cname"; then
+        target_port="$(docker port "$cname" 3000 2>/dev/null | sed -n 's/.*:\([0-9]\+\)$/\1/p' || true)"
+        if [[ -n "$target_port" ]]; then set_meta "$name" host_port "$target_port"; fi
+      fi
+    fi
+  else
+    target_port="${HTTP_PORT:-80}"
+  fi
+  if [[ -z "$target_port" ]]; then
+    echo "Unable to determine backend port for '$name'. Start the VM or ensure a port is assigned before adding merged mapping." >&2
+    exit 1
+  fi
   # Test backend using server/public host (not loopback or Docker IP)
   local test_url
   # Ensure trailing slash on path
@@ -1261,28 +1294,6 @@ PY
   set_meta "$name" cf_tunnel_host "$tunnel_host"
   set_meta "$name" cf_tunnel_name "$tunnel_name"
   regenerate_cf_merged_config || { echo "Failed to write merged config." >&2; exit 1; }
-  # Ensure merged tunnel credentials exist for the requested tunnel name; create if missing
-  ensure_cloudflared_state_dir
-  local merged_cred_file="$CF_STATE_DIR/${tunnel_name}.json"
-  if [[ ! -f "$merged_cred_file" ]]; then
-    echo "Merged tunnel credentials for '${tunnel_name}' not found; attempting to create tunnel..."
-    if command -v cloudflared >/dev/null 2>&1; then
-      (cd "$CF_STATE_DIR" && cloudflared tunnel create "$tunnel_name") || { echo "Failed to create merged tunnel credentials via cloudflared" >&2; }
-    elif command -v docker >/dev/null 2>&1; then
-      docker run --rm -v "$CF_STATE_DIR":/etc/cloudflared -w /etc/cloudflared cloudflare/cloudflared:latest tunnel create "$tunnel_name" || \
-        { echo "Failed to create merged tunnel credentials via docker cloudflared" >&2; }
-    else
-      echo "Warning: cloudflared binary or docker not available; cannot create merged tunnel credentials automatically." >&2
-    fi
-    # refresh merged_cred_file path (in case cloudflared created a differently-named file)
-    merged_cred_file=$(ls -t "$CF_STATE_DIR"/*.json 2>/dev/null | grep -E "/${tunnel_name}(.json)?$" >/dev/null 2>&1 && echo "$CF_STATE_DIR/${tunnel_name}.json" || ls -t "$CF_STATE_DIR"/*.json 2>/dev/null | head -n1 || true)
-    if [[ -n "$merged_cred_file" && -f "$merged_cred_file" ]]; then
-      echo "Merged tunnel credentials created: $merged_cred_file"
-      chmod 600 "$merged_cred_file" || true
-    else
-      echo "Warning: merged tunnel credentials not found after create attempt; merged tunnel may fail to start." >&2
-    fi
-  fi
   # Ensure central service: prefer systemd, otherwise run docker container reading config from $CF_STATE_DIR
   local cfg_file="/etc/cloudflared/blobevm.yml"
   if use_systemd; then
@@ -1318,64 +1329,6 @@ EOF
     docker run -d --name "$cname" --net host --restart unless-stopped -v "$CF_STATE_DIR":/etc/cloudflared:ro \
       cloudflare/cloudflared:latest tunnel --config /etc/cloudflared/blobevm.yml run "$tunnel_name" >/dev/null 2>&1 || { echo "Failed to start merged cloudflared container" >&2; exit 1; }
     echo "Merged cloudflared container started for host ${tunnel_host}. Paths registered for instance '$name'."
-  fi
-
-  # Attempt to create DNS record for the merged tunnel host (best-effort) using CF_API_TOKEN
-  if [[ -n "${CF_API_TOKEN:-}" && -n "${tunnel_host:-}" ]]; then
-    # Try to obtain the tunnel's CF DNS cname from cloudflared list
-    local list_json=""
-    if command -v cloudflared >/dev/null 2>&1; then
-      list_json=$(cd "$CF_STATE_DIR" && cloudflared tunnel list --output json 2>/dev/null || true)
-    elif command -v docker >/dev/null 2>&1; then
-      list_json=$(docker run --rm -v "$CF_STATE_DIR":/etc/cloudflared -w /etc/cloudflared cloudflare/cloudflared:latest tunnel list --output json 2>/dev/null || true)
-    fi
-    local tunnel_cname=""
-    if [[ -n "$list_json" ]]; then
-      tunnel_cname=$(printf "%s" "$list_json" | python3 - <<PY 2>/dev/null
-import sys, json
-try:
-    data=json.load(sys.stdin)
-    for x in data:
-        if x.get('name') == '${tunnel_name}':
-            cfdns = x.get('cfdns') or {}
-            if isinstance(cfdns, dict):
-                print(cfdns.get('cname') or '')
-            elif isinstance(cfdns, list) and len(cfdns) > 0:
-                print(cfdns[0].get('cname',''))
-            else:
-                print('')
-            break
-except Exception:
-    pass
-PY
-)
-    fi
-    if [[ -n "$tunnel_cname" ]]; then
-      # Determine zone to use for DNS record
-      local zone_name="${BLOBEVM_DOMAIN:-}"
-      if [[ -z "$zone_name" ]]; then
-        zone_name=$(echo "$tunnel_host" | awk -F. '{print $(NF-1)"."$NF}')
-      fi
-      if [[ -n "$zone_name" ]]; then
-        local zone_api_out
-        zone_api_out=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=${zone_name}&status=active" -H "Authorization: Bearer ${CF_API_TOKEN}" -H "Content-Type: application/json") || true
-        local zone_id
-        zone_id=$(printf "%s" "$zone_api_out" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('result',[{}])[0].get('id',''))" 2>/dev/null || true)
-        if [[ -n "$zone_id" ]]; then
-          local create_out
-          create_out=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${zone_id}/dns_records" -H "Authorization: Bearer ${CF_API_TOKEN}" -H "Content-Type: application/json" --data '{"type":"CNAME","name":"'"$tunnel_host"'","content":"'"$tunnel_cname"'","ttl":120,"proxied":true}') || true
-          local create_ok
-          create_ok=$(printf "%s" "$create_out" | python3 -c "import sys,json; d=json.load(sys.stdin); print('1' if d.get('success') else '0')" 2>/dev/null || true)
-          if [[ "$create_ok" == "1" ]]; then
-            echo "Created DNS CNAME ${tunnel_host} -> ${tunnel_cname}"
-          else
-            echo "Warning: failed to create DNS record for ${tunnel_host}: ${create_out}" >&2
-          fi
-        else
-          echo "Warning: unable to find zone id for ${zone_name}; not creating DNS record for ${tunnel_host}" >&2
-        fi
-      fi
-    fi
   fi
 }
 

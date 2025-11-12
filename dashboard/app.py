@@ -38,8 +38,24 @@ TEMPLATE = r"""
         <span class="muted" style="margin-left: .5rem">Shift+Click Check for report-only (no auto-fix)</span>
     </div>
 <div style="margin:1.5rem 0 .5rem 0">
+    <span class=badge>Public IP Dashboard:</span>
+    <input id=publicip placeholder="e.g. 72.60.29.204" style="width:220px" />
+    <input id=publicipdashport placeholder="port (e.g. 80)" style="width:80px; margin-left:.5rem" type="number" value="80" />
+    <button onclick="setPublicIP()">Set public access</button>
+    <button class="btn-gray" onclick="disablePublicIP()">Disable</button>
+    <span id=publicipstatus style="margin-left:1rem" class=muted></span>
+</div>
+<div style="margin:1.5rem 0 .5rem 0">
+    <span class=badge>Enable Merged Mode (Proxy):</span>
+    <input id=mergedport placeholder="port (e.g. 80)" style="width:80px; margin-left:.5rem" type="number" value="80" />
+    <button onclick="enableMergedMode()">Enable merged mode</button>
+    <button class="btn-gray" onclick="disableMergedMode()">Disable</button>
+    <span id=mergedstatus style="margin-left:1rem" class=muted></span>
+    <div style="font-size:.85rem;color:#888;margin-top:.25rem">Enables Traefik proxy for http://domain/vm/nameofvm access</div>
+</div>
+<div style="margin:1.5rem 0 .5rem 0">
     <span class=badge>Custom domain (merged mode):</span>
-    <input id=customdomain placeholder="e.g. vms.example.com" style="width:220px" />
+    <input id=customdomain placeholder="e.g. techexplore.us" style="width:220px" />
     <button onclick="setCustomDomain()">Set domain</button>
     <span id=domainip style="margin-left:1.5rem"></span>
 </div>
@@ -120,6 +136,13 @@ async function load(){
         dashIp = info.ip||'';
         document.getElementById('customdomain').value = customDomain;
         document.getElementById('domainip').textContent = `Point domain to: ${dashIp}`;
+        // Load public IP settings
+        if(info.publicIp) document.getElementById('publicip').value = info.publicIp;
+        if(info.publicIpPort) document.getElementById('publicipdashport').value = info.publicIpPort;
+        if(info.publicIpStatus) document.getElementById('publicipstatus').textContent = info.publicIpStatus;
+        // Load merged mode status
+        if(info.mergedPort) document.getElementById('mergedport').value = info.mergedPort;
+        if(info.mergedStatus) document.getElementById('mergedstatus').textContent = info.mergedStatus;
             // Cloudflare Tunnel info
             try {
                 const cf = info.cf_tunnel || {};
@@ -399,6 +422,54 @@ async function setCustomDomain(){
     const j = await r.json().catch(()=>({}));
     if(j && j.ip) document.getElementById('domainip').textContent = `Point domain to: ${j.ip}`;
     else alert('Saved, but could not resolve IP.');
+}
+async function setPublicIP(){
+    const ip = document.getElementById('publicip').value.trim();
+    const port = document.getElementById('publicipdashport').value.trim() || '80';
+    if(!ip) return alert('Enter the public IP address.');
+    try{
+        const r = await fetch('/dashboard/api/set-public-ip', {method:'post',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:`ip=${encodeURIComponent(ip)}&port=${encodeURIComponent(port)}`});
+        const j = await r.json().catch(()=>({}));
+        if(j && j.ok){
+            alert(`Dashboard will be accessible at http://${ip}:${port}/dashboard`);
+        }else{
+            alert('Failed to set public IP: ' + (j && (j.error||j.message) || 'unknown'));
+        }
+    }catch(e){alert('Error: '+e)}
+    setTimeout(load, 2000);
+}
+async function disablePublicIP(){
+    if(!confirm('Disable public IP access? Dashboard will revert to normal port mode.')) return;
+    try{
+        const r = await fetch('/dashboard/api/disable-public-ip',{method:'POST'});
+        const j = await r.json().catch(()=>({}));
+        if(j && j.ok) alert('Public IP access disabled.'); else alert('Failed to disable.');
+    }catch(e){alert('Error: '+e)}
+    setTimeout(load, 1000);
+}
+async function enableMergedMode(){
+    const port = document.getElementById('mergedport').value.trim() || '80';
+    const dom = document.getElementById('customdomain').value.trim();
+    if(!dom) return alert('Set the custom domain first (techexplore.us)');
+    try{
+        const r = await fetch('/dashboard/api/enable-merged-mode', {method:'post',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:`port=${encodeURIComponent(port)}&domain=${encodeURIComponent(dom)}`});
+        const j = await r.json().catch(()=>({}));
+        if(j && j.ok){
+            alert(`Merged mode enabled! VMs will be accessible at http://${dom}/vm/nameofvm`);
+        }else{
+            alert('Failed to enable merged mode: ' + (j && (j.error||j.message) || 'unknown'));
+        }
+    }catch(e){alert('Error: '+e)}
+    setTimeout(load, 2000);
+}
+async function disableMergedMode(){
+    if(!confirm('Disable merged mode? VMs will revert to direct port access.')) return;
+    try{
+        const r = await fetch('/dashboard/api/disable-merged-mode',{method:'POST'});
+        const j = await r.json().catch(()=>({}));
+        if(j && j.ok) alert('Merged mode disabled.'); else alert('Failed to disable.');
+    }catch(e){alert('Error: '+e)}
+    setTimeout(load, 1000);
 }
 function statusDot(st){
     const s=(st||'').toLowerCase();
@@ -945,8 +1016,21 @@ def api_modeinfo():
             cf_running = True
     except Exception:
         cf_running = False
+    # Public IP info
+    public_ip = env.get('PUBLIC_IP', '')
+    public_ip_port = env.get('PUBLIC_IP_PORT', '80')
+    public_ip_status = ''
+    if public_ip:
+        public_ip_status = f'Listening on http://{public_ip}:{public_ip_port}/dashboard'
+    # Merged mode info
+    merged_port = env.get('HTTP_PORT', '80')
+    merged_status = ''
+    if merged and domain:
+        merged_status = f'Merged mode enabled - VMs at http://{domain}/vm/nameofvm'
     return jsonify({'merged': merged, 'basePath': base_path, 'domain': domain, 'dashPort': dash_port, 'ip': ip, 'httpPort': http_port,
-                    'cf_tunnel': {'enabled': cf_enabled, 'domain': cf_domain, 'running': cf_running}})
+                    'cf_tunnel': {'enabled': cf_enabled, 'domain': cf_domain, 'running': cf_running},
+                    'publicIp': public_ip, 'publicIpPort': public_ip_port, 'publicIpStatus': public_ip_status,
+                    'mergedPort': merged_port, 'mergedStatus': merged_status})
 
 @app.post('/dashboard/api/set-domain')
 @auth_required
@@ -963,6 +1047,143 @@ def api_set_domain():
         except Exception:
             ip = ''
     return jsonify({'ok': True, 'domain': dom, 'ip': ip})
+
+
+@app.post('/dashboard/api/set-public-ip')
+@auth_required
+def api_set_public_ip():
+    """Configure dashboard to run on public IP at specified port (typically port 80).
+    This will recreate the dashboard container to bind to the public IP.
+    """
+    ip = request.values.get('ip', '').strip()
+    port = request.values.get('port', '80').strip()
+    if not ip:
+        return jsonify({'ok': False, 'error': 'IP address required'}), 400
+    try:
+        port = int(port)
+    except ValueError:
+        return jsonify({'ok': False, 'error': 'Invalid port'}), 400
+    
+    # Validate IP format (basic check)
+    if not all(part.isdigit() and 0 <= int(part) <= 255 for part in ip.split('.') if part):
+        return jsonify({'ok': False, 'error': 'Invalid IP address format'}), 400
+    
+    # Persist values
+    _write_env_kv({'PUBLIC_IP': ip, 'PUBLIC_IP_PORT': str(port)})
+    
+    # Restart dashboard container in background
+    def worker():
+        try:
+            _docker('rm', '-f', 'blobedash')
+            # Run dashboard bound to the public IP
+            state_dir = _state_dir()
+            _docker('run', '-d', '--name', 'blobedash', '--restart', 'unless-stopped',
+                   '-p', f'{ip}:{port}:5000',
+                   '-v', f'{state_dir}:/opt/blobe-vm',
+                   '-v', '/usr/local/bin/blobe-vm-manager:/usr/local/bin/blobe-vm-manager:ro',
+                   '-v', DOCKER_VOLUME_BIND,
+                   '-v', '/var/run/docker.sock:/var/run/docker.sock',
+                   '-v', f'{state_dir}/dashboard/app.py:/app/app.py:ro',
+                   '-e', f'BLOBEDASH_USER={os.environ.get("BLOBEDASH_USER","")}',
+                   '-e', f'BLOBEDASH_PASS={os.environ.get("BLOBEDASH_PASS","")}',
+                   '-e', f'HOST_DOCKER_BIN={HOST_DOCKER_BIN}',
+                   'python:3.11-slim',
+                   'bash', '-c', 'pip install --no-cache-dir flask && python /app/app.py')
+        except Exception as e:
+            print(f'Error setting public IP: {e}', file=__import__('sys').stderr)
+    
+    threading.Thread(target=worker, daemon=True).start()
+    return jsonify({'ok': True, 'ip': ip, 'port': port, 'message': f'Dashboard configured to listen on http://{ip}:{port}/dashboard'})
+
+
+@app.post('/dashboard/api/disable-public-ip')
+@auth_required
+def api_disable_public_ip():
+    """Disable public IP access and revert to normal dashboard port mode."""
+    _write_env_kv({'PUBLIC_IP': '', 'PUBLIC_IP_PORT': ''})
+    
+    def worker():
+        try:
+            _docker('rm', '-f', 'blobedash')
+            # Restart with normal port binding
+            state_dir = _state_dir()
+            env = _read_env()
+            dash_port = env.get('DASHBOARD_PORT', '20000') or '20000'
+            _docker('run', '-d', '--name', 'blobedash', '--restart', 'unless-stopped',
+                   '-p', f'{dash_port}:5000',
+                   '-v', f'{state_dir}:/opt/blobe-vm',
+                   '-v', '/usr/local/bin/blobe-vm-manager:/usr/local/bin/blobe-vm-manager:ro',
+                   '-v', DOCKER_VOLUME_BIND,
+                   '-v', '/var/run/docker.sock:/var/run/docker.sock',
+                   '-v', f'{state_dir}/dashboard/app.py:/app/app.py:ro',
+                   '-e', f'BLOBEDASH_USER={os.environ.get("BLOBEDASH_USER","")}',
+                   '-e', f'BLOBEDASH_PASS={os.environ.get("BLOBEDASH_PASS","")}',
+                   '-e', f'HOST_DOCKER_BIN={HOST_DOCKER_BIN}',
+                   'python:3.11-slim',
+                   'bash', '-c', 'pip install --no-cache-dir flask && python /app/app.py')
+        except Exception as e:
+            print(f'Error disabling public IP: {e}', file=__import__('sys').stderr)
+    
+    threading.Thread(target=worker, daemon=True).start()
+    return jsonify({'ok': True, 'message': 'Public IP access disabled. Dashboard reverted to normal port mode.'})
+
+
+@app.post('/dashboard/api/enable-merged-mode')
+@auth_required
+def api_enable_merged_mode():
+    """Enable merged mode (Traefik proxy) for public domain access.
+    VMs will be accessible at http://domain/vm/nameofvm
+    """
+    port = request.values.get('port', '80').strip()
+    domain = request.values.get('domain', '').strip()
+    
+    if not domain:
+        return jsonify({'ok': False, 'error': 'Domain is required'}), 400
+    
+    try:
+        port = int(port)
+    except ValueError:
+        return jsonify({'ok': False, 'error': 'Invalid port'}), 400
+    
+    # Persist settings
+    _write_env_kv({
+        'NO_TRAEFIK': '0',
+        'BLOBEVM_DOMAIN': domain,
+        'HTTP_PORT': str(port),
+        'MERGED_MODE': '1',
+        'BASE_PATH': '/vm'
+    })
+    
+    # Enable single-port mode using the existing function
+    def worker():
+        try:
+            _enable_single_port(port)
+        except Exception as e:
+            print(f'Error enabling merged mode: {e}', file=__import__('sys').stderr)
+    
+    threading.Thread(target=worker, daemon=True).start()
+    return jsonify({'ok': True, 'domain': domain, 'port': port, 'message': f'Merged mode enabled! VMs will be accessible at http://{domain}/vm/nameofvm'})
+
+
+@app.post('/dashboard/api/disable-merged-mode')
+@auth_required
+def api_disable_merged_mode():
+    """Disable merged mode and revert to direct port access."""
+    _write_env_kv({
+        'NO_TRAEFIK': '1',
+        'MERGED_MODE': '0'
+    })
+    
+    def worker():
+        try:
+            _disable_single_port(None)
+        except Exception as e:
+            print(f'Error disabling merged mode: {e}', file=__import__('sys').stderr)
+    
+    threading.Thread(target=worker, daemon=True).start()
+    return jsonify({'ok': True, 'message': 'Merged mode disabled. VMs reverted to direct port access.'})
+
+
 
 
 @app.post('/dashboard/api/set-cftunnel')
