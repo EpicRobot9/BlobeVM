@@ -333,10 +333,24 @@ function bulkDeleteAll(){
 async function setCustomDomain(){
     const dom = document.getElementById('customdomain').value.trim();
     if(!dom) return alert('Enter a domain.');
-    const r = await fetch('/dashboard/api/set-domain', {method:'post',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:`domain=${encodeURIComponent(dom)}`});
-    const j = await r.json().catch(()=>({}));
-    if(j && j.ip) document.getElementById('domainip').textContent = `Point domain to: ${j.ip}`;
-    else alert('Saved, but could not resolve IP.');
+    try {
+        const r = await fetch('/dashboard/api/set-domain', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {'Content-Type':'application/x-www-form-urlencoded', 'Accept': 'application/json'},
+            body: `domain=${encodeURIComponent(dom)}`
+        });
+        if (!r.ok) {
+            const j = await r.json().catch(()=>({}));
+            alert(j.error || `Failed to set domain: ${r.status}`);
+            return;
+        }
+        const j = await r.json().catch(()=>({}));
+        if (j && j.ip) document.getElementById('domainip').textContent = `Point domain to: ${j.ip}`;
+        else alert('Saved, but could not resolve IP.');
+    } catch (err) {
+        alert('Error setting domain: ' + err);
+    }
 }
 function statusDot(st){
     const s=(st||'').toLowerCase();
