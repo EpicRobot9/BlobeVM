@@ -67,6 +67,28 @@ resolve_public_host() {
     echo "$PUBLIC_HOST"
     return 0
   fi
+  # Provide clear instructions if automatic DNS creation was not possible/succeeded
+  local server_host
+  server_host="$(resolve_public_host)"
+  if [[ -z "${CF_API_TOKEN:-}" ]]; then
+    echo "Note: CF_API_TOKEN not set — automatic DNS creation was skipped."
+    if [[ -n "${tunnel_cname:-}" ]]; then
+      echo "Please create a CNAME record: ${tunnel_host} -> ${tunnel_cname}"
+    else
+      echo "Please point your DNS (A record) for ${tunnel_host} to this server's public IP: ${server_host}"
+    fi
+  else
+    if [[ -z "${tunnel_cname:-}" || "${create_ok:-0}" != "1" ]]; then
+      echo "Automatic DNS creation failed or could not determine tunnel target."
+      if [[ -n "${tunnel_cname:-}" ]]; then
+        echo "Please manually create a CNAME record: ${tunnel_host} -> ${tunnel_cname}"
+      else
+        echo "Please point your DNS (A record) for ${tunnel_host} to this server's public IP: ${server_host}"
+      fi
+    else
+      echo "DNS should be configured for ${tunnel_host} -> ${tunnel_cname}" >/dev/null
+    fi
+  fi
   # Try to get first non-Docker IP
   if command -v hostname >/dev/null 2>&1; then
     local ips
@@ -1261,6 +1283,28 @@ PY
   set_meta "$name" cf_tunnel_host "$tunnel_host"
   set_meta "$name" cf_tunnel_name "$tunnel_name"
   regenerate_cf_merged_config || { echo "Failed to write merged config." >&2; exit 1; }
+  # Ensure merged tunnel credentials exist for the requested tunnel name; create if missing
+  ensure_cloudflared_state_dir
+  local merged_cred_file="$CF_STATE_DIR/${tunnel_name}.json"
+  if [[ ! -f "$merged_cred_file" ]]; then
+    echo "Merged tunnel credentials for '${tunnel_name}' not found; attempting to create tunnel..."
+    if command -v cloudflared >/dev/null 2>&1; then
+      (cd "$CF_STATE_DIR" && cloudflared tunnel create "$tunnel_name") || { echo "Failed to create merged tunnel credentials via cloudflared" >&2; }
+    elif command -v docker >/dev/null 2>&1; then
+      docker run --rm -v "$CF_STATE_DIR":/etc/cloudflared -w /etc/cloudflared cloudflare/cloudflared:latest tunnel create "$tunnel_name" || \
+        { echo "Failed to create merged tunnel credentials via docker cloudflared" >&2; }
+    else
+      echo "Warning: cloudflared binary or docker not available; cannot create merged tunnel credentials automatically." >&2
+    fi
+    # refresh merged_cred_file path (in case cloudflared created a differently-named file)
+    merged_cred_file=$(ls -t "$CF_STATE_DIR"/*.json 2>/dev/null | grep -E "/${tunnel_name}(.json)?$" >/dev/null 2>&1 && echo "$CF_STATE_DIR/${tunnel_name}.json" || ls -t "$CF_STATE_DIR"/*.json 2>/dev/null | head -n1 || true)
+    if [[ -n "$merged_cred_file" && -f "$merged_cred_file" ]]; then
+      echo "Merged tunnel credentials created: $merged_cred_file"
+      chmod 600 "$merged_cred_file" || true
+    else
+      echo "Warning: merged tunnel credentials not found after create attempt; merged tunnel may fail to start." >&2
+    fi
+  fi
   # Ensure central service: prefer systemd, otherwise run docker container reading config from $CF_STATE_DIR
   local cfg_file="/etc/cloudflared/blobevm.yml"
   if use_systemd; then
