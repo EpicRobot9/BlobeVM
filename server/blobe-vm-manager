@@ -119,6 +119,9 @@ Commands:
   app-status <name> <app>    # check if an app binary exists in VM
   app-uninstall <name> <app> # uninstall/remove an app from the VM
   app-reinstall <name> <app> # uninstall then install the app
+  optimize <name|all>         # run optimization routines for VM(s)
+  stats <name|all>           # print optimization stats JSON for a VM or all
+  health-check <name>        # quick health JSON for a VM
 USAGE
   exit 1
 }
@@ -1147,6 +1150,28 @@ main() {
   app-status) cmd_app_status "$@" ;;
   app-uninstall) cmd_app_uninstall "$@" ;;
   app-reinstall) cmd_app_reinstall "$@" ;;
+  optimize) 
+    # Proxy to Python optimizer if available
+    if [[ -f "$STATE_DIR/server/blobe-optimize.py" ]]; then
+      python3 "$STATE_DIR/server/blobe-optimize.py" optimize "$@" || exit $?
+    else
+      echo "Optimizer not installed." >&2; exit 2
+    fi
+    ;;
+  stats)
+    if [[ -f "$STATE_DIR/server/blobe-optimize.py" ]]; then
+      python3 "$STATE_DIR/server/blobe-optimize.py" stats "$@" || exit $?
+    else
+      echo "Optimizer not installed." >&2; exit 2
+    fi
+    ;;
+  health-check)
+    if [[ -f "$STATE_DIR/server/blobe-optimize.py" ]]; then
+      python3 "$STATE_DIR/server/blobe-optimize.py" health-check "$@" || exit $?
+    else
+      echo "Optimizer not installed." >&2; exit 2
+    fi
+    ;;
     *) usage ;;
   esac
 }

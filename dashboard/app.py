@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
 import os, json, subprocess, shlex, base64, socket, threading, time
+from pathlib import Path
+try:
+    # import local optimizer module
+    from dashboard.optimize import Optimizer
+except Exception:
+    # fallback: optimizer may not be present in all deploys
+    Optimizer = None
 from urllib import request as urlrequest, error as urlerror
 from functools import wraps
 from flask import Flask, jsonify, request, abort, send_from_directory, render_template_string, Response
@@ -15,6 +22,7 @@ TEMPLATE = r"""
 </head><body>
 <h1>BlobeVM Dashboard</h1>
 <div id=errbox style="display:none;background:#7f1d1d;color:#fff;padding:.5rem .75rem;border-radius:4px;margin:.5rem 0"></div>
+<div id=toast-container aria-live="polite" style="position:fixed;top:1rem;right:1rem;z-index:9999"></div>
 <form method=post action="/dashboard/api/create" onsubmit="return createVM(event)">
 <input name=name placeholder="name" required pattern="[a-zA-Z0-9-]+" />
 <button type=submit>Create</button>
@@ -28,7 +36,8 @@ TEMPLATE = r"""
 <input id=dashport placeholder="direct dash port (optional)" style="width:260px" />
 <button class="btn-gray" onclick="disableSinglePort()">Disable single-port (direct mode)</button>
 </div>
-<table><thead><tr><th>Name</th><th>Status</th><th>Port/Path</th><th>URL</th><th>Actions</th></tr></thead><tbody id=tbody></tbody></table>
+<table><thead><tr><th>Name</th><th>Status</th><th>Health</th><th>Port/Path</th><th>URL</th><th>Actions</th><th>Optimize</th></tr></thead><tbody id=tbody></tbody></table>
+<style>.health-badge{display:inline-block;padding:.15rem .4rem;border-radius:4px;margin-left:.4rem;font-size:.75rem}.opt-logs{max-height:240px;overflow:auto;background:#0b1220;padding:.5rem;border-radius:6px;border:1px solid #222;margin-top:.5rem}</style>
 <div style="margin:1rem 0 2rem 0">
         <button onclick="bulkRecreate()">Recreate ALL VMs</button>
         <button onclick="bulkRebuildAll()">Rebuild ALL VMs</button>
@@ -53,6 +62,113 @@ window.addEventListener('unhandledrejection', (e) => console.error('[BLOBEDASH] 
 let mergedMode = false, basePath = '/vm', customDomain = '', dashPort = '', dashIp = '';
 let vms = [];
 let availableApps = [];
+// Toasts map: name -> {el, expiresAt}
+const TOASTS = {};
+
+function showToast(vmName, secondsLeft){
+    try{
+        const id = 'toast-'+vmName;
+        let obj = TOASTS[vmName];
+        const container = document.getElementById('toast-container');
+        if(!obj){
+            const el = document.createElement('div');
+            el.id = id;
+            el.style.background = '#111827';
+            el.style.color = '#fff';
+            el.style.padding = '12px 14px';
+            el.style.marginTop = '8px';
+            el.style.borderRadius = '8px';
+            el.style.boxShadow = '0 6px 18px rgba(0,0,0,0.6)';
+            el.style.minWidth = '260px';
+            el.style.fontFamily = 'system-ui,Arial';
+            el.style.fontSize = '13px';
+            el.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center"><div><strong>${vmName}</strong><div style="font-size:12px;opacity:.85">Scheduled restart imminent</div></div><div style="margin-left:12px;text-align:right"><div id="${id}-count">${secondsLeft}s</div><div style="margin-top:6px;display:flex;gap:4px;flex-direction:column;align-items:flex-end;font-size:12px"><div style="display:flex;gap:4px"><button id="${id}-p30s" title="Postpone 30 seconds" style="background:#92400e;color:#fef3c7;border:none;padding:.2rem .4rem;border-radius:3px;cursor:pointer;font-size:11px">+30s</button><button id="${id}-p5m" title="Postpone 5 minutes" style="background:#f59e0b;color:#000;border:none;padding:.2rem .4rem;border-radius:3px;cursor:pointer">+5m</button><button id="${id}-p10" title="Postpone 10 minutes" style="background:#f59e0b;color:#000;border:none;padding:.2rem .4rem;border-radius:3px;cursor:pointer">+10m</button><button id="${id}-p30" title="Postpone 30 minutes" style="background:#f59e0b;color:#000;border:none;padding:.2rem .4rem;border-radius:3px;cursor:pointer">+30m</button></div><div style="display:flex;gap:4px"><button id="${id}-p60" title="Postpone 60 minutes" style="background:#f59e0b;color:#000;border:none;padding:.2rem .4rem;border-radius:3px;cursor:pointer">+1h</button><button id="${id}-p2h" title="Postpone 2 hours" style="background:#ea580c;color:#fff;border:none;padding:.2rem .4rem;border-radius:3px;cursor:pointer">+2h</button><button id="${id}-p4h" title="Postpone 4 hours" style="background:#ea580c;color:#fff;border:none;padding:.2rem .4rem;border-radius:3px;cursor:pointer">+4h</button><button id="${id}-postpone" style="background:#374151;color:#fff;border:none;padding:.2rem .4rem;border-radius:3px;cursor:pointer">Custom</button></div><div><button id="${id}-cancel" style="background:#dc2626;color:#fff;border:none;padding:.2rem .4rem;border-radius:3px;cursor:pointer;width:100%">Cancel</button></div></div></div></div>`;
+            container.appendChild(el);
+            obj = {el: el, expiresAt: Date.now() + (secondsLeft*1000)};
+            TOASTS[vmName] = obj;
+            // Preset postpone handlers
+            el.querySelector('#'+id+'-p30s').onclick = async () => { try{ await postponeBySeconds(vmName, 30); }catch(e){ alert('Error: '+e);} };
+            el.querySelector('#'+id+'-p5m').onclick = async () => { try{ await postponeBy(vmName, 5); }catch(e){ alert('Error: '+e);} };
+            el.querySelector('#'+id+'-p10').onclick = async () => { try{ await postponeBy(vmName, 10); }catch(e){ alert('Error: '+e);} };
+            el.querySelector('#'+id+'-p30').onclick = async () => { try{ await postponeBy(vmName, 30); }catch(e){ alert('Error: '+e);} };
+            el.querySelector('#'+id+'-p60').onclick = async () => { try{ await postponeBy(vmName, 60); }catch(e){ alert('Error: '+e);} };
+            el.querySelector('#'+id+'-p2h').onclick = async () => { try{ await postponeBy(vmName, 120); }catch(e){ alert('Error: '+e);} };
+            el.querySelector('#'+id+'-p4h').onclick = async () => { try{ await postponeBy(vmName, 240); }catch(e){ alert('Error: '+e);} };
+            // Custom postpone handler: prompt minutes and call API
+            el.querySelector('#'+id+'-postpone').onclick = async () => {
+                try{
+                    const mins = parseInt(prompt('Postpone restart by how many minutes?', '10')||'0');
+                    if(!mins || isNaN(mins) || mins <= 0) return;
+                    await postponeBy(vmName, mins);
+                }catch(e){ alert('Postpone error: '+e); }
+            };
+            // Cancel handler
+            el.querySelector('#'+id+'-cancel').onclick = async () => {
+                try{
+                    if(!confirm('Cancel scheduled restart?')) return;
+                    const r = await fetch(`/dashboard/api/opt/restart/cancel/${encodeURIComponent(vmName)}`, {method:'POST'});
+                    const j = await r.json().catch(()=>({}));
+                    if(r.ok && j.ok){ removeToast(vmName); } else { alert('Cancel failed: ' + (j.error || 'unknown')); }
+                }catch(e){ alert('Cancel error: '+e); }
+            };
+        } else {
+            // update countdown text and expiresAt
+            const txt = obj.el.querySelector('#'+id+'-count');
+            if(txt) txt.textContent = `${Math.max(0, secondsLeft)}s`;
+            obj.expiresAt = Date.now() + (secondsLeft*1000);
+        }
+    }catch(e){ dbg('showToast error', e); }
+}
+
+function removeToast(vmName){
+    try{
+        const obj = TOASTS[vmName];
+        if(obj && obj.el && obj.el.parentNode) obj.el.parentNode.removeChild(obj.el);
+        delete TOASTS[vmName];
+    }catch(e){ }
+}
+
+async function postponeBy(vmName, minutes){
+    try{
+        const r = await fetch(`/dashboard/api/opt/restart/postpone/${encodeURIComponent(vmName)}`, {method:'POST',headers:{'Content-Type':'application/json'},body: JSON.stringify({minutes: minutes})});
+        const j = await r.json().catch(()=>({}));
+        if(r.ok && j.ok){
+            const newRemain = Math.max(0, Math.ceil((j.pending_restart_ts + (j.restart_graceful_seconds||30) - Math.floor(Date.now()/1000))));
+            showToast(vmName, newRemain);
+        } else {
+            throw new Error(j.error || 'postpone failed');
+        }
+    }catch(e){ throw e; }
+}
+
+async function postponeBySeconds(vmName, seconds){
+    try{
+        const r = await fetch(`/dashboard/api/opt/restart/postpone/${encodeURIComponent(vmName)}`, {method:'POST',headers:{'Content-Type':'application/json'},body: JSON.stringify({seconds: seconds})});
+        const j = await r.json().catch(()=>({}));
+        if(r.ok && j.ok){
+            const newRemain = Math.max(0, Math.ceil((j.pending_restart_ts + (j.restart_graceful_seconds||30) - Math.floor(Date.now()/1000))));
+            showToast(vmName, newRemain);
+        } else {
+            throw new Error(j.error || 'postpone failed');
+        }
+    }catch(e){ throw e; }
+}
+
+function updateToasts(){
+    const now = Date.now();
+    for(const name of Object.keys(TOASTS)){
+        const obj = TOASTS[name];
+        const id = 'toast-'+name;
+        const txt = obj.el.querySelector('#'+id+'-count');
+        const remainMs = Math.max(0, obj.expiresAt - now);
+        const remainS = Math.ceil(remainMs/1000);
+        if(txt) txt.textContent = `${remainS}s`;
+        if(remainMs <= 0){
+            // auto-dismiss once expired
+            removeToast(name);
+        }
+    }
+}
 async function load(){
     try {
         const [r, r2, r3] = await Promise.all([
@@ -89,12 +205,45 @@ async function load(){
         document.getElementById('customdomain').value = customDomain;
         document.getElementById('domainip').textContent = `Point domain to: ${dashIp}`;
     vms = data.instances || [];
+    // Fetch optimizer stats (best-effort)
+    let optStats = {};
+    try { const rs = await fetch('/dashboard/api/opt/stats'); if (rs.ok) optStats = await rs.json().catch(()=>({})); } catch(e){ dbg('opt stats fetch error', e); }
     const tb=document.getElementById('tbody');
         tb.innerHTML='';
     const appOpts = (availableApps||[]).map(a=>`<option value="${a}">${a}</option>`).join('');
     vms.forEach(i=>{
             const tr=document.createElement('tr');
             const dot = statusDot(i.status);
+            // health cell
+            const entry = optStats[i.name] || {};
+            const hs = (entry && entry.stats) || {};
+            const meta = (entry && entry.meta) || {};
+            let healthHtml = '';
+            if (hs && (hs.mem_pct !== undefined)) {
+                const mem = Math.round((hs.mem_pct||0)*10)/10;
+                const cpu = Math.round((hs.cpu_pct||0)*10)/10;
+                let cls = 'green';
+                if (mem >= 85 || cpu >= 90) cls = 'red'; else if (mem >= 75 || cpu >= 75) cls = 'amber';
+                healthHtml = `<span class="dot ${cls}"></span><span class=muted>${mem}% / ${cpu}%</span>`;
+            } else {
+                healthHtml = `<span class="dot gray"></span><span class=muted>n/a</span>`;
+            }
+            // Show pending restart notification in health cell and also surface a toast
+            if (meta && meta.pending_restart_ts) {
+                try {
+                    const now = Math.floor(Date.now()/1000);
+                    const grace = parseInt(meta.restart_graceful_seconds || 30);
+                    const remain = Math.max(0, (meta.pending_restart_ts + grace) - now);
+                    healthHtml += `<div class=health-badge style="background:#b45309">Restart in ${remain}s</div>`;
+                    // show persistent toast for imminent restarts (< 5 minutes)
+                    if (remain > 0 && remain <= (60*5)) {
+                        showToast(i.name, remain);
+                    }
+                } catch(e){ }
+            } else {
+                // if no pending meta and toast exists, remove it
+                removeToast(i.name);
+            }
             let portOrPath = '';
             let openUrl = i.url;
             if(mergedMode){
@@ -125,7 +274,7 @@ async function load(){
                 }
             }
             dbg('row', { name: i.name, status: i.status, rawUrl: i.url, mergedMode, portOrPath, openUrl });
-             tr.innerHTML=`<td>${i.name}</td><td>${dot}<span class=muted>${i.status||''}</span></td><td>${portOrPath}</td><td><a href="${openUrl}" target="_blank" rel="noopener noreferrer">${openUrl}</a></td>`+
+             tr.innerHTML=`<td>${i.name}</td><td>${dot}<span class=muted>${i.status||''}</span></td><td>${healthHtml}</td><td>${portOrPath}</td><td><a href="${openUrl}" target="_blank" rel="noopener noreferrer">${openUrl}</a></td>`+
                  `<td>`+
                  `<button onclick="openLink('${openUrl}')">Open</button>`+
                  `<button onclick="act('start','${i.name}')">Start</button>`+
@@ -142,13 +291,72 @@ async function load(){
                  `<button onclick="recreateVM('${i.name}')">Recreate</button>`+
                  `<button onclick="rebuildVM('${i.name}')">Rebuild</button>`+
                  `<button onclick=\"cleanVM('${i.name}')\" class=\"btn-gray\">Clean</button>`+
-                 `<button onclick="delvm('${i.name}')" class="btn-red">Delete</button>`+
-                 `</td>`;
+                                 `<button onclick="delvm('${i.name}')" class="btn-red">Delete</button>`+
+                                 `</td>`+
+                                 `<td>`+
+                                 `<button onclick="optimizeVM('${i.name}')" class="btn-gray">Optimize</button>`+
+                                 `<button onclick="viewOptLogs('${i.name}')" class="btn-gray">Logs</button>`+
+                                 `</td>`;
           tb.appendChild(tr);
         });
     } catch (err) {
         console.error('[BLOBEDASH] load() error', err);
     }
+}
+
+async function editOptSettings(name){
+    try{
+        const r = await fetch(`/dashboard/api/opt/settings/${encodeURIComponent(name)}`);
+        const j = await r.json().catch(()=>({}));
+        const s = j || {};
+        const w = window.open('', '_blank', 'width=600,height=520');
+        w.document.title = 'Optimization Settings - ' + name;
+        const form = w.document.createElement('form');
+        form.style.fontFamily='system-ui,Arial';
+        form.innerHTML = `
+            <h2>Settings for ${name}</h2>
+            <label><input type=checkbox id=opt_enabled /> Enable auto-optimize/auto-restart</label><br/><br/>
+            <label>Restart interval (hours): <input id=restart_interval type=number min=0 step=0.5 style='width:80px' /></label><br/>
+            <label>Graceful restart delay (s): <input id=restart_grace type=number min=0 step=1 style='width:80px' /></label><br/>
+            <label>Memory threshold %: <input id=mem_th type=number min=1 max=100 step=1 style='width:80px' /></label><br/>
+            <label>CPU threshold %: <input id=cpu_th type=number min=1 max=100 step=1 style='width:80px' /></label><br/>
+            <label>Threshold grace minutes: <input id=thr_grace type=number min=0 step=1 style='width:80px' /></label><br/>
+            <label><input type=checkbox id=auto_reboot /> Auto reboot when thresholds persist</label><br/><br/>
+            <button id=saveBtn type=button>Save</button>
+            <button id=closeBtn type=button>Close</button>
+            <div id=saveResult style='margin-top:12px'></div>
+        `;
+        w.document.body.appendChild(form);
+        // populate
+        w.document.getElementById('opt_enabled').checked = (s.optimize_enabled !== '0' && s.optimize_enabled !== 0 && s.optimize_enabled !== false && s.optimize_enabled !== 'false');
+        w.document.getElementById('restart_interval').value = (s.restart_interval_hours !== undefined ? s.restart_interval_hours : '');
+        w.document.getElementById('restart_grace').value = (s.restart_graceful_seconds !== undefined ? s.restart_graceful_seconds : 30);
+        w.document.getElementById('mem_th').value = (s.mem_threshold_pct !== undefined ? s.mem_threshold_pct : 85);
+        w.document.getElementById('cpu_th').value = (s.cpu_threshold_pct !== undefined ? s.cpu_threshold_pct : 90);
+        w.document.getElementById('thr_grace').value = (s.threshold_grace_minutes !== undefined ? s.threshold_grace_minutes : 2);
+        w.document.getElementById('auto_reboot').checked = (s.auto_reboot_enabled !== '0' && s.auto_reboot_enabled !== 0 && s.auto_reboot_enabled !== false && s.auto_reboot_enabled !== 'false');
+        w.document.getElementById('closeBtn').onclick = () => w.close();
+        w.document.getElementById('saveBtn').onclick = async () => {
+            const payload = {
+                optimize_enabled: w.document.getElementById('opt_enabled').checked ? '1' : '0',
+                restart_interval_hours: parseFloat(w.document.getElementById('restart_interval').value) || 0,
+                restart_graceful_seconds: parseInt(w.document.getElementById('restart_grace').value) || 30,
+                mem_threshold_pct: parseInt(w.document.getElementById('mem_th').value) || 85,
+                cpu_threshold_pct: parseInt(w.document.getElementById('cpu_th').value) || 90,
+                threshold_grace_minutes: parseInt(w.document.getElementById('thr_grace').value) || 2,
+                auto_reboot_enabled: w.document.getElementById('auto_reboot').checked ? '1' : '0'
+            };
+            try{
+                const r2 = await fetch(`/dashboard/api/opt/settings/${encodeURIComponent(name)}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+                const j2 = await r2.json().catch(()=>({}));
+                if(r2.ok && j2.ok){
+                    w.document.getElementById('saveResult').textContent = 'Saved.';
+                } else {
+                    w.document.getElementById('saveResult').textContent = 'Save failed: ' + (j2.error || 'unknown');
+                }
+            }catch(e){ w.document.getElementById('saveResult').textContent = 'Save error: '+e; }
+        };
+    }catch(e){ alert('Edit settings error: '+e); }
 }
 function recreateVM(name){
     if(!confirm('Recreate VM '+name+'?'))return;
@@ -394,12 +602,52 @@ async function checkVM(ev,name){
     }
     load();
 }
-load();setInterval(load,8000);
+async function optimizeVM(name){
+    if(!confirm('Run optimization now for ' + name + '?')) return;
+    try{
+        const r = await fetch(`/dashboard/api/opt/trigger/${encodeURIComponent(name)}`,{method:'POST'});
+        const j = await r.json().catch(()=>({}));
+        if(j && j.ok){ alert('Optimization requested.'); } else { alert('Failed: ' + (j && j.error || 'unknown')); }
+    }catch(e){ alert('Optimize error: '+e); }
+    load();
+}
+
+async function viewOptLogs(name){
+    try{
+        const r = await fetch(`/dashboard/api/opt/logs/${encodeURIComponent(name)}`);
+        const j = await r.json().catch(()=>({}));
+        let logs = (j && j.logs) || [];
+        let out = logs.map(l=> {
+            let t = new Date((l.ts||0)*1000).toLocaleString();
+            return `${t} — ${l.action} ${JSON.stringify(l.info||{})}`;
+        }).join('\n');
+        if(!out) out = 'No logs.';
+        // display in simple window
+        const w = window.open('', '_blank', 'width=800,height=600');
+        w.document.title = 'Optimization logs - ' + name;
+        const pre = w.document.createElement('pre'); pre.style.background='#0b1220'; pre.style.color='#eee'; pre.style.padding='1rem'; pre.textContent = out;
+        w.document.body.appendChild(pre);
+    }catch(e){ alert('Logs error: '+e); }
+}
+load();
+// Refresh polling and toast updates
+setInterval(() => { load(); updateToasts(); }, 8000);
+// Also update toasts more frequently for smooth countdown
+setInterval(updateToasts, 1000);
 </script>
 </body></html>
 """
 
 app = Flask(__name__)
+
+# Initialize optimizer if available
+OPTIMIZER = None
+if Optimizer is not None:
+    try:
+        OPTIMIZER = Optimizer(state_dir=_state_dir(), manager_bin=MANAGER)
+        OPTIMIZER.start()
+    except Exception:
+        OPTIMIZER = None
 
 BUSER = os.environ.get('BLOBEDASH_USER')
 BPASS = os.environ.get('BLOBEDASH_PASS')
@@ -1079,6 +1327,153 @@ def api_apps():
         pass
     apps.sort()
     return jsonify({'apps': apps})
+
+
+@app.get('/dashboard/api/opt/stats')
+@auth_required
+def api_opt_stats():
+    try:
+        if OPTIMIZER is None:
+            return jsonify({})
+        stats = OPTIMIZER.get_stats()
+        # augment with instance meta keys useful for UI (pending restart / last optimize)
+        out = {}
+        for name, s in stats.items():
+            meta = {}
+            try:
+                mf = os.path.join(_state_dir(), 'instances', name, 'instance.json')
+                if os.path.isfile(mf):
+                    with open(mf, 'r') as f: meta = json.load(f)
+            except Exception:
+                meta = {}
+            out[name] = {'stats': s, 'meta': meta}
+        return jsonify(out)
+    except Exception as e:
+        return jsonify({})
+
+
+@app.post('/dashboard/api/opt/trigger/<name>')
+@auth_required
+def api_opt_trigger(name):
+    try:
+        if OPTIMIZER is None:
+            return jsonify({'ok': False, 'error': 'optimizer not available'}), 503
+        ok = OPTIMIZER.trigger_optimize(name)
+        return jsonify({'ok': ok})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.get('/dashboard/api/opt/logs/<name>')
+@auth_required
+def api_opt_logs(name):
+    try:
+        if OPTIMIZER is None:
+            return jsonify({'logs': []})
+        logs = OPTIMIZER.read_logs(name, lines=400)
+        return jsonify({'logs': logs})
+    except Exception as e:
+        return jsonify({'logs': []})
+
+
+@app.post('/dashboard/api/opt/restart/cancel/<name>')
+@auth_required
+def api_opt_restart_cancel(name):
+    mf = os.path.join(_state_dir(), 'instances', name, 'instance.json')
+    try:
+        if not os.path.isfile(mf):
+            return jsonify({'ok': False, 'error': 'instance not found'}), 404
+        with open(mf,'r') as f:
+            data = json.load(f)
+        data['pending_restart_ts'] = 0
+        with open(mf,'w') as f:
+            json.dump(data, f, indent=2)
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.post('/dashboard/api/opt/restart/postpone/<name>')
+@auth_required
+def api_opt_restart_postpone(name):
+    # Accept JSON {minutes: N} or {seconds: N}
+    mf = os.path.join(_state_dir(), 'instances', name, 'instance.json')
+    try:
+        if not os.path.isfile(mf):
+            return jsonify({'ok': False, 'error': 'instance not found'}), 404
+        payload = request.get_json(force=True) or {}
+        mins = int(payload.get('minutes') or 0)
+        secs = int(payload.get('seconds') or 0)
+        add = 0
+        if mins > 0:
+            add = mins * 60
+        elif secs > 0:
+            add = secs
+        else:
+            return jsonify({'ok': False, 'error': 'no minutes/seconds provided'}), 400
+        with open(mf,'r') as f:
+            data = json.load(f)
+        cur = int(data.get('pending_restart_ts', 0) or 0)
+        now = int(time.time())
+        if cur <= 0:
+            # if none scheduled, set new pending to now
+            cur = now
+        new_pending = cur + add
+        data['pending_restart_ts'] = int(new_pending)
+        # preserve restart_graceful_seconds if present
+        with open(mf,'w') as f:
+            json.dump(data, f, indent=2)
+        return jsonify({'ok': True, 'pending_restart_ts': data['pending_restart_ts'], 'restart_graceful_seconds': data.get('restart_graceful_seconds', 30)})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.get('/dashboard/api/opt/settings/<name>')
+@auth_required
+def api_opt_get_settings(name):
+    mf = os.path.join(_state_dir(), 'instances', name, 'instance.json')
+    if not os.path.isfile(mf):
+        return jsonify({})
+    try:
+        with open(mf, 'r') as f:
+            data = json.load(f)
+        # return only known keys
+        keys = ['optimize_enabled','restart_interval_hours','restart_graceful_seconds','mem_threshold_pct','cpu_threshold_pct','threshold_grace_minutes','auto_reboot_enabled']
+        out = {k: data.get(k) for k in keys if k in data}
+        return jsonify(out)
+    except Exception:
+        return jsonify({}), 500
+
+
+@app.post('/dashboard/api/opt/settings/<name>')
+@auth_required
+def api_opt_set_settings(name):
+    mf = os.path.join(_state_dir(), 'instances', name, 'instance.json')
+    try:
+        payload = request.get_json(force=True)
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        return jsonify({'ok': False, 'error': 'invalid payload'}), 400
+    try:
+        os.makedirs(os.path.dirname(mf), exist_ok=True)
+        existing = {}
+        if os.path.isfile(mf):
+            try:
+                with open(mf,'r') as f: existing = json.load(f)
+            except Exception:
+                existing = {}
+        # Only accept known keys
+        allowed = ['optimize_enabled','restart_interval_hours','restart_graceful_seconds','mem_threshold_pct','cpu_threshold_pct','threshold_grace_minutes','auto_reboot_enabled']
+        for k,v in payload.items():
+            if k in allowed:
+                existing[k] = v
+        with open(mf,'w') as f:
+            json.dump(existing, f, indent=2)
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
 
 def _http_check(url: str, timeout: float = 8.0) -> int:
     if not url:
