@@ -1,0 +1,14 @@
+[Unit]
+Description=Blobe VM Optimizer Service
+After=network.target docker.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/blobe-vm
+ExecStart=/usr/bin/env node /opt/blobe-vm/optimizer/OptimizerService.js daemon
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

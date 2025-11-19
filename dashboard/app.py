@@ -394,8 +394,80 @@ async function checkVM(ev,name){
     }
     load();
 }
-load();setInterval(load,8000);
+    load();setInterval(load,8000);
+
+    // Optimizer panel controls
+    async function loadOptimizer(){
+        try{
+            const r = await fetch('/dashboard/api/optimizer/status');
+            if(!r.ok) return;
+            const j = await r.json();
+            const el = document.getElementById('optimizer-status');
+            if(el) el.textContent = JSON.stringify(j, null, 2);
+            const en = document.getElementById('optimizer-enabled');
+            if(en) en.checked = !!(j && j.cfg && j.cfg.enabled);
+            const mg = document.getElementById('guard-memory');
+            if(mg) mg.checked = !!(j && j.cfg && j.cfg.guards && j.cfg.guards.memory);
+            const cg = document.getElementById('guard-cpu');
+            if(cg) cg.checked = !!(j && j.cfg && j.cfg.guards && j.cfg.guards.cpu);
+            const sg = document.getElementById('guard-swap');
+            if(sg) sg.checked = !!(j && j.cfg && j.cfg.guards && j.cfg.guards.swap);
+            const hg = document.getElementById('guard-health');
+            if(hg) hg.checked = !!(j && j.cfg && j.cfg.guards && j.cfg.guards.health);
+            const sm = document.getElementById('guard-strictmem');
+            if(sm) sm.checked = !!(j && j.cfg && j.cfg.strictMemoryLimit);
+        }catch(e){ console.error('loadOptimizer', e); }
+    }
+
+    async function optimizerSet(key, val){
+        await fetch('/dashboard/api/optimizer/set', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({key, val})});
+        await loadOptimizer();
+    }
+
+    async function optimizerRunOnce(){
+        const r = await fetch('/dashboard/api/optimizer/run-once', {method:'POST'});
+        if(r.ok) alert('Optimizer run started'); else alert('Failed to start');
+    }
+
+    async function optimizerTail(){
+        const r = await fetch('/dashboard/api/optimizer/logs');
+        if(!r.ok) return alert('No logs');
+        const t = await r.text();
+        const el = document.getElementById('optimizer-logs');
+        if(el) el.textContent = t;
+    }
+
+    async function optimizerCleanSystem(){
+        if(!confirm('Run system cleaner (will drop caches and prune docker). Proceed?')) return;
+        const r = await fetch('/dashboard/api/optimizer/clean-system', {method:'POST'});
+        const j = await r.json().catch(()=>({}));
+        alert((j && j.started) ? 'Cleaner started' : ('Cleaner failed: '+(j.error||'unknown')));
+    }
+
+    // Periodically refresh optimizer panel
+    loadOptimizer(); setInterval(loadOptimizer, 15000);
+
 </script>
+
+<div style="margin:1.5rem 0;padding:1rem;border:1px solid #333;border-radius:6px;background:#081226">
+    <h2 style="margin-top:0">Optimizer Panel</h2>
+    <div style="display:flex;gap:1rem;align-items:center;margin-bottom:.5rem">
+        <label><input id="optimizer-enabled" type="checkbox" onchange="optimizerSet('enabled', this.checked)"> Optimizer Enabled</label>
+        <label><input id="guard-memory" type="checkbox" onchange="optimizerSet('guards', Object.assign(({}), {memory:this.checked}))"> Memory Guard</label>
+        <label><input id="guard-cpu" type="checkbox" onchange="optimizerSet('guards', Object.assign(({}), {cpu:this.checked}))"> CPU Guard</label>
+        <label><input id="guard-swap" type="checkbox" onchange="optimizerSet('guards', Object.assign(({}), {swap:this.checked}))"> Swap Guard</label>
+        <label><input id="guard-health" type="checkbox" onchange="optimizerSet('guards', Object.assign(({}), {health:this.checked}))"> Health Guard</label>
+        <label><input id="guard-strictmem" type="checkbox" onchange="optimizerSet('strictMemoryLimit', this.checked)"> Strict Memory Limits</label>
+    </div>
+    <div style="margin-bottom:.5rem">
+        <button onclick="optimizerRunOnce()">Run Once</button>
+        <button onclick="optimizerTail()" class="btn-gray">Show Logs</button>
+        <button onclick="optimizerCleanSystem()" class="btn-red">System Cleaner</button>
+    </div>
+    <pre id="optimizer-status" style="background:#000;color:#9ee;padding:.5rem;border-radius:4px;max-height:180px;overflow:auto"></pre>
+    <pre id="optimizer-logs" style="background:#000;color:#9ee;padding:.5rem;border-radius:4px;max-height:240px;overflow:auto;margin-top:.5rem"></pre>
+</div>
+
 </body></html>
 """
 
@@ -1166,6 +1238,169 @@ def api_disable_single_port():
     effective_port = str(dash_port) if dash_port else env.get('DASHBOARD_PORT','') or env.get('DIRECT_PORT_START','20000')
     msg = f'Disabling single-port mode; dashboard will run on http://<host>:{effective_port}/dashboard.'
     return jsonify({'ok': True, 'message': msg, 'port': effective_port})
+
+
+@app.get('/dashboard/api/optimizer/status')
+@auth_required
+def api_optimizer_status():
+    """Return optimizer status and basic stats by invoking optimizer CLI if available."""
+    state = _state_dir()
+    node = 'node'
+    script = os.path.join(state, 'optimizer', 'OptimizerService.js')
+    if not os.path.isfile(script):
+        return jsonify({'ok': False, 'error': 'optimizer script not installed'}), 404
+    try:
+        r = subprocess.run([node, script, 'status'], capture_output=True, text=True, timeout=8)
+        if r.returncode == 0 and r.stdout:
+            return Response(r.stdout, mimetype='application/json')
+        # Fall back to returning config file if CLI didn't return
+        cfgp = os.path.join(state, '.optimizer.json')
+        cfg = {}
+        try:
+            with open(cfgp,'r') as f: cfg = json.load(f)
+        except Exception:
+            cfg = {'enabled': False}
+        return jsonify({'ok': True, 'cfg': cfg})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.post('/dashboard/api/optimizer/run-once')
+@auth_required
+def api_optimizer_run_once():
+    state = _state_dir()
+    node = 'node'
+    script = os.path.join(state, 'optimizer', 'OptimizerService.js')
+    if not os.path.isfile(script):
+        return jsonify({'ok': False, 'error': 'optimizer script not installed'}), 404
+    def worker():
+        try:
+            subprocess.run([node, script, 'run-once'], capture_output=True, text=True)
+        except Exception:
+            pass
+    threading.Thread(target=worker, daemon=True).start()
+    return jsonify({'ok': True, 'started': True})
+
+
+@app.post('/dashboard/api/optimizer/set')
+@auth_required
+def api_optimizer_set():
+    data = request.get_json() or {}
+    key = data.get('key')
+    val = data.get('val')
+    if not key:
+        return jsonify({'ok': False, 'error': 'missing key'}), 400
+    state = _state_dir()
+    node = 'node'
+    script = os.path.join(state, 'optimizer', 'OptimizerService.js')
+    if not os.path.isfile(script):
+        # fallback: modify cfg file directly
+        cfgp = os.path.join(state, '.optimizer.json')
+        try:
+            cfg = {}
+            if os.path.isfile(cfgp):
+                with open(cfgp,'r') as f: cfg = json.load(f)
+        except Exception:
+            cfg = {}
+        # apply simple assignment semantics
+        if key == 'guards' and isinstance(val, dict):
+            cfg.setdefault('guards', {}).update(val)
+        else:
+            cfg[key] = val
+        try:
+            with open(cfgp,'w') as f: json.dump(cfg, f)
+            return jsonify({'ok': True})
+        except Exception as e:
+            return jsonify({'ok': False, 'error': str(e)}), 500
+    try:
+        args = [node, script, 'set', key, json.dumps(val)]
+        r = subprocess.run(args, capture_output=True, text=True)
+        return jsonify({'ok': r.returncode==0, 'output': r.stdout.strip(), 'error': r.stderr.strip()})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.get('/dashboard/api/optimizer/logs')
+@auth_required
+def api_optimizer_logs():
+    p = '/var/blobe/logs/optimizer/optimizer.log'
+    try:
+        if os.path.isfile(p):
+            return Response(open(p,'r').read(), mimetype='text/plain')
+        return jsonify({'ok': False, 'error': 'no logs'}), 404
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.post('/dashboard/api/optimizer/clean-system')
+@auth_required
+def api_optimizer_clean_system():
+    """Run system cleaner: drop caches and prune docker but skip domain networks."""
+    def worker():
+        try:
+            # Drop caches
+            try:
+                subprocess.run(['sync'], check=False)
+                subprocess.run(['bash','-c','echo 3 > /proc/sys/vm/drop_caches'], check=False)
+            except Exception:
+                pass
+            # Basic prune (images/containers/builders/volumes)
+            try:
+                subprocess.run(['docker','system','prune','-af'], check=False)
+                subprocess.run(['docker','builder','prune','-af'], check=False)
+                subprocess.run(['docker','image','prune','-af'], check=False)
+                subprocess.run(['docker','volume','prune','-f'], check=False)
+            except Exception:
+                pass
+            # Network prune but skip Blobe domain networks
+            protected = set()
+            env = _read_env()
+            try:
+                if env.get('TRAEFIK_NETWORK'):
+                    protected.add(env.get('TRAEFIK_NETWORK'))
+            except Exception:
+                pass
+            # Always protect common names
+            for n in ('proxy','traefik','blobe','blobedash','blobedash-proxy'):
+                protected.add(n)
+            # Inspect networks and protect any with containers like traefik/blobedash
+            try:
+                nets_out = subprocess.check_output(['docker','network','ls','--format','{{.Name}}'], text=True).splitlines()
+                for net in nets_out:
+                    if not net: continue
+                    nl = net.strip()
+                    if any(x in nl.lower() for x in ('proxy','traefik','blobe','blobedash')):
+                        protected.add(nl)
+                    else:
+                        # inspect containers attached
+                        try:
+                            js = subprocess.check_output(['docker','network','inspect',nl,'--format','{{json .Containers}}'], text=True)
+                            if 'traefik' in js or 'blobedash' in js or 'blobedash-proxy' in js:
+                                protected.add(nl)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            # Remove networks that are not protected (best-effort)
+            try:
+                nets_out = subprocess.check_output(['docker','network','ls','--format','{{.Name}}'], text=True).splitlines()
+                for net in nets_out:
+                    if not net: continue
+                    if net in protected: continue
+                    try:
+                        subprocess.run(['docker','network','rm', net], check=False)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        except Exception:
+            pass
+    try:
+        threading.Thread(target=worker, daemon=True).start()
+        return jsonify({'ok': True, 'started': True})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
