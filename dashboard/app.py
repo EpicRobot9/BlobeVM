@@ -50,6 +50,19 @@ const dbg = (...args) => { if (DEBUG) console.log('[BLOBEDASH]', ...args); };
 window.addEventListener('error', (e) => console.error('[BLOBEDASH] window error', e.message, e.error || e));
 window.addEventListener('unhandledrejection', (e) => console.error('[BLOBEDASH] unhandledrejection', e.reason));
 
+function showErr(msg){
+    try{
+        const eb = document.getElementById('errbox');
+        if(!eb) return;
+        eb.style.display = 'block';
+        eb.textContent = String(msg);
+    }catch(e){ console.error('showErr error', e); }
+}
+
+function clearErr(){
+    try{ const eb = document.getElementById('errbox'); if(eb){ eb.style.display='none'; eb.textContent=''; } }catch(e){}
+}
+
 let mergedMode = false, basePath = '/vm', customDomain = '', dashPort = '', dashIp = '';
 let vms = [];
 let availableApps = [];
@@ -170,10 +183,10 @@ async function updateVM(name){
         if(j && (j.ok || j.started)){
             alert('Update started. Status will show as Updating…');
         }else{
-            alert('Update failed:\n'+((j && (j.error||j.output))||'unknown error'));
+            showErr('Update failed:\n'+((j && (j.error||j.output))||'unknown error'));
         }
     }catch(e){
-        alert('Update error: '+e);
+        showErr('Update error: '+e);
     }
     load();
 }
@@ -186,7 +199,7 @@ async function pruneDocker(){
         if(j && (j.ok || j.started)){
             alert('Docker prune started. This may take a while.');
         }else{
-            alert('Failed to start prune: ' + (j && (j.error||j.output) || 'unknown'));
+            showErr('Failed to start prune: ' + (j && (j.error||j.output) || 'unknown'));
         }
     }catch(e){ alert('Prune error: '+e); }
 }
@@ -333,10 +346,11 @@ function bulkDeleteAll(){
 async function setCustomDomain(){
     const dom = document.getElementById('customdomain').value.trim();
     if(!dom) return alert('Enter a domain.');
+    clearErr();
     const r = await fetch('/dashboard/api/set-domain', {method:'post',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:`domain=${encodeURIComponent(dom)}`});
     const j = await r.json().catch(()=>({}));
     if(j && j.ip) document.getElementById('domainip').textContent = `Point domain to: ${j.ip}`;
-    else alert('Saved, but could not resolve IP.');
+    else showErr('Saved, but could not resolve IP.');
 }
 function statusDot(st){
     const s=(st||'').toLowerCase();
@@ -355,10 +369,10 @@ async function createVM(e){
         const r = await fetch('/dashboard/api/create', {method:'post',body:new URLSearchParams(fd)});
         if (!r.ok) {
             const j = await r.json().catch(()=>({}));
-            alert(j.error || 'Failed to create VM.');
+            showErr(j.error || 'Failed to create VM.');
         }
     } catch (err) {
-        alert('Error creating VM: ' + err);
+        showErr('Error creating VM: ' + err);
     }
     e.target.reset();
     load();
@@ -426,12 +440,12 @@ async function checkVM(ev,name){
 
     async function optimizerRunOnce(){
         const r = await fetch('/dashboard/api/optimizer/run-once', {method:'POST'});
-        if(r.ok) alert('Optimizer run started'); else alert('Failed to start');
+        if(r.ok) alert('Optimizer run started'); else showErr('Failed to start optimizer run');
     }
 
     async function optimizerTail(){
         const r = await fetch('/dashboard/api/optimizer/logs');
-        if(!r.ok) return alert('No logs');
+        if(!r.ok) return showErr('No logs');
         const t = await r.text();
         const el = document.getElementById('optimizer-logs');
         if(el) el.textContent = t;
@@ -441,7 +455,7 @@ async function checkVM(ev,name){
         if(!confirm('Run system cleaner (will drop caches and prune docker). Proceed?')) return;
         const r = await fetch('/dashboard/api/optimizer/clean-system', {method:'POST'});
         const j = await r.json().catch(()=>({}));
-        alert((j && j.started) ? 'Cleaner started' : ('Cleaner failed: '+(j.error||'unknown')));
+        if(j && j.started) alert('Cleaner started'); else showErr('Cleaner failed: '+(j.error||'unknown'));
     }
 
     // Periodically refresh optimizer panel
