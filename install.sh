@@ -25,26 +25,53 @@ echo "BLOBEVM WAS INSTALLED SUCCESSFULLY! Check Port Tab"
 echo "Installing Blobe Optimizer service..."
 
 sudo mkdir -p /opt/blobe-vm
-# Prefer copying from the cloned `BlobeVM` folder if present (avoid nested copies)
+# Copy the cloned repo into /opt/blobe-vm so dashboard/service can access it.
+# We expect this script to be run from the directory that contains the cloned `BlobeVM` folder
+# (the top-level clone step earlier creates `BlobeVM`). If run elsewhere, try to copy any BlobeVM folder we find.
+REPO_SRC=""
 if [[ -d "$PWD/BlobeVM" ]]; then
-    echo "Copying repository from $PWD/BlobeVM to /opt/blobe-vm"
-    sudo rsync -a "$PWD/BlobeVM/" /opt/blobe-vm/
+    REPO_SRC="$PWD/BlobeVM"
+elif [[ -d "$PWD" && -f "$PWD/installer.py" && -d "$PWD/optimizer" ]]; then
+    # Running from repo root already
+    REPO_SRC="$PWD"
 else
-    echo "Copying current directory contents to /opt/blobe-vm"
-    sudo rsync -a "$PWD"/ /opt/blobe-vm/
+    # Try to locate a nearby clone
+    FOUND=$(find "$PWD" -maxdepth 2 -type d -name BlobeVM 2>/dev/null | head -n1 || true)
+    if [[ -n "$FOUND" ]]; then
+        REPO_SRC="$FOUND"
+    fi
 fi
 
-# If we accidentally copied a nested `BlobeVM` directory (e.g., /opt/blobe-vm/BlobeVM/optimizer),
-# flatten it so optimizer lives at /opt/blobe-vm/optimizer as expected by the dashboard.
-if [[ -d /opt/blobe-vm/BlobeVM && ! -d /opt/blobe-vm/optimizer ]]; then
-    echo "Detected nested BlobeVM folder; flattening contents into /opt/blobe-vm"
+if [[ -n "$REPO_SRC" ]]; then
+    echo "Copying repository from $REPO_SRC to /opt/blobe-vm"
+    sudo rsync -a "$REPO_SRC/" /opt/blobe-vm/
+else
+    echo "No local BlobeVM repo found in working dir; attempting to copy current dir contents"
+    sudo rsync -a "$PWD"/ /opt/blobe-vm/ || true
+fi
+
+# Flatten nested copy if necessary (ensure /opt/blobe-vm/optimizer exists)
+if [[ ! -d /opt/blobe-vm/optimizer && -d /opt/blobe-vm/BlobeVM ]]; then
+    echo "Detected nested /opt/blobe-vm/BlobeVM; flattening into /opt/blobe-vm"
     sudo rsync -a /opt/blobe-vm/BlobeVM/ /opt/blobe-vm/
     sudo rm -rf /opt/blobe-vm/BlobeVM
 fi
 
-# Ensure Node.js (Node 18 LTS) is present via NodeSource for a modern runtime
+# If optimizer files are present in repo but not in /opt/blobe-vm, copy them explicitly
+if [[ -n "$REPO_SRC" && -d "$REPO_SRC/optimizer" && ! -d /opt/blobe-vm/optimizer ]]; then
+    echo "Copying optimizer/ from repo into /opt/blobe-vm/optimizer"
+    sudo mkdir -p /opt/blobe-vm/optimizer
+    sudo rsync -a "$REPO_SRC/optimizer/" /opt/blobe-vm/optimizer/
+fi
+
+# Ensure log dir exists
+sudo mkdir -p /var/blobe/logs/optimizer
+sudo chown root:root /var/blobe/logs/optimizer || true
+sudo chmod 755 /var/blobe/logs/optimizer || true
+
+# Install Node.js 18.x via NodeSource if missing (modern LTS)
 if ! command -v node >/dev/null 2>&1; then
-    echo "Installing Node.js 18.x via NodeSource"
+    echo "Node.js not found — installing Node.js 18.x via NodeSource"
     sudo apt-get update -y
     sudo apt-get install -y curl ca-certificates gnupg lsb-release
     curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
@@ -53,18 +80,35 @@ else
     echo "Node already installed: $(node --version)"
 fi
 
-# Make optimizer script and ensure script executable and create log dir
-sudo mkdir -p /var/blobe/logs/optimizer
-sudo chmod -R 755 /opt/blobe-vm/optimizer || true
-sudo chmod +x /opt/blobe-vm/optimizer/OptimizerService.js 2>/dev/null || true
-sudo chmod +x /opt/blobe-vm/optimizer/optimizer-ensure.sh 2>/dev/null || true
+# Ensure optimizer scripts are executable
+if [[ -d /opt/blobe-vm/optimizer ]]; then
+    sudo chmod -R 755 /opt/blobe-vm/optimizer || true
+    sudo chmod +x /opt/blobe-vm/optimizer/OptimizerService.js 2>/dev/null || true
+    sudo chmod +x /opt/blobe-vm/optimizer/optimizer-ensure.sh 2>/dev/null || true
+    # If package.json present, install deps
+    if [[ -f /opt/blobe-vm/optimizer/package.json ]]; then
+        echo "Installing npm dependencies for optimizer"
+        (cd /opt/blobe-vm/optimizer && sudo npm ci --no-audit --no-fund) || (cd /opt/blobe-vm/optimizer && sudo npm install --no-audit --no-fund) || true
+    fi
+fi
 
 # Install systemd service file and enable/start it
-if [[ -f "blobe-optimizer.service" ]]; then
+if [[ -f "/opt/blobe-vm/blobe-optimizer.service" ]]; then
+    sudo cp /opt/blobe-vm/blobe-optimizer.service /etc/systemd/system/blobe-optimizer.service
+elif [[ -f "blobe-optimizer.service" ]]; then
     sudo cp blobe-optimizer.service /etc/systemd/system/blobe-optimizer.service
+fi
+
+if [[ -f "/etc/systemd/system/blobe-optimizer.service" ]]; then
     sudo systemctl daemon-reload
     sudo systemctl enable --now blobe-optimizer.service || sudo systemctl start blobe-optimizer.service || true
     echo "Blobe Optimizer service installed and started (if supported on this system)."
 else
     echo "blobe-optimizer.service not found in repo; skipping service install."
+fi
+
+# Restart or reload dashboard so it sees copied files (only if systemd unit exists)
+if systemctl list-units --full -all | grep -q '^blobedash.service'; then
+    echo "Restarting blobedash.service to pick up new files"
+    sudo systemctl restart blobedash.service || true
 fi
