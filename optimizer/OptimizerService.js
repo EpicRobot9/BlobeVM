@@ -23,7 +23,7 @@ function log(msg){
 
 function loadConfig(){
   try{ return JSON.parse(fs.readFileSync(CFG_PATH)); }catch(e){
-    return { enabled: true, guards: { memory:true, cpu:true, swap:true, health:true }, schedulerEnabled:true, restartIntervalHours:24, strictMemoryLimit:false, memoryLimit:'1g', memorySwappiness:10 };
+    return { enabled: true, guards: { memory:true, cpu:true, swap:true, health:true }, schedulerEnabled:true, restartIntervalHours:24, strictMemoryLimit:false, memoryLimit:'1g', memorySwappiness:10, containerRestartCooldownMinutes:10 };
   }
 }
 
@@ -84,6 +84,55 @@ function enforceStrictMemory(cfg){
   }catch(e){ log('enforceStrictMemory error '+e); }
 }
 
+function getLastRestartPath(){
+  return path.join(STATE_DIR, '.optimizer_last_restart');
+}
+
+function readLastRestart(){
+  try{ const p = getLastRestartPath(); return parseInt(fs.readFileSync(p,'utf8')) || 0; }catch(e){ return 0; }
+}
+
+function writeLastRestart(ts){
+  try{ fs.writeFileSync(getLastRestartPath(), String(ts)); return true; }catch(e){ return false; }
+}
+
+function performScheduledRestart(cfg){
+  try{
+    const last = readLastRestart();
+    const now = Date.now()/1000;
+    const interval = (cfg.restartIntervalHours || 0) * 3600;
+    if(!cfg.schedulerEnabled || !interval) return;
+    if(now - last < interval) return;
+    // restart running blobevm_ containers only, with per-container cooldowns and staggering
+    const out = execSync("docker ps --format '{{.Names}}' ").toString();
+    const lines = out.split('\n').map(l=>l.trim()).filter(Boolean);
+    let restarted = 0;
+    const cooldown = (cfg.containerRestartCooldownMinutes || 10) * 60;
+    const maxPerRun = 10;
+    for(const name of lines){
+      if(!name.startsWith('blobevm_')) continue;
+      try{
+        const crestartPath = path.join(STATE_DIR, '.optimizer_restarts');
+        try{ fs.mkdirSync(crestartPath, { recursive: true }); }catch(e){}
+        const safeName = name.replace(/[^a-zA-Z0-9_.-]/g, '_');
+        const p = path.join(crestartPath, safeName + '.last');
+        let lastC = 0;
+        try{ lastC = parseInt(fs.readFileSync(p,'utf8')) || 0; }catch(e){ lastC = 0; }
+        if(now - lastC < cooldown){ log(`skip restart ${name} (cooldown)`); continue; }
+        // perform restart
+        execSync(`docker restart ${name}`);
+        restarted++;
+        log(`scheduler restart ${name}`);
+        try{ fs.writeFileSync(p, String(Math.floor(now))); }catch(e){ log('write last restart per-container failed '+e); }
+        // small stagger to avoid mass restarts
+        try{ execSync('sleep 2'); }catch(e){}
+        if(restarted >= maxPerRun) break;
+      }catch(e){ log('scheduler restart failed '+name+' : '+e); }
+    }
+    if(restarted>0){ writeLastRestart(Math.floor(now)); log('performed scheduled restart of '+restarted+' containers'); }
+  }catch(e){ log('performScheduledRestart error '+e); }
+}
+
 async function status(){
   const cfg = loadConfig();
   const stats = await gather();
@@ -129,6 +178,12 @@ async function daemonLoop(){
       if(cfgNow.enabled){
         await runOnce();
       }
+      try{
+        // perform scheduled restarts if scheduler enabled
+        if(cfgNow.schedulerEnabled){
+          performScheduledRestart(cfgNow);
+        }
+      }catch(e){ log('scheduler error '+e); }
     }catch(e){ log('daemon error '+e); }
     await new Promise(r=>setTimeout(r, 15000));
   }
