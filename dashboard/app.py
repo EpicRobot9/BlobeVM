@@ -82,10 +82,11 @@ let vms = [];
 let availableApps = [];
 async function load(){
     try {
-        const [r, r2, r3] = await Promise.all([
+        const [r, r2, r3, r4] = await Promise.all([
             fetch('/dashboard/api/list'),
             fetch('/dashboard/api/modeinfo'),
-            fetch('/dashboard/api/apps').catch(()=>({ok:false}))
+            fetch('/dashboard/api/apps').catch(()=>({ok:false})),
+            fetch('/dashboard/api/settings').catch(()=>({ok:false}))
         ]);
         const eb = document.getElementById('errbox');
         if (!r.ok || !r2.ok) {
@@ -98,6 +99,7 @@ async function load(){
         eb.style.display = 'none'; eb.textContent = '';
     const data = await r.json().catch(err => { console.error('[BLOBEDASH] list JSON error', err); return {instances:[]}; });
         const info = await r2.json().catch(err => { console.error('[BLOBEDASH] modeinfo JSON error', err); return {}; });
+        const settings = (r4 && r4.ok) ? await r4.json().catch(()=>({})) : {};
         if (r3 && r3.ok) {
             const apps = await r3.json().catch(()=>({apps:[]}));
             availableApps = apps.apps || [];
@@ -116,6 +118,7 @@ async function load(){
         document.getElementById('customdomain').value = customDomain;
         document.getElementById('domainip').textContent = `Point domain to: ${dashIp}`;
     vms = data.instances || [];
+    const vmTitles = settings.vm_titles || {};
     const tb=document.getElementById('tbody');
         tb.innerHTML='';
     const appOpts = (availableApps||[]).map(a=>`<option value="${a}">${a}</option>`).join('');
@@ -152,9 +155,10 @@ async function load(){
                 }
             }
             dbg('row', { name: i.name, status: i.status, rawUrl: i.url, mergedMode, portOrPath, openUrl });
+            const vmTitle = vmTitles[i.name] || '';
              tr.innerHTML=`<td><img src="/dashboard/vm-favicon/${i.name}.ico" style="width:16px;height:16px;vertical-align:middle;margin-right:6px" onerror="this.style.display='none'"/>${i.name}</td><td>${dot}<span class=muted>${i.status||''}</span></td><td>${portOrPath}</td><td><a href="${openUrl}" target="_blank" rel="noopener noreferrer">${openUrl}</a></td>`+
                  `<td>`+
-                 `<button onclick="openLink('${openUrl}')">Open</button>`+
+                 `<button onclick="openLink('/dashboard/vm/${i.name}/')">Open</button>`+
                  `<button onclick="act('start','${i.name}')">Start</button>`+
                  `<button onclick="act('stop','${i.name}')">Stop</button>`+
                  `<button onclick="act('restart','${i.name}')">Restart</button>`+
@@ -172,6 +176,10 @@ async function load(){
                  `<button onclick="delvm('${i.name}')" class="btn-red">Delete</button>`+
                  `<input type="file" id="favfile-${i.name}" style="display:none" onchange="uploadVMFavicon(event,'${i.name}')" />`+
                  `<button onclick="document.getElementById('favfile-${i.name}').click()">Upload Favicon</button>`+
+                 `<div style="margin-top:.5rem">`+
+                 `<input id="vmtitle-${i.name}" placeholder="Tab title" value="${vmTitle}" style="width:220px" />`+
+                 `<button onclick="saveVMTitle('${i.name}')" style="margin-left:.25rem">Save Title</button>`+
+                 `</div>`+
                  `</td>`;
           tb.appendChild(tr);
         });
@@ -516,6 +524,20 @@ async function checkVM(ev,name){
     }
 
     loadSettings();
+
+    async function saveVMTitle(name){
+        try{
+            const el = document.getElementById('vmtitle-' + name);
+            if(!el) return;
+            const title = el.value || '';
+            const body = new URLSearchParams();
+            body.append('title', title);
+            const r = await fetch('/dashboard/api/set-vm-title/' + encodeURIComponent(name), {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: body});
+            const j = await r.json().catch(()=>({}));
+            if(j && j.ok){ el.style.border = '1px solid #10b981'; setTimeout(()=> el.style.border='', 900); }
+            else { alert('Save failed'); }
+        }catch(e){ console.error('saveVMTitle', e); }
+    }
 
     // Optimizer panel controls
     async function loadOptimizer(){
@@ -1078,6 +1100,23 @@ def api_upload_vm_favicon(name):
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
+@app.post('/dashboard/api/set-vm-title/<name>')
+@auth_required
+def api_set_vm_title(name):
+    title = request.values.get('title','').strip()
+    cfg = _load_dashboard_settings()
+    vm_titles = cfg.get('vm_titles', {}) if isinstance(cfg.get('vm_titles', {}), dict) else {}
+    if title:
+        vm_titles[name] = title
+    else:
+        # clear title
+        if name in vm_titles:
+            vm_titles.pop(name, None)
+    cfg['vm_titles'] = vm_titles
+    ok = _save_dashboard_settings(cfg)
+    return jsonify({'ok': bool(ok)})
+
+
 @app.get('/dashboard/vm-favicon/<name>.ico')
 def dashboard_vm_favicon(name):
     # Serve per-VM favicon if exists, otherwise redirect to main favicon (which may itself redirect)
@@ -1088,6 +1127,33 @@ def dashboard_vm_favicon(name):
         return send_from_directory(ddir, os.path.basename(candidate))
     # fallback to global favicon route
     return '', 302, {'Location': '/dashboard/favicon.ico'}
+
+
+@app.get('/dashboard/vm/<name>/')
+def dashboard_vm_wrapper(name):
+    # Public wrapper page that opens the VM inside an iframe while setting the tab title and favicon.
+    # Resolve VM URL and per-VM title/fav
+    url = _build_vm_url(name) or ''
+    cfg = _load_dashboard_settings()
+    vm_titles = cfg.get('vm_titles', {}) if isinstance(cfg.get('vm_titles', {}), dict) else {}
+    title = vm_titles.get(name) or cfg.get('title') or 'BlobeVM'
+    # prefer per-vm favicon if exists
+    vm_fav_path = os.path.join(_state_dir(), 'dashboard', 'vm-fav', f"{re.sub(r'[^A-Za-z0-9_\-]', '_', name)}.ico")
+    if os.path.isfile(vm_fav_path):
+        fav_url = f'/dashboard/vm-favicon/{name}.ico'
+    else:
+        # fall back to global
+        fav_local = os.path.join(_state_dir(), 'dashboard', 'favicon.ico')
+        if os.path.isfile(fav_local):
+            fav_url = '/dashboard/favicon.ico'
+        else:
+            fav_url = cfg.get('favicon','')
+    # Render simple page with title, favicon and iframe
+    page = f'''<!doctype html><html><head><meta charset="utf-8"><title>{title}</title>'''
+    if fav_url:
+        page += f"<link rel=\"icon\" href=\"{fav_url}\" />"
+    page += f"</head><body style='margin:0;padding:0;overflow:hidden;background:#000'><iframe src=\"{url}\" style=\"position:fixed;top:0;left:0;width:100%;height:100%;border:none;background:#000\"></iframe></body></html>"
+    return page
 
 
 def python_gather_stats():
