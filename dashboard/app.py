@@ -13,10 +13,11 @@ HOST_DOCKER_BIN = os.environ.get('HOST_DOCKER_BIN') or '/usr/bin/docker'
 CONTAINER_DOCKER_BIN = os.environ.get('CONTAINER_DOCKER_BIN') or '/usr/bin/docker'
 DOCKER_VOLUME_BIND = f'{HOST_DOCKER_BIN}:{CONTAINER_DOCKER_BIN}:ro'
 TEMPLATE = r"""
-<!doctype html><html><head><title>BlobeVM Dashboard</title>
+<!doctype html><html><head><title>{{ title }}</title>
+{% if favicon_url %}<link rel="icon" href="{{ favicon_url }}" />{% endif %}
 <style>body{font-family:system-ui,Arial;margin:1.5rem;background:#111;color:#eee}table{border-collapse:collapse;width:100%;}th,td{padding:.5rem;border-bottom:1px solid #333}a,button{background:#2563eb;color:#fff;border:none;padding:.4rem .8rem;border-radius:4px;text-decoration:none;cursor:pointer}form{display:inline}h1{margin-top:0} .badge{background:#444;padding:.15rem .4rem;border-radius:3px;font-size:.65rem;text-transform:uppercase;margin-left:.3rem} .muted{opacity:.75} .btn-red{background:#dc2626} .btn-gray{background:#374151} .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}.green{background:#10b981}.red{background:#ef4444}.gray{background:#6b7280}.amber{background:#f59e0b}</style>
 </head><body>
-<h1>BlobeVM Dashboard</h1>
+<h1 id="dash-title">{{ title }}</h1>
 <div id=errbox style="display:none;background:#7f1d1d;color:#fff;padding:.5rem .75rem;border-radius:4px;margin:.5rem 0"></div>
 <form method=post action="/dashboard/api/create" onsubmit="return createVM(event)">
 <input name=name placeholder="name" required pattern="[a-zA-Z0-9-]+" />
@@ -45,6 +46,16 @@ TEMPLATE = r"""
     <input id=customdomain placeholder="e.g. vms.example.com" style="width:220px" />
     <button onclick="setCustomDomain()">Set domain</button>
     <span id=domainip style="margin-left:1.5rem"></span>
+</div>
+<div style="margin:.5rem 0;padding:.5rem;border:1px solid #222;border-radius:6px;background:#07121a">
+    <strong style="display:block;margin-bottom:.25rem">Dashboard Settings</strong>
+    <input id="setting-title" placeholder="Dashboard title" style="width:320px" />
+    <input id="setting-favicon" placeholder="Favicon URL (http/https)" style="width:320px;margin-left:.5rem" />
+    <input type="file" id="setting-favicon-file" style="margin-left:.5rem" />
+    <button onclick="uploadGlobalFavicon()" style="margin-left:.25rem">Upload Favicon File</button>
+    <button onclick="saveSettings()" style="margin-left:.5rem">Save</button>
+    <button onclick="clearFavicon()" class="btn-gray" style="margin-left:.25rem">Clear Favicon</button>
+    <div id="settings-msg" class="muted" style="margin-top:.5rem"></div>
 </div>
 <script>
 // Debug helpers: enable extra logs with ?debug=1
@@ -141,7 +152,7 @@ async function load(){
                 }
             }
             dbg('row', { name: i.name, status: i.status, rawUrl: i.url, mergedMode, portOrPath, openUrl });
-             tr.innerHTML=`<td>${i.name}</td><td>${dot}<span class=muted>${i.status||''}</span></td><td>${portOrPath}</td><td><a href="${openUrl}" target="_blank" rel="noopener noreferrer">${openUrl}</a></td>`+
+             tr.innerHTML=`<td><img src="/dashboard/vm-favicon/${i.name}.ico" style="width:16px;height:16px;vertical-align:middle;margin-right:6px" onerror="this.style.display='none'"/>${i.name}</td><td>${dot}<span class=muted>${i.status||''}</span></td><td>${portOrPath}</td><td><a href="${openUrl}" target="_blank" rel="noopener noreferrer">${openUrl}</a></td>`+
                  `<td>`+
                  `<button onclick="openLink('${openUrl}')">Open</button>`+
                  `<button onclick="act('start','${i.name}')">Start</button>`+
@@ -159,6 +170,8 @@ async function load(){
                  `<button onclick="rebuildVM('${i.name}')">Rebuild</button>`+
                  `<button onclick=\"cleanVM('${i.name}')\" class=\"btn-gray\">Clean</button>`+
                  `<button onclick="delvm('${i.name}')" class="btn-red">Delete</button>`+
+                 `<input type="file" id="favfile-${i.name}" style="display:none" onchange="uploadVMFavicon(event,'${i.name}')" />`+
+                 `<button onclick="document.getElementById('favfile-${i.name}').click()">Upload Favicon</button>`+
                  `</td>`;
           tb.appendChild(tr);
         });
@@ -426,6 +439,83 @@ async function checkVM(ev,name){
     load();
 }
     load();setInterval(load,8000);
+
+    async function loadSettings(){
+        try{
+            const r = await fetch('/dashboard/api/settings');
+            if(!r.ok) return;
+            const j = await r.json().catch(()=>({}));
+            document.getElementById('setting-title').value = j.title || '';
+            document.getElementById('setting-favicon').value = j.favicon_url || j.favicon || '';
+        }catch(e){ console.error('loadSettings', e); }
+    }
+
+    async function saveSettings(){
+        try{
+            const title = document.getElementById('setting-title').value || '';
+            const fav = document.getElementById('setting-favicon').value || '';
+            const body = new URLSearchParams();
+            body.append('title', title);
+            body.append('favicon', fav);
+            const r = await fetch('/dashboard/api/settings', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: body});
+            const j = await r.json().catch(()=>({}));
+            const msg = document.getElementById('settings-msg');
+            if(j && j.ok){
+                if(msg) msg.textContent = 'Saved.';
+                document.getElementById('dash-title').textContent = title || 'BlobeVM Dashboard';
+                // If a favicon was saved locally, reload page to pick it up
+                if(fav){
+                    // small delay then reload to update favicon
+                    setTimeout(()=> location.reload(), 600);
+                }
+            } else {
+                if(msg) msg.textContent = 'Save failed';
+            }
+        }catch(e){ console.error('saveSettings', e); }
+    }
+
+    async function clearFavicon(){
+        try{
+            const title = document.getElementById('setting-title').value || '';
+            const body = new URLSearchParams();
+            body.append('title', title);
+            body.append('favicon', '');
+            const r = await fetch('/dashboard/api/settings', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: body});
+            const j = await r.json().catch(()=>({}));
+            if(j && j.ok){
+                document.getElementById('setting-favicon').value = '';
+                document.getElementById('settings-msg').textContent = 'Favicon cleared.';
+                setTimeout(()=> location.reload(), 400);
+            }
+        }catch(e){ console.error('clearFavicon', e); }
+    }
+
+    async function uploadGlobalFavicon(){
+        try{
+            const inp = document.getElementById('setting-favicon-file');
+            if(!inp || !inp.files || inp.files.length===0){ alert('Select a file first'); return; }
+            const fd = new FormData();
+            fd.append('file', inp.files[0]);
+            const r = await fetch('/dashboard/api/upload-favicon', {method:'POST', body: fd});
+            const j = await r.json().catch(()=>({}));
+            const msg = document.getElementById('settings-msg');
+            if(j && j.ok){ if(msg) msg.textContent = 'Uploaded.'; setTimeout(()=> location.reload(), 500); } else { if(msg) msg.textContent = 'Upload failed'; }
+        }catch(e){ console.error('uploadGlobalFavicon', e); }
+    }
+
+    async function uploadVMFavicon(ev, name){
+        try{
+            const files = ev && ev.target && ev.target.files ? ev.target.files : null;
+            if(!files || files.length===0){ alert('No file selected'); return; }
+            const fd = new FormData();
+            fd.append('file', files[0]);
+            const r = await fetch('/dashboard/api/upload-vm-favicon/' + encodeURIComponent(name), {method:'POST', body: fd});
+            const j = await r.json().catch(()=>({}));
+            if(j && j.ok){ setTimeout(()=> location.reload(), 500); } else { alert('Upload failed'); }
+        }catch(e){ console.error('uploadVMFavicon', e); }
+    }
+
+    loadSettings();
 
     // Optimizer panel controls
     async function loadOptimizer(){
@@ -841,6 +931,165 @@ def api_modeinfo():
     return jsonify({'merged': merged, 'basePath': base_path, 'domain': domain, 'dashPort': dash_port, 'ip': ip})
 
 
+def _settings_path():
+    return os.path.join(_state_dir(), 'dashboard_settings.json')
+
+
+def _load_dashboard_settings():
+    p = _settings_path()
+    try:
+        if os.path.isfile(p):
+            with open(p, 'r') as f:
+                return json.load(f)
+    except Exception:
+        pass
+    # defaults
+    return {'title': 'BlobeVM Dashboard', 'favicon': ''}
+
+
+def _save_dashboard_settings(cfg: dict):
+    p = _settings_path()
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, 'w') as f:
+            json.dump(cfg, f)
+        return True
+    except Exception:
+        return False
+
+
+@app.get('/dashboard/favicon.ico')
+def dashboard_favicon():
+    # Serve a saved favicon if present under state_dir/dashboard/favicon.ico
+    fav_path = os.path.join(_state_dir(), 'dashboard', 'favicon.ico')
+    if os.path.isfile(fav_path):
+        return send_from_directory(os.path.dirname(fav_path), os.path.basename(fav_path))
+    # If no local file, try to redirect to configured favicon URL
+    cfg = _load_dashboard_settings()
+    if cfg.get('favicon'):
+        return '', 302, {'Location': cfg.get('favicon')}
+    # Not found
+    abort(404)
+
+
+@app.get('/dashboard/api/settings')
+@auth_required
+def api_get_settings():
+    cfg = _load_dashboard_settings()
+    # Provide a favicon URL that the template can consume: prefer local served path if file exists
+    fav_local = os.path.join(_state_dir(), 'dashboard', 'favicon.ico')
+    if os.path.isfile(fav_local):
+        cfg['favicon_url'] = '/dashboard/favicon.ico'
+    else:
+        cfg['favicon_url'] = cfg.get('favicon','')
+    return jsonify(cfg)
+
+
+@app.post('/dashboard/api/settings')
+@auth_required
+def api_set_settings():
+    title = request.values.get('title','').strip()
+    favicon = request.values.get('favicon','').strip()
+    cfg = _load_dashboard_settings()
+    if title:
+        cfg['title'] = title
+    # If favicon is empty string, clear both saved file and url
+    if favicon == '':
+        cfg['favicon'] = ''
+        # remove local file if exists
+        try:
+            fav_local = os.path.join(_state_dir(), 'dashboard', 'favicon.ico')
+            if os.path.isfile(fav_local):
+                os.remove(fav_local)
+        except Exception:
+            pass
+    else:
+        # treat favicon as URL: try to download and save as favicon.ico under state_dir/dashboard/
+        if favicon.lower().startswith('http://') or favicon.lower().startswith('https://'):
+            try:
+                resp = urlrequest.urlopen(favicon, timeout=8)
+                data = resp.read()
+                try:
+                    ddir = os.path.join(_state_dir(), 'dashboard')
+                    os.makedirs(ddir, exist_ok=True)
+                    with open(os.path.join(ddir, 'favicon.ico'), 'wb') as f:
+                        f.write(data)
+                    # prefer local serve
+                    cfg['favicon'] = ''
+                except Exception:
+                    # fallback to storing URL
+                    cfg['favicon'] = favicon
+            except Exception:
+                # if download failed, just store URL so template can reference it
+                cfg['favicon'] = favicon
+        else:
+            # treat as direct URL or path; store it
+            cfg['favicon'] = favicon
+    ok = _save_dashboard_settings(cfg)
+    return jsonify({'ok': bool(ok)})
+
+
+# Upload endpoints: accept multipart file uploads for global and per-VM favicons
+@app.post('/dashboard/api/upload-favicon')
+@auth_required
+def api_upload_favicon():
+    # Expect a form file field named 'file'
+    f = None
+    try:
+        f = request.files.get('file')
+    except Exception:
+        pass
+    if not f:
+        return jsonify({'ok': False, 'error': 'No file provided'}), 400
+    try:
+        ddir = os.path.join(_state_dir(), 'dashboard')
+        os.makedirs(ddir, exist_ok=True)
+        outp = os.path.join(ddir, 'favicon.ico')
+        # Save file bytes
+        f.save(outp)
+        # clear stored URL in settings so local file is preferred
+        cfg = _load_dashboard_settings()
+        cfg['favicon'] = ''
+        _save_dashboard_settings(cfg)
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.post('/dashboard/api/upload-vm-favicon/<name>')
+@auth_required
+def api_upload_vm_favicon(name):
+    f = None
+    try:
+        f = request.files.get('file')
+    except Exception:
+        pass
+    if not f:
+        return jsonify({'ok': False, 'error': 'No file provided'}), 400
+    try:
+        ddir = os.path.join(_state_dir(), 'dashboard', 'vm-fav')
+        os.makedirs(ddir, exist_ok=True)
+        # normalize name
+        safe = re.sub(r'[^A-Za-z0-9_\-]', '_', name)
+        outp = os.path.join(ddir, f"{safe}.ico")
+        f.save(outp)
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.get('/dashboard/vm-favicon/<name>.ico')
+def dashboard_vm_favicon(name):
+    # Serve per-VM favicon if exists, otherwise redirect to main favicon (which may itself redirect)
+    ddir = os.path.join(_state_dir(), 'dashboard', 'vm-fav')
+    safe = re.sub(r'[^A-Za-z0-9_\-]', '_', name)
+    candidate = os.path.join(ddir, f"{safe}.ico")
+    if os.path.isfile(candidate):
+        return send_from_directory(ddir, os.path.basename(candidate))
+    # fallback to global favicon route
+    return '', 302, {'Location': '/dashboard/favicon.ico'}
+
+
 def python_gather_stats():
     out = {'mem': {}, 'swap': {}, 'containers': []}
     try:
@@ -1081,7 +1330,15 @@ def _disable_single_port(dash_port: int | None):
 @app.get('/dashboard')
 @auth_required
 def root():
-    return render_template_string(TEMPLATE)
+    cfg = _load_dashboard_settings()
+    fav = ''
+    fav_local = os.path.join(_state_dir(), 'dashboard', 'favicon.ico')
+    if os.path.isfile(fav_local):
+        fav = '/dashboard/favicon.ico'
+    else:
+        fav = cfg.get('favicon','')
+    title = cfg.get('title', 'BlobeVM Dashboard')
+    return render_template_string(TEMPLATE, title=title, favicon_url=fav)
 
 @app.get('/dashboard/api/list')
 @auth_required

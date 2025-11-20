@@ -319,3 +319,49 @@ The web dashboard provides a modern UI for managing VMs and switching routing mo
 - Enable browser debug logs by appending `?debug=1` to the dashboard URL, then open the browser console to see messages prefixed with `[BLOBEDASH]`.
 
 ---
+
+**Favicon Customization**
+
+- **What it does:** Configure a global dashboard favicon and per-VM favicons. If a VM does not have its own favicon, the dashboard falls back to the global favicon (if present).
+
+- **UI:** The dashboard includes a "Dashboard Settings" panel where you can:
+  - set the dashboard title,
+  - provide a favicon URL, or
+  - upload a favicon file directly.
+  Each VM row also has an "Upload Favicon" button to set a per-VM favicon.
+
+- **APIs / routes:**
+  - `GET /dashboard/api/settings` : Read current settings (JSON).
+  - `POST /dashboard/api/settings` : Save `title` and/or `favicon` (form-encoded). `favicon` may be a URL.
+  - `POST /dashboard/api/upload-favicon` : Upload global favicon (multipart form, field `file`).
+  - `POST /dashboard/api/upload-vm-favicon/<name>` : Upload per-VM favicon (multipart form, field `file`).
+  - `GET /dashboard/favicon.ico` : Serve global favicon (public).
+  - `GET /dashboard/vm-favicon/<name>.ico` : Serve per-VM favicon or redirect to global favicon (public).
+
+- **Storage:**
+  - Settings JSON: `<state_dir>/dashboard_settings.json` (default `BLOBEDASH_STATE` or `/opt/blobe-vm`).
+  - Global favicon file: `<state_dir>/dashboard/favicon.ico` (preferred if present).
+  - Per-VM favicons: `<state_dir>/dashboard/vm-fav/<vmname>.ico`.
+
+- **Auth:** Most API routes require dashboard basic auth when `BLOBEDASH_USER`/`BLOBEDASH_PASS` are set. Static favicon routes are public to avoid browser 401s.
+
+- **Examples:**
+  - Set title and favicon URL via API:
+    ```bash
+    curl -X POST -d "title=My+Lab&favicon=https://example.com/myfav.ico" \
+      http://localhost:5000/dashboard/api/settings
+    ```
+  - Upload a global favicon file:
+    ```bash
+    curl -X POST -F "file=@/path/to/favicon.ico" http://localhost:5000/dashboard/api/upload-favicon
+    ```
+  - Upload a per-VM favicon:
+    ```bash
+    curl -X POST -F "file=@/path/to/vm-fav.ico" http://localhost:5000/dashboard/api/upload-vm-favicon/myvm
+    ```
+
+- **Notes & behavior:**
+  - The server will try to download a favicon when you submit a remote URL and save it locally when possible; otherwise the URL is stored and referenced directly.
+  - Browsers accept PNG or ICO files as favicons; prefer using an `.ico` for widest compatibility. The server saves bytes as-is.
+  - No container restart is required — the dashboard will pick up changes after a short reload. If you run the dashboard as a daemonized container, ensure the `BLOBEDASH_STATE` volume is mounted so saved files are persistent.
+
