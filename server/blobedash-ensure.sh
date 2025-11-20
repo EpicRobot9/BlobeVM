@@ -91,6 +91,7 @@ fi
 docker run -d --name "$NAME" --restart unless-stopped \
   -p "${DASHBOARD_PORT}:5000" \
   -v "$STATE_DIR:/opt/blobe-vm" \
+  -v /var/blobe:/var/blobe \
   -v /usr/local/bin/blobe-vm-manager:/usr/local/bin/blobe-vm-manager:ro \
   -v "${HOST_DOCKER_BIN}:/usr/bin/docker:ro" \
   -v /var/run/docker.sock:/var/run/docker.sock \
