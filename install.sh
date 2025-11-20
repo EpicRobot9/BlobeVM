@@ -58,10 +58,25 @@ if [[ ! -d /opt/blobe-vm/optimizer && -d /opt/blobe-vm/BlobeVM ]]; then
 fi
 
 # If optimizer files are present in repo but not in /opt/blobe-vm, copy them explicitly
-if [[ -n "$REPO_SRC" && -d "$REPO_SRC/optimizer" && ! -d /opt/blobe-vm/optimizer ]]; then
-    echo "Copying optimizer/ from repo into /opt/blobe-vm/optimizer"
-    sudo mkdir -p /opt/blobe-vm/optimizer
-    sudo rsync -a "$REPO_SRC/optimizer/" /opt/blobe-vm/optimizer/
+if [[ (! -d /opt/blobe-vm/optimizer) ]]; then
+    # If we have a detected repo source, copy from it. Otherwise try cloning from GitHub.
+    if [[ -n "$REPO_SRC" && -d "$REPO_SRC/optimizer" ]]; then
+        echo "Copying optimizer/ from repo into /opt/blobe-vm/optimizer"
+        sudo mkdir -p /opt/blobe-vm/optimizer
+        sudo rsync -a "$REPO_SRC/optimizer/" /opt/blobe-vm/optimizer/
+    else
+        echo "Optimizer not found locally; cloning repo from GitHub to retrieve optimizer"
+        TMP_CLONE="/tmp/BlobeVM_installer_$$"
+        rm -rf "$TMP_CLONE"
+        git clone --depth 1 https://github.com/EpicRobot9/BlobeVM "$TMP_CLONE" || true
+        if [[ -d "$TMP_CLONE/optimizer" ]]; then
+            sudo mkdir -p /opt/blobe-vm/optimizer
+            sudo rsync -a "$TMP_CLONE/optimizer/" /opt/blobe-vm/optimizer/
+        else
+            echo "Failed to obtain optimizer from remote repo."
+        fi
+        rm -rf "$TMP_CLONE"
+    fi
 fi
 
 # Ensure log dir exists
