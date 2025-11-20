@@ -1,28 +1,3 @@
-    <div style="margin-bottom:.5rem;display:flex;gap:1rem;align-items:center;flex-wrap:wrap">
-        <label><input id="scheduler-enabled" type="checkbox" onchange="optimizerSet('schedulerEnabled', this.checked)"> Scheduler Enabled <span id="scheduler-stat" class="muted"></span></label>
-        <label>Restart Interval (hours): <input id="restart-interval" type="number" min="1" style="width:80px;margin-left:.5rem"/> <button onclick="setRestartInterval()">Set</button></label>
-        <label style="margin-left:1rem">Auto-Restart Info: <span id="restart-info" class="muted"></span></label>
-        <label style="margin-left:1rem">Last Restart: <span id="last-restart-stat" class="muted"></span></label>
-    </div>
-        <strong>Per-VM Stats (top consumers):</strong>
-        <table style="width:100%;margin-top:.5rem;background:#071421;border-radius:4px"><thead><tr><th style="text-align:left">Container</th><th>CPU</th><th>Mem%</th><th>Mem</th></tr></thead><tbody id="optimizer-vm-stats"></tbody></table>
-    </div>
-            const schedulerEl = document.getElementById('scheduler-enabled');
-            const restartIntervalEl = document.getElementById('restart-interval');
-            const restartInfoEl = document.getElementById('restart-info');
-            const vmStatsBody = document.getElementById('optimizer-vm-stats');
-                // scheduler UI
-                if(schedulerEl) schedulerEl.checked = !!(j && j.cfg && j.cfg.schedulerEnabled);
-                if(restartIntervalEl) restartIntervalEl.value = (j && j.cfg && j.cfg.restartIntervalHours) ? j.cfg.restartIntervalHours : '';
-                if(restartInfoEl) restartInfoEl.textContent = (j && j.cfg && j.cfg.restartIntervalHours) ? `Every ${j.cfg.restartIntervalHours}h` : '';
-                const lastRestartEl = document.getElementById('last-restart-stat');
-                if(lastRestartEl){
-                    const lr = j && j.lastRestart ? parseInt(j.lastRestart) : 0;
-                    if(lr && !isNaN(lr)){
-                        const d = new Date(lr*1000);
-                        lastRestartEl.textContent = d.toLocaleString();
-                    } else { lastRestartEl.textContent = ''; }
-                }
 #!/usr/bin/env python3
 import os, json, subprocess, shlex, base64, socket, threading, time
 import shutil
