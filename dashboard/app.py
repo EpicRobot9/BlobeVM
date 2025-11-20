@@ -344,13 +344,23 @@ function bulkDeleteAll(){
     fetch('/dashboard/api/delete-all-instances',{method:'POST'}).then(load);
 }
 async function setCustomDomain(){
-    const dom = document.getElementById('customdomain').value.trim();
-    if(!dom) return alert('Enter a domain.');
-    clearErr();
-    const r = await fetch('/dashboard/api/set-domain', {method:'post',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:`domain=${encodeURIComponent(dom)}`});
-    const j = await r.json().catch(()=>({}));
-    if(j && j.ip) document.getElementById('domainip').textContent = `Point domain to: ${j.ip}`;
-    else showErr('Saved, but could not resolve IP.');
+    try{
+        const dom = document.getElementById('customdomain').value.trim();
+        if(!dom){ showErr('Enter a domain.'); return; }
+        console.log('[BLOBEDASH] setCustomDomain ->', dom);
+        clearErr();
+        const di = document.getElementById('domainip'); if(di) di.textContent = 'Saving...';
+        const r = await fetch('/dashboard/api/set-domain', {method:'post',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:`domain=${encodeURIComponent(dom)}`});
+        const j = await r.json().catch(()=>({}));
+        if(j && j.ip){
+            if(di) di.textContent = `Point domain to: ${j.ip}`;
+        } else {
+            showErr('Saved, but could not resolve IP.');
+            if(di) di.textContent = '';
+        }
+    }catch(e){
+        showErr('Set domain error: '+e);
+    }
 }
 function statusDot(st){
     const s=(st||'').toLowerCase();
