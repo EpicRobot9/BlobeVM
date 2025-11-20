@@ -349,14 +349,18 @@ async function setCustomDomain(){
         if(!dom){ showErr('Enter a domain.'); return; }
         console.log('[BLOBEDASH] setCustomDomain ->', dom);
         clearErr();
-        const di = document.getElementById('domainip'); if(di) di.textContent = 'Saving...';
-        const r = await fetch('/dashboard/api/set-domain', {method:'post',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:`domain=${encodeURIComponent(dom)}`});
+        const di = document.getElementById('domainip'); if(di) di.textContent = 'Applying...';
+        // Ask server to persist domain and apply merged/domain-mode settings so VMs pick it up
+        const r = await fetch('/dashboard/api/set-domain?apply=1', {method:'post',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:`domain=${encodeURIComponent(dom)}&apply=1`});
         const j = await r.json().catch(()=>({}));
         if(j && j.ip){
             if(di) di.textContent = `Point domain to: ${j.ip}`;
         } else {
             showErr('Saved, but could not resolve IP.');
             if(di) di.textContent = '';
+        }
+        if(j && j.applied){
+            alert('Domain saved and merged-mode applied. VMs are being restarted in background.');
         }
     }catch(e){
         showErr('Set domain error: '+e);
@@ -796,7 +800,42 @@ def api_set_domain():
     dom = request.values.get('domain','').strip()
     if not dom:
         return jsonify({'ok': False, 'error': 'No domain'}), 400
+    # Persist the domain
     _write_env_kv({'BLOBEVM_DOMAIN': dom})
+    # If caller requested, also apply merged/domain-mode settings so domain routing will be used.
+    apply_mode = request.values.get('apply') in ('1','true','yes')
+    if apply_mode:
+        # Set merged-mode env vars that manager expects. Do not modify routing code itself.
+        _write_env_kv({
+            'NO_TRAEFIK': '0',
+            'MERGED_MODE': '1',
+            'TRAEFIK_NETWORK': 'proxy',
+            'ENABLE_DASHBOARD': '1',
+        })
+        # Run background worker to ensure proxy network exists and restart VMs so they pick up new mode
+        def worker_apply(domain_name):
+            try:
+                # Ensure network exists
+                r = _docker('network', 'inspect', 'proxy')
+                if r.returncode != 0:
+                    _docker('network', 'create', 'proxy')
+                # Restart all instances so they reattach with updated labels/mode
+                inst_root = os.path.join(_state_dir(), 'instances')
+                try:
+                    names = [n for n in os.listdir(inst_root) if os.path.isdir(os.path.join(inst_root, n))]
+                except Exception:
+                    names = []
+                for name in names:
+                    cname = f'blobevm_{name}'
+                    # remove container and start via manager to ensure labels/networks are applied
+                    _docker('rm', '-f', cname)
+                    try:
+                        subprocess.run([MANAGER, 'start', name], check=False)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        threading.Thread(target=worker_apply, args=(dom,), daemon=True).start()
     # Best-effort IP hint: show the host the user is using to reach the dashboard
     ip = _request_host() or ''
     if not ip:
@@ -804,7 +843,7 @@ def api_set_domain():
             ip = socket.gethostbyname(socket.gethostname())
         except Exception:
             ip = ''
-    return jsonify({'ok': True, 'domain': dom, 'ip': ip})
+    return jsonify({'ok': True, 'domain': dom, 'ip': ip, 'applied': apply_mode})
 
 def _enable_single_port(port: int):
     """Enable single-port mode by launching a tiny Traefik and reattaching services.
