@@ -57,6 +57,14 @@ if [[ ! -d /opt/blobe-vm/optimizer && -d /opt/blobe-vm/BlobeVM ]]; then
     sudo rm -rf /opt/blobe-vm/BlobeVM
 fi
 
+# Also handle cases where the repo content was copied under /opt/blobe-vm/repo
+# (some installer runs create a `repo/` directory). Flatten it too if present.
+if [[ ! -d /opt/blobe-vm/optimizer && -d /opt/blobe-vm/repo ]]; then
+    echo "Detected nested /opt/blobe-vm/repo; flattening into /opt/blobe-vm"
+    sudo rsync -a /opt/blobe-vm/repo/ /opt/blobe-vm/
+    sudo rm -rf /opt/blobe-vm/repo
+fi
+
 # If optimizer files are present in repo but not in /opt/blobe-vm, copy them explicitly
 if [[ (! -d /opt/blobe-vm/optimizer) ]]; then
     # If we have a detected repo source, copy from it. Otherwise try cloning from GitHub.

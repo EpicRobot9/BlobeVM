@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os, json, subprocess, shlex, base64, socket, threading, time
+import shutil
 from urllib import request as urlrequest, error as urlerror
 from functools import wraps
 from flask import Flask, jsonify, request, abort, send_from_directory, render_template_string, Response
@@ -1313,9 +1314,20 @@ def api_optimizer_status():
     if not os.path.isfile(script):
         return jsonify({'ok': False, 'error': 'optimizer script not installed'}), 404
     try:
-        r = subprocess.run([node, script, 'status'], capture_output=True, text=True, timeout=8)
-        if r.returncode == 0 and r.stdout:
-            return Response(r.stdout, mimetype='application/json')
+        # Prefer running local `node` if available
+        if shutil.which('node'):
+            r = subprocess.run([node, script, 'status'], capture_output=True, text=True, timeout=8)
+            if r.returncode == 0 and r.stdout:
+                return Response(r.stdout, mimetype='application/json')
+        else:
+            # Try running the optimizer CLI inside a temporary node docker container
+            try:
+                dr = subprocess.run(['docker', 'run', '--rm', '-v', f"{state}:{state}", '-w', state, 'node:18-slim', 'node', script, 'status'], capture_output=True, text=True, timeout=12)
+                if dr.returncode == 0 and dr.stdout:
+                    return Response(dr.stdout, mimetype='application/json')
+            except Exception:
+                pass
+
         # Fall back to returning config file if CLI didn't return
         cfgp = os.path.join(state, '.optimizer.json')
         cfg = {}
@@ -1338,7 +1350,14 @@ def api_optimizer_run_once():
         return jsonify({'ok': False, 'error': 'optimizer script not installed'}), 404
     def worker():
         try:
-            subprocess.run([node, script, 'run-once'], capture_output=True, text=True)
+            if shutil.which('node'):
+                subprocess.run([node, script, 'run-once'], capture_output=True, text=True)
+            else:
+                # Run using docker node image if available
+                try:
+                    subprocess.run(['docker', 'run', '--rm', '-v', f"{state}:{state}", '-w', state, 'node:18-slim', 'node', script, 'run-once'], capture_output=True, text=True)
+                except Exception:
+                    pass
         except Exception:
             pass
     threading.Thread(target=worker, daemon=True).start()
