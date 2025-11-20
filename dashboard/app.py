@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os, json, subprocess, shlex, base64, socket, threading, time
 import shutil
+import re
 from urllib import request as urlrequest, error as urlerror
 from functools import wraps
 from flask import Flask, jsonify, request, abort, send_from_directory, render_template_string, Response
@@ -445,6 +446,41 @@ async function checkVM(ev,name){
             if(hg) hg.checked = !!(j && j.cfg && j.cfg.guards && j.cfg.guards.health);
             const sm = document.getElementById('guard-strictmem');
             if(sm) sm.checked = !!(j && j.cfg && j.cfg.strictMemoryLimit);
+
+            // Update small status spans with current values/stats
+            const memStat = document.getElementById('guard-memory-stat');
+            const cpuStat = document.getElementById('guard-cpu-stat');
+            const swapStat = document.getElementById('guard-swap-stat');
+            const healthStat = document.getElementById('guard-health-stat');
+            const strictMemStat = document.getElementById('guard-strictmem-stat');
+            try{
+                const stats = (j && j.stats) ? j.stats : null;
+                if(stats && stats.mem && stats.mem.total){
+                    const used = stats.mem.used || 0; const total = stats.mem.total || 0;
+                    const pct = total? Math.round(100*used/total): 0;
+                    if(memStat) memStat.textContent = `${(used/1024/1024).toFixed(0)}MiB / ${(total/1024/1024).toFixed(0)}MiB (${pct}%)`;
+                } else {
+                    if(memStat) memStat.textContent = '';
+                }
+                if(stats && Array.isArray(stats.containers) && stats.containers.length){
+                    // find top CPU consumer among blobevm_ containers if possible
+                    let top = null;
+                    for(const c of stats.containers){
+                        if(!top || (c.cpu || 0) > (top.cpu || 0)) top = c;
+                    }
+                    if(top && cpuStat) cpuStat.textContent = `${top.name}: ${ (top.cpu||0).toFixed(1) }%`;
+                } else {
+                    if(cpuStat) cpuStat.textContent = '';
+                }
+                if(stats && stats.swap && stats.swap.total){
+                    const sused = stats.swap.used || 0; const stotal = stats.swap.total || 0;
+                    const spct = stotal? Math.round(100*sused/stotal): 0;
+                    if(swapStat) swapStat.textContent = `${(sused/1024/1024).toFixed(0)}MiB (${spct}%)`;
+                } else { if(swapStat) swapStat.textContent = ''; }
+                if(j && j.cfg && j.cfg.strictMemoryLimit){
+                    if(strictMemStat) strictMemStat.textContent = `limit=${j.cfg.memoryLimit||'1g'}`;
+                } else { if(strictMemStat) strictMemStat.textContent = ''; }
+            }catch(e){ console.error('update optimizer stats', e); }
         }catch(e){ console.error('loadOptimizer', e); }
     }
 
@@ -481,12 +517,12 @@ async function checkVM(ev,name){
 <div style="margin:1.5rem 0;padding:1rem;border:1px solid #333;border-radius:6px;background:#081226">
     <h2 style="margin-top:0">Optimizer Panel</h2>
     <div style="display:flex;gap:1rem;align-items:center;margin-bottom:.5rem">
-        <label><input id="optimizer-enabled" type="checkbox" onchange="optimizerSet('enabled', this.checked)"> Optimizer Enabled</label>
-        <label><input id="guard-memory" type="checkbox" onchange="optimizerSet('guards', Object.assign(({}), {memory:this.checked}))"> Memory Guard</label>
-        <label><input id="guard-cpu" type="checkbox" onchange="optimizerSet('guards', Object.assign(({}), {cpu:this.checked}))"> CPU Guard</label>
-        <label><input id="guard-swap" type="checkbox" onchange="optimizerSet('guards', Object.assign(({}), {swap:this.checked}))"> Swap Guard</label>
-        <label><input id="guard-health" type="checkbox" onchange="optimizerSet('guards', Object.assign(({}), {health:this.checked}))"> Health Guard</label>
-        <label><input id="guard-strictmem" type="checkbox" onchange="optimizerSet('strictMemoryLimit', this.checked)"> Strict Memory Limits</label>
+        <label><input id="optimizer-enabled" type="checkbox" onchange="optimizerSet('enabled', this.checked)"> Optimizer Enabled <span id="opt-enabled-stat" class="muted"></span></label>
+        <label><input id="guard-memory" type="checkbox" onchange="optimizerSet('guards', Object.assign(({}), {memory:this.checked}))"> Memory Guard <span id="guard-memory-stat" class="muted"></span></label>
+        <label><input id="guard-cpu" type="checkbox" onchange="optimizerSet('guards', Object.assign(({}), {cpu:this.checked}))"> CPU Guard <span id="guard-cpu-stat" class="muted"></span></label>
+        <label><input id="guard-swap" type="checkbox" onchange="optimizerSet('guards', Object.assign(({}), {swap:this.checked}))"> Swap Guard <span id="guard-swap-stat" class="muted"></span></label>
+        <label><input id="guard-health" type="checkbox" onchange="optimizerSet('guards', Object.assign(({}), {health:this.checked}))"> Health Guard <span id="guard-health-stat" class="muted"></span></label>
+        <label><input id="guard-strictmem" type="checkbox" onchange="optimizerSet('strictMemoryLimit', this.checked)"> Strict Memory Limits <span id="guard-strictmem-stat" class="muted"></span></label>
     </div>
     <div style="margin-bottom:.5rem">
         <button onclick="optimizerRunOnce()">Run Once</button>
@@ -794,6 +830,60 @@ def api_modeinfo():
     # Show the host the user used to reach the dashboard
     ip = _request_host() or ''
     return jsonify({'merged': merged, 'basePath': base_path, 'domain': domain, 'dashPort': dash_port, 'ip': ip})
+
+
+def python_gather_stats():
+    out = {'mem': {}, 'swap': {}, 'containers': []}
+    try:
+        free = subprocess.check_output(['free', '-b'], text=True)
+        lines = free.split('\n')
+        memLine = next((l for l in lines if l.lower().startswith('mem:')), '')
+        parts = re.split(r'\s+', memLine.strip()) if memLine else []
+        if len(parts) >= 3:
+            out['mem']['total'] = int(parts[1])
+            out['mem']['used'] = int(parts[2])
+        swapLine = next((l for l in lines if l.lower().startswith('swap:')), '')
+        sp = re.split(r'\s+', swapLine.strip()) if swapLine else []
+        if len(sp) >= 3:
+            out['swap']['total'] = int(sp[1])
+            out['swap']['used'] = int(sp[2])
+    except Exception:
+        pass
+    # docker stats fallback
+    try:
+        d = subprocess.check_output(['docker', 'stats', '--no-stream', '--format', "{{.Name}}|{{.CPUPerc}}|{{.MemPerc}}|{{.MemUsage}}"], text=True)
+        for l in d.splitlines():
+            if not l.strip():
+                continue
+            parts = l.split('|')
+            if len(parts) >= 4:
+                name = parts[0]
+                cpu = 0.0
+                try:
+                    cpu = float(parts[1].strip().replace('%',''))
+                except Exception:
+                    cpu = 0.0
+                memperc = 0.0
+                try:
+                    memperc = float(parts[2].strip().replace('%',''))
+                except Exception:
+                    memperc = 0.0
+                memusage = parts[3].strip()
+                # attempt to parse bytes from memusage like '12.3MiB / 1.95GiB'
+                m = re.search(r'([0-9.]+)\s*([KMG]i?)B', memusage)
+                memBytes = 0
+                if m:
+                    n = float(m.group(1)); u = m.group(2).upper()
+                    mul = 1024
+                    if u.startswith('M'):
+                        mul = 1024*1024
+                    elif u.startswith('G'):
+                        mul = 1024*1024*1024
+                    memBytes = int(n * mul)
+                out['containers'].append({'name': name, 'cpu': cpu, 'memperc': memperc, 'memBytes': memBytes})
+    except Exception:
+        pass
+    return out
 
 @app.post('/dashboard/api/set-domain')
 @auth_required
@@ -1311,8 +1401,6 @@ def api_optimizer_status():
     state = _state_dir()
     node = 'node'
     script = os.path.join(state, 'optimizer', 'OptimizerService.js')
-    if not os.path.isfile(script):
-        return jsonify({'ok': False, 'error': 'optimizer script not installed'}), 404
     try:
         # Prefer running local `node` if available
         if shutil.which('node'):
@@ -1328,14 +1416,15 @@ def api_optimizer_status():
             except Exception:
                 pass
 
-        # Fall back to returning config file if CLI didn't return
+        # Fall back to returning config file and python-gathered stats if CLI didn't return
         cfgp = os.path.join(state, '.optimizer.json')
         cfg = {}
         try:
             with open(cfgp,'r') as f: cfg = json.load(f)
         except Exception:
             cfg = {'enabled': False}
-        return jsonify({'ok': True, 'cfg': cfg})
+        stats = python_gather_stats()
+        return jsonify({'ok': True, 'cfg': cfg, 'stats': stats})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
