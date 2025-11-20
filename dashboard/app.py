@@ -5,6 +5,7 @@ import re
 from urllib import request as urlrequest, error as urlerror
 from functools import wraps
 from flask import Flask, jsonify, request, abort, send_from_directory, render_template_string, Response
+import optimizer as dash_optimizer
 
 APP_ROOT = '/opt/blobe-vm'
 MANAGER = 'blobe-vm-manager'
@@ -1405,44 +1406,10 @@ def api_disable_single_port():
 @app.get('/dashboard/api/optimizer/status')
 @auth_required
 def api_optimizer_status():
-    """Return optimizer status and basic stats by invoking optimizer CLI if available."""
-    state = _state_dir()
-    node = 'node'
-    script = os.path.join(state, 'optimizer', 'OptimizerService.js')
+    """Return optimizer status and stats via embedded optimizer module."""
     try:
-        # Prefer running local `node` if available
-        if shutil.which('node'):
-            r = subprocess.run([node, script, 'status'], capture_output=True, text=True, timeout=8)
-            if r.returncode == 0 and r.stdout:
-                return Response(r.stdout, mimetype='application/json')
-        else:
-            # Try running the optimizer CLI inside a temporary node docker container
-            try:
-                dr = subprocess.run(['docker', 'run', '--rm', '-v', f"{state}:{state}", '-w', state, 'node:18-slim', 'node', script, 'status'], capture_output=True, text=True, timeout=12)
-                if dr.returncode == 0 and dr.stdout:
-                    return Response(dr.stdout, mimetype='application/json')
-            except Exception:
-                pass
-
-        # Fall back to returning config file and python-gathered stats if CLI didn't return
-        cfgp = os.path.join(state, '.optimizer.json')
-        cfg = {}
-        try:
-            with open(cfgp,'r') as f: cfg = json.load(f)
-        except Exception:
-            cfg = {'enabled': False}
-        stats = python_gather_stats()
-        last_restart = None
-        try:
-            lrp = os.path.join(state, '.optimizer_last_restart')
-            if os.path.isfile(lrp):
-                try:
-                    last_restart = int(open(lrp,'r').read().strip())
-                except Exception:
-                    last_restart = None
-        except Exception:
-            last_restart = None
-        return jsonify({'ok': True, 'cfg': cfg, 'stats': stats, 'lastRestart': last_restart})
+        s = dash_optimizer.status()
+        return jsonify({'ok': True, 'cfg': s.get('cfg'), 'stats': s.get('stats'), 'lastRestart': s.get('lastRestart')})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
@@ -1450,23 +1417,12 @@ def api_optimizer_status():
 @app.post('/dashboard/api/optimizer/run-once')
 @auth_required
 def api_optimizer_run_once():
-    state = _state_dir()
-    node = 'node'
-    script = os.path.join(state, 'optimizer', 'OptimizerService.js')
-    if not os.path.isfile(script):
-        return jsonify({'ok': False, 'error': 'optimizer script not installed'}), 404
+    # Start a background run of the embedded optimizer
     def worker():
         try:
-            if shutil.which('node'):
-                subprocess.run([node, script, 'run-once'], capture_output=True, text=True)
-            else:
-                # Run using docker node image if available
-                try:
-                    subprocess.run(['docker', 'run', '--rm', '-v', f"{state}:{state}", '-w', state, 'node:18-slim', 'node', script, 'run-once'], capture_output=True, text=True)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+            dash_optimizer.run_once()
+        except Exception as e:
+            dash_optimizer.log(f'run-once worker error {e}')
     threading.Thread(target=worker, daemon=True).start()
     return jsonify({'ok': True, 'started': True})
 
@@ -1479,49 +1435,9 @@ def api_optimizer_set():
     val = data.get('val')
     if not key:
         return jsonify({'ok': False, 'error': 'missing key'}), 400
-    state = _state_dir()
-    node = 'node'
-    script = os.path.join(state, 'optimizer', 'OptimizerService.js')
-    cfgp = os.path.join(state, '.optimizer.json')
-    # If optimizer script not installed, modify cfg file directly (fallback)
-    if not os.path.isfile(script):
-        try:
-            cfg = {}
-            if os.path.isfile(cfgp):
-                try:
-                    with open(cfgp, 'r') as f:
-                        cfg = json.load(f)
-                except Exception:
-                    cfg = {}
-            # apply simple assignment semantics
-            if key == 'guards' and isinstance(val, dict):
-                cfg.setdefault('guards', {}).update(val)
-            else:
-                cfg[key] = val
-            # write back
-            try:
-                with open(cfgp, 'w') as f:
-                    json.dump(cfg, f)
-                return jsonify({'ok': True})
-            except Exception as e:
-                return jsonify({'ok': False, 'error': f'failed writing cfg: {e}'}), 500
-        except Exception as e:
-            return jsonify({'ok': False, 'error': f'cfg error: {e}'}), 500
-
-    # If optimizer script exists, prefer calling its CLI. Use local node if available,
-    # otherwise attempt to run via a temporary node Docker image.
     try:
-        args = [node, script, 'set', key, json.dumps(val)]
-        if shutil.which('node'):
-            r = subprocess.run(args, capture_output=True, text=True)
-            return jsonify({'ok': r.returncode == 0, 'output': r.stdout.strip(), 'error': r.stderr.strip()})
-        else:
-            # Try docker fallback
-            try:
-                dr = subprocess.run(['docker', 'run', '--rm', '-v', f"{state}:{state}", '-w', state, 'node:18-slim', 'node', script, 'set', key, json.dumps(val)], capture_output=True, text=True, timeout=20)
-                return jsonify({'ok': dr.returncode == 0, 'output': dr.stdout.strip(), 'error': dr.stderr.strip()})
-            except Exception as e:
-                return jsonify({'ok': False, 'error': f'docker fallback failed: {e}'}), 500
+        dash_optimizer.set_config(key, val)
+        return jsonify({'ok': True})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
@@ -1529,11 +1445,11 @@ def api_optimizer_set():
 @app.get('/dashboard/api/optimizer/logs')
 @auth_required
 def api_optimizer_logs():
-    p = '/var/blobe/logs/optimizer/optimizer.log'
     try:
-        if os.path.isfile(p):
-            return Response(open(p,'r').read(), mimetype='text/plain')
-        return jsonify({'ok': False, 'error': 'no logs'}), 404
+        t = dash_optimizer.tail_logs()
+        if t is None or t == '':
+            return jsonify({'ok': False, 'error': 'no logs'}), 404
+        return Response(t, mimetype='text/plain')
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
@@ -1609,4 +1525,8 @@ def api_optimizer_clean_system():
 
 
 if __name__ == '__main__':
+    try:
+        dash_optimizer.start_background_loop()
+    except Exception:
+        pass
     app.run(host='0.0.0.0', port=5000)

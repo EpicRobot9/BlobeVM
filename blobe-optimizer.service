@@ -1,16 +1,3 @@
-[Unit]
-Description=Blobe VM Optimizer Service
-After=network.target docker.service
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/blobe-vm
-# Call the idempotent ensure script which will install prerequisites
-# and then exec the node process so systemd tracks the optimizer PID.
-ExecStart=/usr/bin/env bash /opt/blobe-vm/optimizer/optimizer-ensure.sh
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
+; Deprecated: optimizer is now embedded in the dashboard (dashboard/optimizer.py)
+; The optimizer should no longer be installed as a separate systemd unit.
+; This file remains for historical/reference purposes only.
