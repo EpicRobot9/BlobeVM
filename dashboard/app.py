@@ -1375,29 +1375,46 @@ def api_optimizer_set():
     state = _state_dir()
     node = 'node'
     script = os.path.join(state, 'optimizer', 'OptimizerService.js')
+    cfgp = os.path.join(state, '.optimizer.json')
+    # If optimizer script not installed, modify cfg file directly (fallback)
     if not os.path.isfile(script):
-        # fallback: modify cfg file directly
-        cfgp = os.path.join(state, '.optimizer.json')
         try:
             cfg = {}
             if os.path.isfile(cfgp):
-                with open(cfgp,'r') as f: cfg = json.load(f)
-        except Exception:
-            cfg = {}
-        # apply simple assignment semantics
-        if key == 'guards' and isinstance(val, dict):
-            cfg.setdefault('guards', {}).update(val)
-        else:
-            cfg[key] = val
-        try:
-            with open(cfgp,'w') as f: json.dump(cfg, f)
-            return jsonify({'ok': True})
+                try:
+                    with open(cfgp, 'r') as f:
+                        cfg = json.load(f)
+                except Exception:
+                    cfg = {}
+            # apply simple assignment semantics
+            if key == 'guards' and isinstance(val, dict):
+                cfg.setdefault('guards', {}).update(val)
+            else:
+                cfg[key] = val
+            # write back
+            try:
+                with open(cfgp, 'w') as f:
+                    json.dump(cfg, f)
+                return jsonify({'ok': True})
+            except Exception as e:
+                return jsonify({'ok': False, 'error': f'failed writing cfg: {e}'}), 500
         except Exception as e:
-            return jsonify({'ok': False, 'error': str(e)}), 500
+            return jsonify({'ok': False, 'error': f'cfg error: {e}'}), 500
+
+    # If optimizer script exists, prefer calling its CLI. Use local node if available,
+    # otherwise attempt to run via a temporary node Docker image.
     try:
         args = [node, script, 'set', key, json.dumps(val)]
-        r = subprocess.run(args, capture_output=True, text=True)
-        return jsonify({'ok': r.returncode==0, 'output': r.stdout.strip(), 'error': r.stderr.strip()})
+        if shutil.which('node'):
+            r = subprocess.run(args, capture_output=True, text=True)
+            return jsonify({'ok': r.returncode == 0, 'output': r.stdout.strip(), 'error': r.stderr.strip()})
+        else:
+            # Try docker fallback
+            try:
+                dr = subprocess.run(['docker', 'run', '--rm', '-v', f"{state}:{state}", '-w', state, 'node:18-slim', 'node', script, 'set', key, json.dumps(val)], capture_output=True, text=True, timeout=20)
+                return jsonify({'ok': dr.returncode == 0, 'output': dr.stdout.strip(), 'error': dr.stderr.strip()})
+            except Exception as e:
+                return jsonify({'ok': False, 'error': f'docker fallback failed: {e}'}), 500
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
