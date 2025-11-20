@@ -20,3 +20,36 @@ else
 fi
 clear
 echo "BLOBEVM WAS INSTALLED SUCCESSFULLY! Check Port Tab"
+
+# --- Install and enable Blobe Optimizer service so it runs immediately ---
+echo "Installing Blobe Optimizer service..."
+
+sudo mkdir -p /opt/blobe-vm
+sudo cp -r "$PWD"/* /opt/blobe-vm/ 2>/dev/null || sudo rsync -a "$PWD"/ /opt/blobe-vm/
+
+# Ensure Node.js (Node 18 LTS) is present via NodeSource for a modern runtime
+if ! command -v node >/dev/null 2>&1; then
+    echo "Installing Node.js 18.x via NodeSource"
+    sudo apt-get update -y
+    sudo apt-get install -y curl ca-certificates gnupg lsb-release
+    curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+    sudo apt-get install -y nodejs
+else
+    echo "Node already installed: $(node --version)"
+fi
+
+# Make optimizer script and ensure script executable and create log dir
+sudo mkdir -p /var/blobe/logs/optimizer
+sudo chmod -R 755 /opt/blobe-vm/optimizer || true
+sudo chmod +x /opt/blobe-vm/optimizer/OptimizerService.js 2>/dev/null || true
+sudo chmod +x /opt/blobe-vm/optimizer/optimizer-ensure.sh 2>/dev/null || true
+
+# Install systemd service file and enable/start it
+if [[ -f "blobe-optimizer.service" ]]; then
+    sudo cp blobe-optimizer.service /etc/systemd/system/blobe-optimizer.service
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now blobe-optimizer.service || sudo systemctl start blobe-optimizer.service || true
+    echo "Blobe Optimizer service installed and started (if supported on this system)."
+else
+    echo "blobe-optimizer.service not found in repo; skipping service install."
+fi

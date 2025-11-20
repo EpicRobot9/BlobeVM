@@ -6,7 +6,9 @@ After=network.target docker.service
 Type=simple
 User=root
 WorkingDirectory=/opt/blobe-vm
-ExecStart=/usr/bin/env node /opt/blobe-vm/optimizer/OptimizerService.js daemon
+# Call the idempotent ensure script which will install prerequisites
+# and then exec the node process so systemd tracks the optimizer PID.
+ExecStart=/usr/bin/env bash /opt/blobe-vm/optimizer/optimizer-ensure.sh
 Restart=on-failure
 RestartSec=10
 
