@@ -25,7 +25,22 @@ echo "BLOBEVM WAS INSTALLED SUCCESSFULLY! Check Port Tab"
 echo "Installing Blobe Optimizer service..."
 
 sudo mkdir -p /opt/blobe-vm
-sudo cp -r "$PWD"/* /opt/blobe-vm/ 2>/dev/null || sudo rsync -a "$PWD"/ /opt/blobe-vm/
+# Prefer copying from the cloned `BlobeVM` folder if present (avoid nested copies)
+if [[ -d "$PWD/BlobeVM" ]]; then
+    echo "Copying repository from $PWD/BlobeVM to /opt/blobe-vm"
+    sudo rsync -a "$PWD/BlobeVM/" /opt/blobe-vm/
+else
+    echo "Copying current directory contents to /opt/blobe-vm"
+    sudo rsync -a "$PWD"/ /opt/blobe-vm/
+fi
+
+# If we accidentally copied a nested `BlobeVM` directory (e.g., /opt/blobe-vm/BlobeVM/optimizer),
+# flatten it so optimizer lives at /opt/blobe-vm/optimizer as expected by the dashboard.
+if [[ -d /opt/blobe-vm/BlobeVM && ! -d /opt/blobe-vm/optimizer ]]; then
+    echo "Detected nested BlobeVM folder; flattening contents into /opt/blobe-vm"
+    sudo rsync -a /opt/blobe-vm/BlobeVM/ /opt/blobe-vm/
+    sudo rm -rf /opt/blobe-vm/BlobeVM
+fi
 
 # Ensure Node.js (Node 18 LTS) is present via NodeSource for a modern runtime
 if ! command -v node >/dev/null 2>&1; then
