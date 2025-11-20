@@ -95,7 +95,7 @@ docker run -d --name "$NAME" --restart unless-stopped \
   -v /usr/local/bin/blobe-vm-manager:/usr/local/bin/blobe-vm-manager:ro \
   -v "${HOST_DOCKER_BIN}:/usr/bin/docker:ro" \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -v "$APP_PATH:/app/app.py:ro" \
+  -v "$STATE_DIR/dashboard:/app:ro" \
   -e BLOBEDASH_USER="${BLOBEDASH_USER:-}" \
   -e BLOBEDASH_PASS="${BLOBEDASH_PASS:-}" \
   -e HOST_DOCKER_BIN="${HOST_DOCKER_BIN}" \
