@@ -38,6 +38,7 @@ TEMPLATE = r"""
         <button onclick="bulkRebuildAll()">Rebuild ALL VMs</button>
         <button onclick="bulkUpdateAndRebuild()">Update & Rebuild ALL VMs</button>
         <button onclick="pruneDocker()" class="btn-gray">Prune Docker</button>
+        <button onclick="bulkResetAll()" class="btn-red">Reset ALL VMs</button>
         <button onclick="bulkDeleteAll()" class="btn-red">Delete ALL VMs</button>
         <span class="muted" style="margin-left: .5rem">Shift+Click Check for report-only (no auto-fix)</span>
     </div>
@@ -424,6 +425,18 @@ function bulkDeleteAll(){
     var conf=prompt('Delete ALL VMs? This cannot be undone. Type DELETE to confirm.');
     if(conf!=='DELETE')return;
     fetch('/dashboard/api/delete-all-instances',{method:'POST'}).then(load);
+}
+
+function bulkResetAll(){
+    var promptMsg = 'Reset ALL VMs? This will permanently remove all instance data and recreate each VM. Type RESET_ALL to confirm.';
+    var conf = prompt(promptMsg);
+    if(conf !== 'RESET_ALL') return;
+    try{
+        fetch('/dashboard/api/reset-all-instances',{method:'POST'}).then(()=>{
+            alert('Reset ALL requested. VMs will be recreated shortly.');
+            load();
+        }).catch(e=>{ showErr('Reset ALL request failed: '+e); });
+    }catch(e){ showErr('Reset ALL error: '+e); }
 }
 async function setCustomDomain(){
     try{
@@ -1684,6 +1697,43 @@ def api_delete_all_instances():
         result = subprocess.run([MANAGER, 'delete-all-instances'], capture_output=True, text=True)
         ok = (result.returncode == 0)
         return jsonify({'ok': ok, 'output': result.stdout.strip(), 'error': result.stderr.strip()})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.post('/dashboard/api/reset-all-instances')
+@auth_required
+def api_reset_all_instances():
+    """Reset all known instances by deleting and recreating them in background."""
+    try:
+        # Determine instance names
+        try:
+            names = [i['name'] for i in manager_json_list()]
+        except Exception:
+            # fallback: scan instances directory
+            inst_root = os.path.join(_state_dir(), 'instances')
+            try:
+                names = [n for n in os.listdir(inst_root) if os.path.isdir(os.path.join(inst_root, n))]
+            except Exception:
+                names = []
+
+        def worker(all_names):
+            for n in all_names:
+                try:
+                    subprocess.run([MANAGER, 'delete', n], capture_output=True, text=True)
+                except Exception:
+                    pass
+                try:
+                    subprocess.run([MANAGER, 'create', n], capture_output=True, text=True)
+                except Exception:
+                    pass
+                try:
+                    subprocess.run([MANAGER, 'start', n], capture_output=True, text=True)
+                except Exception:
+                    pass
+
+        threading.Thread(target=worker, args=(names,), daemon=True).start()
+        return jsonify({'ok': True, 'started': True, 'count': len(names)})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
