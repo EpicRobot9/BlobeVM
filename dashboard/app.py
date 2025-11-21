@@ -1167,7 +1167,12 @@ def dashboard_vm_wrapper(name):
     except Exception:
         js_title = '"%s"' % (title.replace('"','\"'))
         js_fav = '"%s"' % (fav_url.replace('"','\"'))
-    page += f"<script>try{{document.title={js_title};var __fav={js_fav};if(__fav){var l=document.querySelector('link[rel=\\\"icon\\\"]')||document.createElement('link');l.rel='icon';l.href=__fav; if(!document.head.contains(l))document.head.appendChild(l);} }}catch(e){{}}</script>"
+    # Build script using concatenation to avoid f-string brace escaping issues
+    page += (
+        "<script>try{document.title=" + js_title +
+        ";var __fav=" + js_fav +
+        ";if(__fav){var l=document.querySelector('link[rel=\"icon\"]')||document.createElement('link');l.rel='icon';l.href=__fav; if(!document.head.contains(l))document.head.appendChild(l);} }catch(e){}</script>"
+    )
     page += f"</head><body style='margin:0;padding:0;overflow:hidden;background:#000'><iframe src=\"{url}\" style=\"position:fixed;top:0;left:0;width:100%;height:100%;border:none;background:#000\"></iframe></body></html>"
     return page
 
