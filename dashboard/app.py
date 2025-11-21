@@ -1228,7 +1228,7 @@ def dashboard_vm_wrapper(name):
     cfg = _load_dashboard_settings()
     vm_titles = cfg.get('vm_titles', {}) if isinstance(cfg.get('vm_titles', {}), dict) else {}
     # Default VM title: use saved per-VM title if present, else 'BlobeVM - <name>'
-    title = vm_titles.get(name) or f"BlobeVM - {name}"
+    title = vm_titles.get(name) or f"EpicVM - {name}"
     # prefer per-vm favicon if exists
     vm_fav_path = os.path.join(_state_dir(), 'dashboard', 'vm-fav', f"{re.sub(r'[^A-Za-z0-9_-]', '_', name)}.ico")
     if os.path.isfile(vm_fav_path):
