@@ -26,6 +26,10 @@ if jq ".defaultapps | contains([5])" "$json_file" | grep -q true; then
     chmod +x /installable-apps/minecraft.sh
     /installable-apps/minecraft.sh
 fi
+if jq ".defaultapps | contains([6])" "$json_file" | grep -q true; then
+    chmod +x /installable-apps/spotify.sh
+    /installable-apps/spotify.sh
+fi
 
 if jq ".programming | contains([0])" "$json_file" | grep -q true; then
     chmod +x /installable-apps/openjdk-8-jre.sh
