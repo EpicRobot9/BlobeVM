@@ -52,8 +52,7 @@ TEMPLATE = r"""
     <strong style="display:block;margin-bottom:.25rem">Dashboard Settings</strong>
     <input id="setting-title" placeholder="Dashboard title" style="width:320px" />
     <input id="setting-favicon" placeholder="Favicon URL (http/https)" style="width:320px;margin-left:.5rem" />
-    <input type="file" id="setting-favicon-file" style="margin-left:.5rem" />
-    <button onclick="uploadGlobalFavicon()" style="margin-left:.25rem">Upload Favicon File</button>
+    <!-- Removed favicon upload -->
     <button onclick="saveSettings()" style="margin-left:.5rem">Save</button>
     <button onclick="clearFavicon()" class="btn-gray" style="margin-left:.25rem">Clear Favicon</button>
     <div id="settings-msg" class="muted" style="margin-top:.5rem"></div>
@@ -122,7 +121,7 @@ async function load(){
     const vmTitles = settings.vm_titles || {};
     const tb=document.getElementById('tbody');
         tb.innerHTML='';
-             const appOpts = (availableApps||[]).map(a=>`<option value="${a}">${a}</option>`).join('');
+             // Removed app options
     vms.forEach(i=>{
             const tr=document.createElement('tr');
             const dot = statusDot(i.status);
@@ -161,25 +160,16 @@ async function load(){
              const favSrc = `/dashboard/vm-favicon/${i.name}.ico?v=${Date.now()}`;
              tr.innerHTML=`<td><img src="${favSrc}" style="width:16px;height:16px;vertical-align:middle;margin-right:6px" onerror="this.style.display='none'"/>${i.name}<div id="vmtitle-display-${i.name}" style="font-size:.85rem;color:#9ca3af;margin-top:3px">${vmTitle||''}</div></td><td>${dot}<span class=muted>${i.status||''}</span></td><td>${portOrPath}</td><td><a href="${openUrl}" target="_blank" rel="noopener noreferrer">${openUrl}</a></td>`+
                  `<td>`+
-                 `<button onclick="openVMWithUrl('${i.name}','${openUrl.replace(/'/g, "\\'")}')">Open</button>`+
+                 `<button onclick="openVMWithUrl('${i.name}','${openUrl.replace(/'/g, "\\'")}")">Open</button>`+
                  `<button onclick="act('start','${i.name}')">Start</button>`+
                  `<button onclick="act('stop','${i.name}')">Stop</button>`+
                  `<button onclick="act('restart','${i.name}')">Restart</button>`+
                  `<button title="Shift-click for no-fix" onclick="checkVM(event,'${i.name}')" class="btn-gray">Check</button>`+
                  `<button onclick="updateVM('${i.name}')" class="btn-gray">Update</button>`+
-                 `<button onclick="installChrome('${i.name}')">Install Chrome</button>`+
-                 `<select id="appsel-${i.name}" class="btn-gray" style="background:#1f2937;color:#fff;padding:.35rem .4rem;margin-left:.25rem"><option value="">App…</option>${appOpts}</select>`+
-                 `<button onclick="installSelectedApp('${i.name}')">Install</button>`+
-                 `<button onclick="uninstallSelectedApp('${i.name}')" class="btn-red">Uninstall</button>`+
-                 `<button onclick="reinstallSelectedApp('${i.name}')" class="btn-gray">Reinstall</button>`+
-                 `<button onclick="appStatusSelected('${i.name}')" class="btn-gray">Status</button>`+
                  `<button onclick="recreateVM('${i.name}')">Recreate</button>`+
-                 `<button onclick="rebuildVM('${i.name}')">Rebuild</button>`+
                  `<button onclick=\"cleanVM('${i.name}')\" class=\"btn-gray\">Clean</button>`+
                  `<button onclick="resetVM('${i.name}')" class="btn-red">Reset</button>`+
                  `<button onclick="delvm('${i.name}')" class="btn-red">Delete</button>`+
-                 `<input type="file" id="favfile-${i.name}" style="display:none" onchange="uploadVMFavicon(event,'${i.name}')" />`+
-                 `<button onclick="document.getElementById('favfile-${i.name}').click()">Upload Favicon</button>`+
                  `<div style="margin-top:.5rem">`+
                  `<input id="vmtitle-${i.name}" placeholder="Tab title" value="${vmTitle}" style="width:220px" />`+
                  `<button onclick="saveVMTitle('${i.name}')" style="margin-left:.25rem">Save Title</button>`+
