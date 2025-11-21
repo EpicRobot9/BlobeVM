@@ -401,7 +401,7 @@ run_container() {
   if [[ -n "$_meta_title" ]]; then
     TITLE_ENV="$_meta_title"
   else
-    TITLE_ENV="BlobeVM - ${name}"
+    TITLE_ENV="EpicVM - ${name}"
   fi
 
   docker run -d \
