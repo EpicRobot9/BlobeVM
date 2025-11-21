@@ -1361,7 +1361,7 @@ install_manager() {
         LERR="$DDIR/last_error.txt"
         rm -f "$LERR" 2>/dev/null || true
         if [[ -f "$DDIR/package.json" ]]; then
-          (cd "$DDIR" && npm ci --no-audit --no-fund) 2>"$LERR" || true
+          (cd "$DDIR" && npm ci --unsafe-perm=true --no-audit --no-fund) 2>"$LERR" || true
           if (cd "$DDIR" && npm run build --if-present) 2>>"$LERR"; then
             echo "dashboard_v2 built successfully at $DDIR"
             rm -f "$LERR" 2>/dev/null || true
@@ -1387,7 +1387,7 @@ install_manager() {
     if [[ -f "$DASH_DIR/package.json" ]]; then
       echo "Building dashboard_v2 frontend at $DASH_DIR"
       # install deps (capture stderr to last_error)
-      (cd "$DASH_DIR" && npm ci --no-audit --no-fund) 2>"$LAST_ERR" || true
+      (cd "$DASH_DIR" && npm ci --unsafe-perm=true --no-audit --no-fund) 2>"$LAST_ERR" || true
       # build and append any stderr to last_error
       if (cd "$DASH_DIR" && npm run build --if-present) 2>>"$LAST_ERR"; then
         echo "dashboard_v2 built successfully"
