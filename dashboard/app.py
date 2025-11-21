@@ -175,6 +175,7 @@ async function load(){
                  `<button onclick="recreateVM('${i.name}')">Recreate</button>`+
                  `<button onclick="rebuildVM('${i.name}')">Rebuild</button>`+
                  `<button onclick=\"cleanVM('${i.name}')\" class=\"btn-gray\">Clean</button>`+
+                 `<button onclick="resetVM('${i.name}')" class="btn-red">Reset</button>`+
                  `<button onclick="delvm('${i.name}')" class="btn-red">Delete</button>`+
                  `<input type="file" id="favfile-${i.name}" style="display:none" onchange="uploadVMFavicon(event,'${i.name}')" />`+
                  `<button onclick="document.getElementById('favfile-${i.name}').click()">Upload Favicon</button>`+
@@ -194,6 +195,18 @@ function recreateVM(name){
     fetch('/dashboard/api/recreate',{
         method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({names:[name]})
     }).then(load);
+}
+function resetVM(name){
+    // Strong confirmation because this permanently removes instance data
+    var promptMsg = 'Reset VM ' + name + '? This will permanently remove all instance data. Type RESET to confirm.';
+    var conf = prompt(promptMsg);
+    if(conf !== 'RESET') return;
+    try{
+        fetch('/dashboard/api/reset/' + encodeURIComponent(name),{method:'POST'}).then(()=>{
+            alert('Reset requested. VM will be recreated shortly.');
+            load();
+        }).catch(e=>{ showErr('Reset request failed: '+e); });
+    }catch(e){ showErr('Reset error: '+e); }
 }
 function rebuildVM(name){
     if(!confirm('Rebuild (image + recreate) VM '+name+'?'))return;
@@ -1568,6 +1581,35 @@ def api_stop(name):
 def api_delete(name):
     subprocess.check_call([MANAGER, 'delete', name])
     return jsonify({'ok': True})
+
+
+@app.post('/dashboard/api/reset/<name>')
+@auth_required
+def api_reset(name):
+    """Reset a VM by deleting it and creating a fresh instance.
+    This runs in the background and returns immediately. Caller must ensure
+    they really want to purge instance data.
+    """
+    try:
+        def worker(vm_name):
+            try:
+                # Use manager delete which should remove container and instance data
+                subprocess.run([MANAGER, 'delete', vm_name], capture_output=True, text=True)
+            except Exception:
+                pass
+            try:
+                # Create a fresh instance and start it
+                subprocess.run([MANAGER, 'create', vm_name], capture_output=True, text=True)
+            except Exception:
+                pass
+            try:
+                subprocess.run([MANAGER, 'start', vm_name], capture_output=True, text=True)
+            except Exception:
+                pass
+        threading.Thread(target=worker, args=(name,), daemon=True).start()
+        return jsonify({'ok': True, 'started': True})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
 
 @app.post('/dashboard/api/restart/<name>')
 @auth_required
