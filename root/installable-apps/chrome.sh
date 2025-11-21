@@ -20,4 +20,7 @@ if ! apt-get install -y google-chrome-stable; then
 		apt-get install -y google-chrome-stable
 	}
 fi
+
+sudo sed -i 's|Exec=/usr/bin/google-chrome-stable %U|Exec=/usr/bin/google-chrome-stable --disable-gpu --no-sandbox %U|' /usr/share/applications/google-chrome.desktop
+
 echo "Chrome install done."
