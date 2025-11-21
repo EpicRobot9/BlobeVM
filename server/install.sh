@@ -1352,6 +1352,30 @@ install_manager() {
   # Ensure dashboard app is available under /opt for both modes
   mkdir -p /opt/blobe-vm/dashboard
   if [[ -f "$REPO_DIR/dashboard/app.py" ]]; then
+    # Before copying, attempt to build dashboard_v2 from likely repo locations
+    POSSIBLE_SRC=("$REPO_DIR" "$REPO_DIR/BlobeVM" "/opt/blobe-vm/repo" )
+    for src in "${POSSIBLE_SRC[@]}"; do
+      if [[ -d "$src/dashboard_v2" ]]; then
+        echo "Found dashboard_v2 sources at $src/dashboard_v2 — attempting build"
+        DDIR="$src/dashboard_v2"
+        LERR="$DDIR/last_error.txt"
+        rm -f "$LERR" 2>/dev/null || true
+        if [[ -f "$DDIR/package.json" ]]; then
+          (cd "$DDIR" && npm ci --no-audit --no-fund) 2>"$LERR" || true
+          if (cd "$DDIR" && npm run build --if-present) 2>>"$LERR"; then
+            echo "dashboard_v2 built successfully at $DDIR"
+            rm -f "$LERR" 2>/dev/null || true
+          else
+            echo "dashboard_v2 build failed at $DDIR — see $LERR"
+            chown ${SUDO_USER:-root}:${SUDO_USER:-root} "$LERR" 2>/dev/null || true
+          fi
+          # Copy or sync the dashboard_v2 folder into /opt/blobe-vm so runtime scripts can pick it up
+          mkdir -p /opt/blobe-vm
+          rsync -a --delete "$src/dashboard_v2/" /opt/blobe-vm/dashboard_v2/ || true
+        fi
+        break
+      fi
+    done
     cp -f "$REPO_DIR/dashboard/app.py" /opt/blobe-vm/dashboard/app.py
   fi
   # Build dashboard_v2 frontend (if present) so /Dashboard is available after install
