@@ -156,9 +156,9 @@ async function load(){
             }
             dbg('row', { name: i.name, status: i.status, rawUrl: i.url, mergedMode, portOrPath, openUrl });
             const vmTitle = vmTitles[i.name] || '';
-             tr.innerHTML=`<td><img src="/dashboard/vm-favicon/${i.name}.ico" style="width:16px;height:16px;vertical-align:middle;margin-right:6px" onerror="this.style.display='none'"/>${i.name}</td><td>${dot}<span class=muted>${i.status||''}</span></td><td>${portOrPath}</td><td><a href="${openUrl}" target="_blank" rel="noopener noreferrer">${openUrl}</a></td>`+
+             tr.innerHTML=`<td><img src="/dashboard/vm-favicon/${i.name}.ico" style="width:16px;height:16px;vertical-align:middle;margin-right:6px" onerror="this.style.display='none'"/>${i.name}<div id="vmtitle-display-${i.name}" style="font-size:.85rem;color:#9ca3af;margin-top:3px">${vmTitle||''}</div></td><td>${dot}<span class=muted>${i.status||''}</span></td><td>${portOrPath}</td><td><a href="${openUrl}" target="_blank" rel="noopener noreferrer">${openUrl}</a></td>`+
                  `<td>`+
-                 `<button onclick="openLink('/dashboard/vm/${i.name}/')">Open</button>`+
+                `<button onclick="openVM('${i.name}')">Open</button>`+
                  `<button onclick="act('start','${i.name}')">Start</button>`+
                  `<button onclick="act('stop','${i.name}')">Stop</button>`+
                  `<button onclick="act('restart','${i.name}')">Restart</button>`+
@@ -285,6 +285,22 @@ function openLink(url){
     }catch(e){
         console.error('openLink error', e);
     }
+}
+
+function openVM(name){
+    try{
+        // prefer the saved VM title if available, else read from input field
+        const el = document.getElementById('vmtitle-' + name);
+        let t = '';
+        if(el && el.value) t = el.value;
+        // fallback to global dashboard title
+        if(!t){
+            const st = document.getElementById('setting-title');
+            if(st && st.value) t = st.value;
+        }
+        try{ if(t) document.title = t; }catch(e){}
+    }catch(e){ console.error('openVM title set error', e); }
+    openLink('/dashboard/vm/' + encodeURIComponent(name) + '/');
 }
 function selectedApp(name){
     const el = document.getElementById(`appsel-${name}`);
@@ -540,6 +556,8 @@ async function checkVM(ev,name){
                 el.style.border = '1px solid #10b981';
                 // Update the browser tab title to the saved VM title
                 try{ document.title = title || 'BlobeVM'; }catch(e){}
+                // Update the small per-VM title display in the list
+                try{ const disp = document.getElementById('vmtitle-display-' + name); if(disp) disp.textContent = title || ''; }catch(e){}
                 setTimeout(()=> el.style.border='', 900);
             }
             else { alert('Save failed'); }
