@@ -471,6 +471,8 @@ async function checkVM(ev,name){
             if(j && j.ok){
                 if(msg) msg.textContent = 'Saved.';
                 document.getElementById('dash-title').textContent = title || 'BlobeVM Dashboard';
+                // update the browser tab title immediately
+                try{ document.title = title || 'BlobeVM Dashboard'; }catch(e){}
                 // If a favicon was saved locally, reload page to pick it up
                 if(fav){
                     // small delay then reload to update favicon
@@ -534,7 +536,12 @@ async function checkVM(ev,name){
             body.append('title', title);
             const r = await fetch('/dashboard/api/set-vm-title/' + encodeURIComponent(name), {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: body});
             const j = await r.json().catch(()=>({}));
-            if(j && j.ok){ el.style.border = '1px solid #10b981'; setTimeout(()=> el.style.border='', 900); }
+            if(j && j.ok){
+                el.style.border = '1px solid #10b981';
+                // Update the browser tab title to the saved VM title
+                try{ document.title = title || 'BlobeVM'; }catch(e){}
+                setTimeout(()=> el.style.border='', 900);
+            }
             else { alert('Save failed'); }
         }catch(e){ console.error('saveVMTitle', e); }
     }
@@ -1149,9 +1156,18 @@ def dashboard_vm_wrapper(name):
         else:
             fav_url = cfg.get('favicon','')
     # Render simple page with title, favicon and iframe
+    # Use json to safely embed title and fav_url in inline script
     page = f'''<!doctype html><html><head><meta charset="utf-8"><title>{title}</title>'''
     if fav_url:
         page += f"<link rel=\"icon\" href=\"{fav_url}\" />"
+    # Inline script ensures the wrapper page sets title + favicon even if browser cached or modified
+    try:
+        js_title = json.dumps(title)
+        js_fav = json.dumps(fav_url)
+    except Exception:
+        js_title = '"%s"' % (title.replace('"','\"'))
+        js_fav = '"%s"' % (fav_url.replace('"','\"'))
+    page += f"<script>try{{document.title={js_title};var __fav={js_fav};if(__fav){var l=document.querySelector('link[rel=\\\"icon\\\"]')||document.createElement('link');l.rel='icon';l.href=__fav; if(!document.head.contains(l))document.head.appendChild(l);} }}catch(e){{}}</script>"
     page += f"</head><body style='margin:0;padding:0;overflow:hidden;background:#000'><iframe src=\"{url}\" style=\"position:fixed;top:0;left:0;width:100%;height:100%;border:none;background:#000\"></iframe></body></html>"
     return page
 
