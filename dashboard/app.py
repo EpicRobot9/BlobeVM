@@ -1195,6 +1195,31 @@ def dashboard_vm_wrapper(name):
     return page
 
 
+# Register an alias route under the configured base path (e.g. /vm/<name>/) so merged-mode
+# users who visit /vm/<name>/ get the same wrapper behaviour. We read BASE_PATH from state .env
+# and add a rule at import time after the function exists.
+try:
+    try:
+        envbp = _read_env().get('BASE_PATH', '/vm')
+    except Exception:
+        envbp = '/vm'
+    if not envbp:
+        envbp = '/vm'
+    bp = envbp.rstrip('/')
+    if not bp.startswith('/'):
+        bp = '/' + bp
+    # Avoid adding duplicate rule for same path
+    alias_rule = f"{bp}/<name>/"
+    # Only add if different from /dashboard/vm
+    if alias_rule != '/dashboard/vm/<name>/':
+        try:
+            app.add_url_rule(alias_rule, endpoint=f'dashboard_vm_wrapper_alias', view_func=dashboard_vm_wrapper, methods=['GET'])
+        except Exception:
+            pass
+except Exception:
+    pass
+
+
 def python_gather_stats():
     out = {'mem': {}, 'swap': {}, 'containers': []}
     try:
