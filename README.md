@@ -3,6 +3,9 @@
 ## Codespaces Installation
 Start a new blank codespace by going to https://github.com/codespaces/ and choosing the "Blank" template. Then run:
 ```
+
+For a full description of the new modern dashboard (Dashboard v2), see `docs/DASHBOARD_V2.md` which documents pages, server endpoints, installer behavior, build instructions, environment variables, and troubleshooting tips.
+
 curl -O https://raw.githubusercontent.com/EpicRobot9/BlobeVM/main/install.sh
 chmod +x install.sh
 ./install.sh

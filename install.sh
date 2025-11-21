@@ -92,6 +92,28 @@ sudo mkdir -p /var/blobe/logs/optimizer
 sudo chown root:root /var/blobe/logs/optimizer || true
 sudo chmod 755 /var/blobe/logs/optimizer || true
 
+# Ensure python3-pip and psutil are installed for server stats
+if ! command -v pip3 >/dev/null 2>&1; then
+    echo "pip3 not found — installing python3-pip"
+    sudo apt-get update -y
+    sudo apt-get install -y python3-pip
+fi
+if ! python3 -c "import psutil" >/dev/null 2>&1; then
+    echo "Installing python psutil"
+    sudo pip3 install psutil || true
+else
+    echo "psutil already available"
+fi
+
+# Ensure Docker CLI is available (needed for vm stats/logs/exec endpoints)
+if ! command -v docker >/dev/null 2>&1; then
+    echo "Docker CLI not found — installing docker.io"
+    sudo apt-get update -y
+    sudo apt-get install -y docker.io || true
+else
+    echo "Docker CLI present: $(docker --version)"
+fi
+
 # Install Node.js 18.x via NodeSource if missing (modern LTS)
 if ! command -v node >/dev/null 2>&1; then
     echo "Node.js not found — installing Node.js 18.x via NodeSource"
@@ -134,4 +156,26 @@ fi
 if systemctl list-units --full -all | grep -q '^blobedash.service'; then
     echo "Restarting blobedash.service to pick up new files"
     sudo systemctl restart blobedash.service || true
+fi
+
+# Build dashboard_v2 frontend so it's available at /Dashboard on first run
+if [[ -d /opt/blobe-vm/dashboard_v2 ]]; then
+    echo "Building dashboard_v2 frontend"
+    DASH_DIR="/opt/blobe-vm/dashboard_v2"
+    LAST_ERR="$DASH_DIR/last_error.txt"
+    # remove previous error
+    sudo rm -f "$LAST_ERR" 2>/dev/null || true
+    if [[ -f "$DASH_DIR/package.json" ]]; then
+        (cd "$DASH_DIR" && sudo npm ci --no-audit --no-fund) 2>"$LAST_ERR" || true
+        # run build; capture stderr to last_error.txt for troubleshooting
+        if (cd "$DASH_DIR" && sudo npm run build --if-present) 2>>"$LAST_ERR"; then
+            echo "dashboard_v2 built successfully"
+            sudo rm -f "$LAST_ERR" 2>/dev/null || true
+        else
+            echo "dashboard_v2 build failed — see $LAST_ERR for details"
+            sudo chown $(whoami):$(whoami) "$LAST_ERR" || true
+        fi
+    else
+        echo "No dashboard_v2/package.json found; skipping build"
+    fi
 fi

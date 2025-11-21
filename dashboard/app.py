@@ -6,6 +6,11 @@ from urllib import request as urlrequest, error as urlerror
 from functools import wraps
 from flask import Flask, jsonify, request, abort, send_from_directory, render_template_string, Response
 import optimizer as dash_optimizer
+import hmac, hashlib, time, base64
+try:
+    import psutil
+except Exception:
+    psutil = None
 
 APP_ROOT = '/opt/blobe-vm'
 MANAGER = 'blobe-vm-manager'
@@ -19,6 +24,7 @@ TEMPLATE = r"""
 </head><body>
 <h1 id="dash-title">{{ title }}</h1>
 <div id=errbox style="display:none;background:#7f1d1d;color:#fff;padding:.5rem .75rem;border-radius:4px;margin:.5rem 0"></div>
+<div id=v2status style="margin:.5rem 0;padding:.5rem;border:1px dashed #233;background:#071229;border-radius:6px;color:#cfe8ff">New dashboard: <span id="v2state">Checking…</span></div>
 <form method=post action="/dashboard/api/create" onsubmit="return createVM(event)">
 <input name=name placeholder="name" required pattern="[a-zA-Z0-9-]+" />
 <button type=submit>Create</button>
@@ -181,6 +187,62 @@ async function load(){
         console.error('[BLOBEDASH] load() error', err);
     }
 }
+// Check new dashboard availability and API presence
+async function checkV2(){
+    const el = document.getElementById('v2state');
+    if(!el) return;
+    el.textContent = 'Checking…';
+    try{
+        const r = await fetch('/Dashboard/', {cache:'no-store'});
+        if(r.ok){
+            el.innerHTML = 'Available — <a href="/Dashboard/" target="_blank">Open</a>';
+        }else if(r.status === 404){
+            el.textContent = 'Not built (no files)';
+        }else{
+            const txt = await r.text().catch(()=>r.statusText||'error')
+            el.textContent = `HTTP ${r.status}: ${txt.slice(0,120)}`
+        }
+    }catch(e){
+        el.textContent = 'Error contacting /Dashboard: ' + (e && e.message ? e.message : String(e))
+    }
+    // Check whether v2 API endpoints exist (unauthenticated probe)
+    try{
+        const r2 = await fetch('/dashboard/api/vm/stats', {method:'GET', cache:'no-store'});
+        if(r2.status === 401){
+            el.innerHTML += ' · API: present (auth required)'
+        }else if(r2.ok){
+            el.innerHTML += ' · API: present'
+        }else if(r2.status === 404){
+            el.innerHTML += ' · API: missing (404)'
+        }else{
+            el.innerHTML += ' · API status: ' + r2.status
+        }
+    }catch(e){
+        el.innerHTML += ' · API probe error: ' + (e && e.message ? e.message : String(e))
+    }
+    // fetch server-side info for more details (requires auth)
+    try{
+        const r3 = await fetch('/dashboard/api/v2/info')
+        if(r3.ok){
+            const j = await r3.json().catch(()=>null)
+            if(j && j.info){
+                const info = j.info
+                if(info.last_error){
+                    el.innerHTML += '<div style="margin-top:6px;color:#fbb">Build error: '+(info.last_error.length>300?info.last_error.slice(0,300)+'…':info.last_error)+'</div>'
+                }else if(!info.dist_exists){
+                    el.innerHTML += ' · No build artifacts found'
+                }else{
+                    const m = info.index_mtime ? new Date(info.index_mtime*1000).toLocaleString() : ''
+                    el.innerHTML += ` · Built: ${m} · files: ${info.files_count}`
+                }
+            }
+        }
+    }catch(e){ /* ignore */ }
+}
+
+// run the v2 probe at start and periodically
+setTimeout(checkV2, 500);
+setInterval(checkV2, 30*1000);
 function recreateVM(name){
     if(!confirm('Recreate VM '+name+'?'))return;
     fetch('/dashboard/api/recreate',{
@@ -749,8 +811,68 @@ def auth_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
         if need_auth():
-            if not check_auth(request.headers.get('Authorization')):
+            # Allow basic auth via BUSER/BPASS or a valid v2 token (so dashboard_v2 can reuse existing APIs)
+            auth_header = request.headers.get('Authorization')
+            basic_ok = check_auth(auth_header)
+            token_ok = False
+            try:
+                if auth_header and auth_header.lower().startswith('bearer '):
+                    token = auth_header.split(None,1)[1].strip()
+                    token_ok = _verify_v2_token(token)
+                else:
+                    # also accept token via cookie
+                    token_cookie = request.cookies.get('Dashboard-Auth')
+                    if token_cookie:
+                        token_ok = _verify_v2_token(token_cookie)
+            except Exception:
+                token_ok = False
+            if not (basic_ok or token_ok):
                 return Response('Auth required', 401, {'WWW-Authenticate':'Basic realm="BlobeVM Dashboard"'})
+        return fn(*args, **kwargs)
+    return wrapper
+
+# --- New dashboard (v2) auth helpers ---
+_DASH_V2_SECRET = os.environ.get('DASH_V2_SECRET') or os.environ.get('SECRET_KEY') or 'blobevm-secret'
+
+def _get_v2_password():
+    # read password stored in dashboard settings (managed by old dashboard)
+    cfg = _load_dashboard_settings()
+    return cfg.get('new_dashboard_admin_password')
+
+def _sign_v2_token(payload: str) -> str:
+    mac = hmac.new(_DASH_V2_SECRET.encode('utf-8'), payload.encode('utf-8'), hashlib.sha256).hexdigest()
+    token = f"{payload}:{mac}"
+    return base64.urlsafe_b64encode(token.encode('utf-8')).decode('utf-8')
+
+def _verify_v2_token(token_b64: str) -> bool:
+    try:
+        raw = base64.urlsafe_b64decode(token_b64.encode('utf-8')).decode('utf-8')
+        parts = raw.rsplit(':', 1)
+        if len(parts) != 2:
+            return False
+        payload, mac = parts
+        expected = hmac.new(_DASH_V2_SECRET.encode('utf-8'), payload.encode('utf-8'), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(mac, expected):
+            return False
+        # payload format: expiry:random
+        exp_str = payload.split(':',1)[0]
+        exp = int(exp_str)
+        return time.time() < exp
+    except Exception:
+        return False
+
+def v2_auth_required(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        # Accept Bearer token in Authorization header or X-Auth-Token
+        auth = request.headers.get('Authorization','')
+        token = None
+        if auth.lower().startswith('bearer '):
+            token = auth.split(None,1)[1].strip()
+        if not token:
+            token = request.headers.get('X-Auth-Token') or request.cookies.get('Dashboard-Auth')
+        if not token or not _verify_v2_token(token):
+            return Response('Unauthorized', 401)
         return fn(*args, **kwargs)
     return wrapper
 
@@ -1082,6 +1204,7 @@ def api_get_settings():
 def api_set_settings():
     title = request.values.get('title','').strip()
     favicon = request.values.get('favicon','').strip()
+    new_pw = request.values.get('new_dashboard_admin_password', None)
     cfg = _load_dashboard_settings()
     if title:
         cfg['title'] = title
@@ -1117,6 +1240,13 @@ def api_set_settings():
         else:
             # treat as direct URL or path; store it
             cfg['favicon'] = favicon
+        # Allow setting the v2 dashboard admin password from the old dashboard settings UI
+        try:
+            if new_pw is not None:
+                # store raw (it is only editable from the old dashboard as requested)
+                cfg['new_dashboard_admin_password'] = new_pw.strip()
+        except Exception:
+            pass
     ok = _save_dashboard_settings(cfg)
     return jsonify({'ok': bool(ok)})
 
@@ -1168,6 +1298,69 @@ def api_upload_vm_favicon(name):
         return jsonify({'ok': True})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+    # --- Dashboard v2 static serving and auth endpoints ---
+    @app.post('/Dashboard/api/auth/login')
+    def dashboard_v2_login():
+        try:
+            data = request.get_json(force=True)
+        except Exception:
+            return jsonify({'ok': False}), 400
+        pw = data.get('password','')
+        cfg_pw = _get_v2_password()
+        if not cfg_pw:
+            # not configured
+            return jsonify({'ok': False, 'error': 'not-configured'}), 404
+        if pw != cfg_pw:
+            return jsonify({'ok': False, 'error': 'invalid'}), 401
+        exp = int(time.time() + 24*3600)
+        payload = f"{exp}:{os.urandom(8).hex()}"
+        token = _sign_v2_token(payload)
+        resp = jsonify({'ok': True, 'token': token, 'expiry': exp})
+        # Also set cookie for browser convenience
+        resp.set_cookie('Dashboard-Auth', token, httponly=True, samesite='Lax')
+        return resp
+
+
+    @app.get('/Dashboard/api/auth/status')
+    def dashboard_v2_status():
+        # Check Authorization header or cookie
+        auth = request.headers.get('Authorization','')
+        token = None
+        if auth.lower().startswith('bearer '):
+            token = auth.split(None,1)[1].strip()
+        if not token:
+            token = request.cookies.get('Dashboard-Auth')
+        ok = bool(token and _verify_v2_token(token))
+        return jsonify({'ok': ok})
+
+
+    @app.route('/Dashboard/', defaults={'path': ''})
+    @app.route('/Dashboard/<path:path>')
+    def serve_dashboard_v2(path):
+        # Serve built files from dashboard_v2/dist if present, otherwise serve dev index
+        base = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', 'dashboard_v2'))
+        dist = os.path.join(base, 'dist')
+        # If requested file exists under dist, serve it
+        if path:
+            cand = os.path.join(dist, path)
+            if os.path.isfile(cand):
+                return send_from_directory(dist, path)
+            # try nested static path
+            static_dir = os.path.join(base, 'src')
+            cand2 = os.path.join(static_dir, path)
+            if os.path.isfile(cand2):
+                return send_from_directory(static_dir, path)
+        # Serve dist index if available
+        indexcand = os.path.join(dist, 'index.html')
+        if os.path.isfile(indexcand):
+            return send_from_directory(dist, 'index.html')
+        # Fallback to dev index.html in project
+        dev_index = os.path.join(base, 'index.html')
+        if os.path.isfile(dev_index):
+            return send_from_directory(base, 'index.html')
+        return 'Dashboard v2 not built', 404
 
 
 @app.post('/dashboard/api/set-vm-title/<name>')
@@ -1584,6 +1777,335 @@ def api_stop(name):
 def api_delete(name):
     subprocess.check_call([MANAGER, 'delete', name])
     return jsonify({'ok': True})
+
+
+def _read_proc_stat_cpu():
+    try:
+        with open('/proc/stat', 'r') as f:
+            for line in f:
+                if line.startswith('cpu '):
+                    parts = line.split()[1:]
+                    vals = list(map(int, parts))
+                    return vals
+    except Exception:
+        return None
+
+
+def _calc_cpu_percent(interval=0.08):
+    a = _read_proc_stat_cpu()
+    if not a:
+        return None
+    time.sleep(interval)
+    b = _read_proc_stat_cpu()
+    if not b:
+        return None
+    suma = sum(a)
+    sumb = sum(b)
+    idle_a = a[3] if len(a) > 3 else 0
+    idle_b = b[3] if len(b) > 3 else 0
+    busy = (sumb - suma) - (idle_b - idle_a)
+    total = sumb - suma
+    try:
+        pct = (busy / total) * 100.0 if total > 0 else 0.0
+    except Exception:
+        pct = 0.0
+    return round(pct, 2)
+
+
+def _get_system_stats():
+    # Return a dict with cpu, memory, disk, network, uptime, temps
+    try:
+        stats = {}
+        # CPU
+        if psutil:
+            per = psutil.cpu_percent(interval=0.08, percpu=True)
+            stats['cpu'] = {
+                'cores': psutil.cpu_count(logical=True),
+                'usage': round(sum(per)/len(per),2) if per else 0.0,
+                'per_core': [round(p,2) for p in per]
+            }
+        else:
+            pct = _calc_cpu_percent()
+            cores = os.cpu_count() or 1
+            stats['cpu'] = {'cores': cores, 'usage': pct or 0.0, 'per_core': []}
+
+        # Memory
+        if psutil:
+            vm = psutil.virtual_memory()
+            stats['memory'] = {'total': vm.total, 'available': vm.available, 'used': vm.used, 'percent': vm.percent}
+        else:
+            mem = {}
+            try:
+                with open('/proc/meminfo','r') as f:
+                    for line in f:
+                        k,v = line.split(':',1)
+                        mem[k.strip()] = int(re.findall(r'\d+', v)[0]) * 1024
+                total = mem.get('MemTotal',0)
+                free = mem.get('MemFree',0) + mem.get('Buffers',0) + mem.get('Cached',0)
+                used = total - free
+                pct = round((used/total)*100,2) if total>0 else 0.0
+                stats['memory'] = {'total': total, 'available': free, 'used': used, 'percent': pct}
+            except Exception:
+                stats['memory'] = {'total': 0, 'available':0, 'used':0, 'percent':0}
+
+        # Disk: list root and mounted partitions
+        disks = []
+        try:
+            if psutil:
+                for part in psutil.disk_partitions(all=False):
+                    try:
+                        u = psutil.disk_usage(part.mountpoint)
+                        disks.append({'mountpoint': part.mountpoint, 'total': u.total, 'used': u.used, 'free': u.free, 'percent': u.percent})
+                    except Exception:
+                        pass
+            else:
+                root = shutil.disk_usage('/')
+                disks.append({'mountpoint': '/', 'total': root.total, 'used': root.used, 'free': root.free, 'percent': round((root.used/root.total)*100,2) if root.total>0 else 0})
+        except Exception:
+            disks = []
+        stats['disk'] = disks
+
+        # Network
+        try:
+            if psutil:
+                net = psutil.net_io_counters(pernic=False)
+                stats['network'] = {'rx_bytes': net.bytes_recv, 'tx_bytes': net.bytes_sent}
+            else:
+                rx = 0; tx = 0
+                with open('/proc/net/dev','r') as f:
+                    for line in f.readlines()[2:]:
+                        parts = line.split()
+                        if len(parts) < 17:
+                            continue
+                        iface = parts[0].strip(':')
+                        if iface == 'lo':
+                            continue
+                        rx += int(parts[1]); tx += int(parts[9])
+                stats['network'] = {'rx_bytes': rx, 'tx_bytes': tx}
+        except Exception:
+            stats['network'] = {'rx_bytes':0,'tx_bytes':0}
+
+        # Uptime and loadavg
+        try:
+            if psutil:
+                stats['uptime'] = int(time.time() - psutil.boot_time())
+            else:
+                with open('/proc/uptime','r') as f:
+                    stats['uptime'] = int(float(f.readline().split()[0]))
+        except Exception:
+            stats['uptime'] = 0
+        try:
+            stats['loadavg'] = list(os.getloadavg())
+        except Exception:
+            stats['loadavg'] = []
+
+        # Temperatures: try psutil sensors, otherwise read thermal zones
+        temps = {}
+        try:
+            if psutil:
+                try:
+                    st = psutil.sensors_temperatures()
+                    for k,v in st.items():
+                        temps[k] = [{'label': t.label or '', 'current': t.current} for t in v]
+                except Exception:
+                    temps = {}
+            else:
+                tzs = []
+                base = '/sys/class/thermal'
+                if os.path.isdir(base):
+                    for name in os.listdir(base):
+                        if name.startswith('thermal_zone'):
+                            try:
+                                p = os.path.join(base, name, 'temp')
+                                with open(p,'r') as f:
+                                    v = int(f.read().strip())
+                                    temps[name] = [{'label':'', 'current': v/1000.0}]
+                            except Exception:
+                                pass
+        except Exception:
+            temps = {}
+        stats['temps'] = temps
+
+        return stats
+    except Exception:
+        return {'cpu':{}, 'memory':{}, 'disk':[], 'network':{}, 'uptime':0, 'loadavg':[], 'temps':{}}
+
+
+@app.get('/Dashboard/api/stats')
+@v2_auth_required
+def dashboard_v2_stats():
+    s = _get_system_stats()
+    return jsonify(s)
+
+
+@app.get('/dashboard/api/stats')
+@v2_auth_required
+def dashboard_v2_stats_alias():
+    return dashboard_v2_stats()
+
+
+@app.post('/dashboard/api/auth/login')
+def dashboard_v2_login_alias():
+    return dashboard_v2_login()
+
+
+@app.get('/dashboard/api/auth/status')
+def dashboard_v2_status_alias():
+    return dashboard_v2_status()
+
+
+@app.get('/Dashboard/api/vm/logs/<name>')
+@v2_auth_required
+def dashboard_v2_vm_logs(name):
+    # Return last 400 lines of docker logs for the named VM container (blobevm_<name>)
+    cname = f'blobevm_{name}'
+    try:
+        out = subprocess.check_output(['docker', 'logs', '--tail', '400', cname], stderr=subprocess.STDOUT, text=True)
+        return jsonify({'ok': True, 'logs': out})
+    except subprocess.CalledProcessError as e:
+        # Return whatever output available
+        return jsonify({'ok': False, 'error': str(e), 'logs': getattr(e, 'output', '')}), 500
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.get('/dashboard/api/vm/logs/<name>')
+@v2_auth_required
+def dashboard_v2_vm_logs_alias(name):
+    return dashboard_v2_vm_logs(name)
+
+
+@app.get('/Dashboard/api/vm/stats')
+@v2_auth_required
+def dashboard_v2_vm_stats():
+    """Return per-VM CPU and memory percentages by calling `docker stats --no-stream`.
+    The result maps VM name (without the `blobevm_` prefix) to {'cpu_percent': float, 'mem_percent': float}.
+    """
+    try:
+        out = subprocess.check_output(['docker', 'stats', '--no-stream', '--format', '{{.Name}}|{{.CPUPerc}}|{{.MemPerc}}'], text=True)
+    except subprocess.CalledProcessError as e:
+        return jsonify({'ok': False, 'error': str(e), 'output': getattr(e, 'output', '')}), 500
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+    stats = {}
+    try:
+        for line in out.splitlines():
+            if not line.strip():
+                continue
+            try:
+                parts = line.split('|')
+                cname = parts[0].strip()
+                cpu_raw = parts[1].strip() if len(parts) > 1 else ''
+                mem_raw = parts[2].strip() if len(parts) > 2 else ''
+                # strip trailing percent sign
+                cpu = 0.0
+                mem = 0.0
+                try:
+                    cpu = float(cpu_raw.strip().rstrip('%'))
+                except Exception:
+                    cpu = 0.0
+                try:
+                    mem = float(mem_raw.strip().rstrip('%'))
+                except Exception:
+                    mem = 0.0
+                # Normalize VM name if container is named blobevm_<name>
+                vmname = cname
+                if vmname.startswith('blobevm_'):
+                    vmname = vmname[len('blobevm_'):]
+                stats[vmname] = {'cpu_percent': round(cpu,2), 'mem_percent': round(mem,2), 'container_name': cname}
+            except Exception:
+                continue
+        return jsonify({'ok': True, 'vms': stats})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.get('/dashboard/api/vm/stats')
+@v2_auth_required
+def dashboard_v2_vm_stats_alias():
+    return dashboard_v2_vm_stats()
+
+
+@app.get('/dashboard/api/v2/info')
+@auth_required
+def dashboard_v2_info():
+    """Return information about the v2 build files and any recorded last-error file.
+    This is intended for the legacy dashboard UI to show why the new dashboard
+    may not be available (e.g., not built or build errors).
+    """
+    try:
+        base = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', 'dashboard_v2'))
+        dist = os.path.join(base, 'dist')
+        info = {'dist_exists': False, 'index_mtime': None, 'files_count': 0, 'last_error': None}
+        indexcand = os.path.join(dist, 'index.html')
+        if os.path.isfile(indexcand):
+            info['dist_exists'] = True
+            info['index_mtime'] = int(os.path.getmtime(indexcand))
+            # count files under dist
+            cnt = 0
+            for root, dirs, files in os.walk(dist):
+                for f in files:
+                    cnt += 1
+            info['files_count'] = cnt
+        # include any last error file if present (created by build step or admin)
+        lasterr = os.path.join(base, 'last_error.txt')
+        if os.path.isfile(lasterr):
+            try:
+                with open(lasterr, 'r') as fh:
+                    data = fh.read(4096)
+                    info['last_error'] = data
+            except Exception:
+                info['last_error'] = 'failed to read last_error.txt'
+        return jsonify({'ok': True, 'info': info})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.get('/Dashboard/api/v2/info')
+@auth_required
+def dashboard_v2_info_alias():
+    return dashboard_v2_info()
+
+
+@app.post('/Dashboard/api/vm/exec/<name>')
+@v2_auth_required
+def dashboard_v2_vm_exec(name):
+    """Execute a single command inside the VM container named `blobevm_<name>`.
+    Expects JSON payload: {"cmd": "<command string>"} and returns stdout/stderr.
+    This is intended for short-lived commands (timeout 10s) and requires the
+    Flask process to have access to the host Docker CLI.
+    """
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        cmd = data.get('cmd') if isinstance(data, dict) else None
+        if not cmd or not isinstance(cmd, str):
+            return jsonify({'ok': False, 'error': 'missing cmd'}), 400
+        cname = f'blobevm_{name}'
+        # Try bash first, fallback to sh
+        exec_cmds = [
+            ['docker', 'exec', cname, '/bin/bash', '-lc', cmd],
+            ['docker', 'exec', cname, '/bin/sh', '-lc', cmd]
+        ]
+        last_exc = None
+        for ec in exec_cmds:
+            try:
+                proc = subprocess.run(ec, capture_output=True, text=True, timeout=10)
+                return jsonify({'ok': proc.returncode == 0, 'returncode': proc.returncode, 'output': proc.stdout, 'error_output': proc.stderr})
+            except subprocess.TimeoutExpired as e:
+                return jsonify({'ok': False, 'error': 'timeout', 'output': getattr(e, 'output', ''), 'stderr': getattr(e, 'stderr', '')}), 504
+            except Exception as e:
+                last_exc = e
+                continue
+        # If we get here, no exec succeeded
+        return jsonify({'ok': False, 'error': str(last_exc) if last_exc else 'exec failed'}), 500
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.post('/dashboard/api/vm/exec/<name>')
+@v2_auth_required
+def dashboard_v2_vm_exec_alias(name):
+    return dashboard_v2_vm_exec(name)
 
 
 @app.post('/dashboard/api/reset/<name>')
