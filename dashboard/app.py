@@ -314,7 +314,22 @@ function openVMWithUrl(name, url){
         if(!t){ const st = document.getElementById('setting-title'); if(st && st.value) t = st.value; }
         try{ if(t) document.title = t; }catch(e){}
     }catch(e){ console.error('openVMWithUrl title set error', e); }
-    openLink(url);
+    try{
+        // If dashboard is running in merged mode, open the dashboard's own wrapper so
+        // the server-rendered per-VM title + favicon are applied. Otherwise open the
+        // provided direct URL.
+        if(typeof mergedMode !== 'undefined' && mergedMode){
+            try{
+                // use configured basePath (e.g. /vm) so we open /vm/<name>/ on dashboard origin
+                const bp = (typeof basePath !== 'undefined' && basePath) ? basePath : '/vm';
+                const norm = bp.replace(/\/+$/,'');
+                const wrapper = window.location.origin + norm + '/' + encodeURIComponent(name) + '/';
+                openLink(wrapper);
+            }catch(e){ openLink(url); }
+        } else {
+            openLink(url);
+        }
+    }catch(e){ openLink(url); }
 }
 function selectedApp(name){
     const el = document.getElementById(`appsel-${name}`);
