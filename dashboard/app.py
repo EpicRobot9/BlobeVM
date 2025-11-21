@@ -1092,7 +1092,7 @@ def api_upload_vm_favicon(name):
         ddir = os.path.join(_state_dir(), 'dashboard', 'vm-fav')
         os.makedirs(ddir, exist_ok=True)
         # normalize name
-        safe = re.sub(r'[^A-Za-z0-9_\-]', '_', name)
+        safe = re.sub(r'[^A-Za-z0-9_-]', '_', name)
         outp = os.path.join(ddir, f"{safe}.ico")
         f.save(outp)
         return jsonify({'ok': True})
@@ -1121,7 +1121,7 @@ def api_set_vm_title(name):
 def dashboard_vm_favicon(name):
     # Serve per-VM favicon if exists, otherwise redirect to main favicon (which may itself redirect)
     ddir = os.path.join(_state_dir(), 'dashboard', 'vm-fav')
-    safe = re.sub(r'[^A-Za-z0-9_\-]', '_', name)
+    safe = re.sub(r'[^A-Za-z0-9_-]', '_', name)
     candidate = os.path.join(ddir, f"{safe}.ico")
     if os.path.isfile(candidate):
         return send_from_directory(ddir, os.path.basename(candidate))
@@ -1138,7 +1138,7 @@ def dashboard_vm_wrapper(name):
     vm_titles = cfg.get('vm_titles', {}) if isinstance(cfg.get('vm_titles', {}), dict) else {}
     title = vm_titles.get(name) or cfg.get('title') or 'BlobeVM'
     # prefer per-vm favicon if exists
-    vm_fav_path = os.path.join(_state_dir(), 'dashboard', 'vm-fav', f"{re.sub(r'[^A-Za-z0-9_\-]', '_', name)}.ico")
+    vm_fav_path = os.path.join(_state_dir(), 'dashboard', 'vm-fav', f"{re.sub(r'[^A-Za-z0-9_-]', '_', name)}.ico")
     if os.path.isfile(vm_fav_path):
         fav_url = f'/dashboard/vm-favicon/{name}.ico'
     else:
