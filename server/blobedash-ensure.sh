@@ -63,6 +63,30 @@ if [[ ! -f "$APP_PATH" ]]; then
   fi
 fi
 
+# If dashboard_v2 sources exist under /opt/blobe-vm, attempt to build them so
+# the v2 UI is available at /Dashboard. Capture stderr to last_error.txt
+# so the original dashboard can display diagnostics.
+if [[ -d "/opt/blobe-vm/dashboard_v2" ]]; then
+  DASH_DIR="/opt/blobe-vm/dashboard_v2"
+  LAST_ERR="$DASH_DIR/last_error.txt"
+  # remove previous error file unless we will append
+  rm -f "$LAST_ERR" 2>/dev/null || true
+  if [[ -f "$DASH_DIR/package.json" ]]; then
+    echo "Ensuring dashboard_v2 is built (dir: $DASH_DIR)"
+    # Try to run npm ci then build; capture stderr
+    (cd "$DASH_DIR" && npm ci --no-audit --no-fund) 2>"$LAST_ERR" || true
+    if (cd "$DASH_DIR" && npm run build --if-present) 2>>"$LAST_ERR"; then
+      echo "dashboard_v2 build succeeded"
+      rm -f "$LAST_ERR" 2>/dev/null || true
+    else
+      echo "dashboard_v2 build failed — see $LAST_ERR for details"
+      chown ${SUDO_USER:-root}:${SUDO_USER:-root} "$LAST_ERR" 2>/dev/null || true
+    fi
+  else
+    echo "No package.json in /opt/blobe-vm/dashboard_v2; skipping build"
+  fi
+fi
+
 # Determine or assign port
 DASHBOARD_PORT=${DASHBOARD_PORT:-}
 # If no port set or the current one is busy, (re)assign a free port
