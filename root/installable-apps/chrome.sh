@@ -21,16 +21,7 @@ if ! apt-get install -y google-chrome-stable; then
 	}
 fi
 
-rm -f ~/.config/google-chrome/SingletonLock
-rm -f ~/.config/google-chrome/SingletonCookie
-rm -f ~/.config/google-chrome/SingletonSocket
 
-
-google-chrome-stable \
-  --no-sandbox \
-  --disable-gpu \
-  --disable-software-rasterizer \
-  --disable-dev-shm-usage
 
 
 echo "Chrome install done."
