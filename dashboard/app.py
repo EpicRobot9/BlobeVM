@@ -1168,6 +1168,27 @@ def api_set_vm_title(name):
             vm_titles.pop(name, None)
     cfg['vm_titles'] = vm_titles
     ok = _save_dashboard_settings(cfg)
+    # Attempt to propagate the title into instance metadata so the VM container
+    # can be recreated with updated TITLE env. This uses the `blobe-vm-manager`
+    # CLI if available. Run asynchronously and tolerate failures.
+    def _propagate_title(n, t):
+        try:
+            mgr = shutil.which(MANAGER) or '/usr/local/bin/blobe-vm-manager' or os.path.join(APP_ROOT,'server','blobe-vm-manager')
+            if not mgr or not os.path.exists(mgr):
+                # manager not found; nothing to do
+                return
+            # Call manager set-title; allow empty title to clear
+            # Use Popen so we don't block the request
+            subprocess.Popen([mgr, 'set-title', n, t], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+    try:
+        # Fire-and-forget propagation
+        threading.Thread(target=_propagate_title, args=(name, title), daemon=True).start()
+    except Exception:
+        pass
+
     return jsonify({'ok': bool(ok)})
 
 

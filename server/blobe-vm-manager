@@ -10,6 +10,7 @@ set -euo pipefail
 #   stop <name>
 #   restart <name>
 #   status <name>
+#  set-title <name> <title>     # set per-VM title and recreate container
 #   check [--no-fix] <name>   # HTTP check the VM URL; optional --no-fix to skip auto-resolve
 #   delete <name>
 #   rename <old> <new>        # move instance and switch URL to new name
@@ -87,6 +88,7 @@ Usage: blobe-vm-manager <command> [args]
 
 Commands:
   list
+  set-title <name> <title>     # set per-VM title and recreate container
   list-ports                 # direct mode: show VM -> port
   create <name>
   start <name>
@@ -391,6 +393,17 @@ run_container() {
     net_args=( --network "${TRAEFIK_NETWORK:-proxy}" )
   fi
 
+  # Allow per-instance TITLE to be set via instance metadata (key: "title").
+  # If set, use that as the container's TITLE env; otherwise fall back to default.
+  local _meta_title
+  _meta_title="$(get_meta "$name" title || true)"
+  local TITLE_ENV
+  if [[ -n "$_meta_title" ]]; then
+    TITLE_ENV="$_meta_title"
+  else
+    TITLE_ENV="BlobeVM - ${name}"
+  fi
+
   docker run -d \
     --name "$cname" \
     --restart unless-stopped \
@@ -398,7 +411,7 @@ run_container() {
     -e PUID="$(id -u)" -e PGID="$(id -g)" \
     -e TZ=Etc/UTC \
     -e SUBFOLDER="$subfolder" \
-    -e TITLE="BlobeVM - ${name}" \
+    -e TITLE="$TITLE_ENV" \
     --shm-size="2gb" \
     -v "$save_dir":/config \
     ${publish_args[@]:-} \
@@ -437,6 +450,23 @@ cmd_clear_limits() {
   del_meta "$name" mem_limit || true
   recreate_container "$name"
   echo "Limits cleared for '$name'"
+}
+
+# Set per-instance title meta and recreate container so env changes take effect
+cmd_set_title() {
+  local name="$1" title="$2"
+  [[ -z "$name" ]] && usage
+  ensure_instance_dir
+  instance_exists "$name" || { echo "Instance '$name' does not exist." >&2; exit 1; }
+  if [[ -n "$title" ]]; then
+    set_meta "$name" title "$title"
+    echo "Set title for '$name' -> '$title'. Recreating container to apply change..."
+  else
+    del_meta "$name" title || true
+    echo "Cleared title for '$name'. Recreating container to apply change..."
+  fi
+  recreate_container "$name"
+  echo "Done. New URL: $(vm_url "$name")"
 }
 
 cmd_list() {
@@ -1124,6 +1154,7 @@ main() {
     clear-host) cmd_clear_host "$@" ;;
     set-path) cmd_set_path "$@" ;;
     clear-path) cmd_clear_path "$@" ;;
+    set-title) cmd_set_title "$@" ;;
     port)   cmd_port "$@" ;;
     set-port) cmd_set_port "$@" ;;
     url)    cmd_url "$@" ;;
