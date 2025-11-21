@@ -1354,6 +1354,28 @@ install_manager() {
   if [[ -f "$REPO_DIR/dashboard/app.py" ]]; then
     cp -f "$REPO_DIR/dashboard/app.py" /opt/blobe-vm/dashboard/app.py
   fi
+  # Build dashboard_v2 frontend (if present) so /Dashboard is available after install
+  if [[ -d "/opt/blobe-vm/dashboard_v2" ]]; then
+    DASH_DIR="/opt/blobe-vm/dashboard_v2"
+    LAST_ERR="$DASH_DIR/last_error.txt"
+    # remove any previous error file
+    rm -f "$LAST_ERR" 2>/dev/null || true
+    if [[ -f "$DASH_DIR/package.json" ]]; then
+      echo "Building dashboard_v2 frontend at $DASH_DIR"
+      # install deps (capture stderr to last_error)
+      (cd "$DASH_DIR" && npm ci --no-audit --no-fund) 2>"$LAST_ERR" || true
+      # build and append any stderr to last_error
+      if (cd "$DASH_DIR" && npm run build --if-present) 2>>"$LAST_ERR"; then
+        echo "dashboard_v2 built successfully"
+        rm -f "$LAST_ERR" 2>/dev/null || true
+      else
+        echo "dashboard_v2 build failed — see $LAST_ERR for details"
+        chown ${SUDO_USER:-root}:${SUDO_USER:-root} "$LAST_ERR" 2>/dev/null || true
+      fi
+    else
+      echo "No dashboard_v2/package.json found in /opt/blobe-vm; skipping v2 build"
+    fi
+  fi
   # Install dashboard service assets
   mkdir -p /opt/blobe-vm/server
   if [[ -f "$REPO_DIR/server/blobedash-ensure.sh" ]]; then
