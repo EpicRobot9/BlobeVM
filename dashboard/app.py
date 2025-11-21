@@ -121,7 +121,7 @@ async function load(){
     const vmTitles = settings.vm_titles || {};
     const tb=document.getElementById('tbody');
         tb.innerHTML='';
-    const appOpts = (availableApps||[]).map(a=>`<option value="${a}">${a}</option>`).join('');
+             const appOpts = (availableApps||[]).map(a=>`<option value="${a}">${a}</option>`).join('');
     vms.forEach(i=>{
             const tr=document.createElement('tr');
             const dot = statusDot(i.status);
@@ -156,9 +156,11 @@ async function load(){
             }
             dbg('row', { name: i.name, status: i.status, rawUrl: i.url, mergedMode, portOrPath, openUrl });
             const vmTitle = vmTitles[i.name] || '';
-             tr.innerHTML=`<td><img src="/dashboard/vm-favicon/${i.name}.ico" style="width:16px;height:16px;vertical-align:middle;margin-right:6px" onerror="this.style.display='none'"/>${i.name}<div id="vmtitle-display-${i.name}" style="font-size:.85rem;color:#9ca3af;margin-top:3px">${vmTitle||''}</div></td><td>${dot}<span class=muted>${i.status||''}</span></td><td>${portOrPath}</td><td><a href="${openUrl}" target="_blank" rel="noopener noreferrer">${openUrl}</a></td>`+
+             // add cache-busting to favicon src so uploads show up immediately
+             const favSrc = `/dashboard/vm-favicon/${i.name}.ico?v=${Date.now()}`;
+             tr.innerHTML=`<td><img src="${favSrc}" style="width:16px;height:16px;vertical-align:middle;margin-right:6px" onerror="this.style.display='none'"/>${i.name}<div id="vmtitle-display-${i.name}" style="font-size:.85rem;color:#9ca3af;margin-top:3px">${vmTitle||''}</div></td><td>${dot}<span class=muted>${i.status||''}</span></td><td>${portOrPath}</td><td><a href="${openUrl}" target="_blank" rel="noopener noreferrer">${openUrl}</a></td>`+
                  `<td>`+
-                `<button onclick="openVM('${i.name}')">Open</button>`+
+                 `<button onclick="openVMWithUrl('${i.name}','${openUrl.replace(/'/g, "\\'")}')">Open</button>`+
                  `<button onclick="act('start','${i.name}')">Start</button>`+
                  `<button onclick="act('stop','${i.name}')">Stop</button>`+
                  `<button onclick="act('restart','${i.name}')">Restart</button>`+
@@ -301,6 +303,18 @@ function openVM(name){
         try{ if(t) document.title = t; }catch(e){}
     }catch(e){ console.error('openVM title set error', e); }
     openLink('/dashboard/vm/' + encodeURIComponent(name) + '/');
+}
+
+function openVMWithUrl(name, url){
+    try{
+        // set title from saved input or global
+        const el = document.getElementById('vmtitle-' + name);
+        let t = '';
+        if(el && el.value) t = el.value;
+        if(!t){ const st = document.getElementById('setting-title'); if(st && st.value) t = st.value; }
+        try{ if(t) document.title = t; }catch(e){}
+    }catch(e){ console.error('openVMWithUrl title set error', e); }
+    openLink(url);
 }
 function selectedApp(name){
     const el = document.getElementById(`appsel-${name}`);
@@ -1161,11 +1175,13 @@ def dashboard_vm_wrapper(name):
     url = _build_vm_url(name) or ''
     cfg = _load_dashboard_settings()
     vm_titles = cfg.get('vm_titles', {}) if isinstance(cfg.get('vm_titles', {}), dict) else {}
-    title = vm_titles.get(name) or cfg.get('title') or 'BlobeVM'
+    # Default VM title: use saved per-VM title if present, else 'BlobeVM - <name>'
+    title = vm_titles.get(name) or f"BlobeVM - {name}"
     # prefer per-vm favicon if exists
     vm_fav_path = os.path.join(_state_dir(), 'dashboard', 'vm-fav', f"{re.sub(r'[^A-Za-z0-9_-]', '_', name)}.ico")
     if os.path.isfile(vm_fav_path):
-        fav_url = f'/dashboard/vm-favicon/{name}.ico'
+        # append server-side cache-bust using timestamp so updated favicons are picked up
+        fav_url = f'/dashboard/vm-favicon/{name}.ico?v={int(time.time())}'
     else:
         # fall back to global
         fav_local = os.path.join(_state_dir(), 'dashboard', 'favicon.ico')
