@@ -47,6 +47,8 @@ TEMPLATE = r"""
 New dashboard status: <span id="v2state">Checking…</span>
 <span id="v2link"></span>
 </div>
+<!-- v2 dashboard status script moved to end of body -->
+</body>
 <script>
 async function pollV2Status() {
     try {
