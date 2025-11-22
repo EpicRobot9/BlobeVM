@@ -287,7 +287,7 @@ async function load(){
              const favSrc = `/dashboard/vm-favicon/${i.name}.ico?v=${Date.now()}`;
              tr.innerHTML=`<td><img src="${favSrc}" style="width:16px;height:16px;vertical-align:middle;margin-right:6px" onerror="this.style.display='none'"/>${i.name}<div id="vmtitle-display-${i.name}" style="font-size:.85rem;color:#9ca3af;margin-top:3px">${vmTitle||''}</div></td><td>${dot}<span class=muted>${i.status||''}</span></td><td>${portOrPath}</td><td><a href="${openUrl}" target="_blank" rel="noopener noreferrer">${openUrl}</a></td>`+
                  `<td>`+
-                 `<button onclick="openVMWithUrl('${i.name}','${openUrl.replace(/'/g, "\\'")}")">Open</button>`+
+                 `<button onclick="openVM('${i.name}')">Open</button>`+
                  `<button onclick="act('start','${i.name}')">Start</button>`+
                  `<button onclick="act('stop','${i.name}')">Stop</button>`+
                  `<button onclick="act('restart','${i.name}')">Restart</button>`+
