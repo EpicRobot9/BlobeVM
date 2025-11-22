@@ -65,7 +65,10 @@ fi
 
 # If dashboard_v2 sources exist under /opt/blobe-vm, deploy as a standalone container like a VM
 
-if [[ -d "/opt/blobe-vm/dashboard_v2" ]]; then
+
+# Only deploy dashboard_v2 if a custom domain is set
+CUSTOM_DOMAIN="$(grep '^BLOBEVM_DOMAIN=' "$ENV_FILE" | cut -d'=' -f2 | tr -d "'\"")"
+if [[ -d "/opt/blobe-vm/dashboard_v2" && -n "$CUSTOM_DOMAIN" ]]; then
   DASH_DIR="/opt/blobe-vm/dashboard_v2"
   DASHBOARD_V2_NAME="dashboard_v2"
   DASHBOARD_V2_PORT=${DASHBOARD_V2_PORT:-3000}
@@ -115,9 +118,13 @@ if [[ -d "/opt/blobe-vm/dashboard_v2" ]]; then
       exit 1
     fi
   done
-  echo "Dashboard V2: http://$(hostname -I | awk '{print $1}'):${DASHBOARD_V2_PORT}/Dashboard"
+  echo "Dashboard V2: http://$CUSTOM_DOMAIN/Dashboard"
 else
-  echo "No dashboard_v2 sources found at /opt/blobe-vm/dashboard_v2; skipping dashboard_v2 deployment"
+  if [[ ! -d "/opt/blobe-vm/dashboard_v2" ]]; then
+    echo "No dashboard_v2 sources found at /opt/blobe-vm/dashboard_v2; skipping dashboard_v2 deployment"
+  else
+    echo "Custom domain not set; skipping dashboard_v2 deployment to avoid overwriting old dashboard."
+  fi
 fi
 
 # Determine or assign port
