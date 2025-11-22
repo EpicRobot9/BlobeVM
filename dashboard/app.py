@@ -1,3 +1,22 @@
+@app.get('/dashboard/api/v2status')
+@auth_required
+def api_v2status():
+    env = _read_env()
+    domain = env.get('BLOBEVM_DOMAIN', '')
+    running = False
+    url = None
+    try:
+        r = subprocess.run([
+            'docker', 'ps', '-q', '-f', 'name=^blobedash-v2$'
+        ], capture_output=True, text=True)
+        cid = r.stdout.strip()
+        if cid and domain:
+            running = True
+            url = f'http://{domain}/Dashboard'
+    except Exception:
+        running = False
+        url = None
+    return jsonify({'running': running, 'url': url})
 #!/usr/bin/env python3
 import os, json, subprocess, shlex, base64, socket, threading, time
 import shutil
@@ -25,9 +44,35 @@ TEMPLATE = r"""
 <h1 id="dash-title">{{ title }}</h1>
 <div id=errbox style="display:none;background:#7f1d1d;color:#fff;padding:.5rem .75rem;border-radius:4px;margin:.5rem 0"></div>
 <div id=v2status style="margin:.5rem 0;padding:.5rem;border:1px dashed #233;background:#071229;border-radius:6px;color:#cfe8ff">
-New dashboard: <span id="v2state">Checking…</span>
-{% if dashboard_v2_url %}<br><a href="{{ dashboard_v2_url }}" target="_blank" style="color:#4fd1c5;font-weight:bold">Open Dashboard V2</a>{% endif %}
+New dashboard status: <span id="v2state">Checking…</span>
+<span id="v2link"></span>
 </div>
+<script>
+async function pollV2Status() {
+    try {
+        const res = await fetch('/dashboard/api/v2status');
+        const data = await res.json();
+        const el = document.getElementById('v2state');
+        const linkEl = document.getElementById('v2link');
+        if (data.running) {
+            el.textContent = 'Running';
+            if (data.url) {
+                linkEl.innerHTML = `<br><a href="${data.url}" target="_blank" style="color:#4fd1c5;font-weight:bold">Open Dashboard V2</a>`;
+            } else {
+                linkEl.innerHTML = '';
+            }
+        } else {
+            el.textContent = 'Stopped';
+            linkEl.innerHTML = '';
+        }
+    } catch (e) {
+        const el = document.getElementById('v2state');
+        if (el) el.textContent = 'Error';
+    }
+}
+setInterval(pollV2Status, 3000);
+window.addEventListener('DOMContentLoaded', pollV2Status);
+</script>
 <form method=post action="/dashboard/api/create" onsubmit="return createVM(event)">
 <input name=name placeholder="name" required pattern="[a-zA-Z0-9-]+" />
 <button type=submit>Create</button>
@@ -1568,6 +1613,32 @@ def api_set_domain():
         return jsonify({'ok': False, 'error': 'No domain'}), 400
     # Persist the domain
     _write_env_kv({'BLOBEVM_DOMAIN': dom})
+    # Start/stop v2 dashboard container based on domain
+    dashboard_v2_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'dashboard_v2'))
+    dist_path = os.path.join(dashboard_v2_path, 'dist')
+    def start_v2_dashboard():
+        # Build if needed
+        if not os.path.isdir(dist_path) or not os.path.isfile(os.path.join(dist_path, 'index.html')):
+            try:
+                subprocess.run(['npm', 'install'], cwd=dashboard_v2_path, check=True)
+                subprocess.run(['npm', 'run', 'build'], cwd=dashboard_v2_path, check=True)
+            except Exception as e:
+                print(f"Failed to build dashboard_v2: {e}")
+        # Remove any existing container
+        subprocess.run(['docker', 'rm', '-f', 'blobedash-v2'], check=False)
+        # Start container
+        subprocess.run([
+            'docker', 'run', '-d', '--name', 'blobedash-v2', '--restart', 'unless-stopped',
+            '-p', '4173:4173',
+            '-v', f'{dist_path}:/usr/share/nginx/html:ro',
+            'nginx:alpine'
+        ], check=False)
+    def stop_v2_dashboard():
+        subprocess.run(['docker', 'rm', '-f', 'blobedash-v2'], check=False)
+    if dom:
+        start_v2_dashboard()
+    else:
+        stop_v2_dashboard()
     # If caller requested, also apply merged/domain-mode settings so domain routing will be used.
     apply_mode = request.values.get('apply') in ('1','true','yes')
     if apply_mode:
@@ -1747,34 +1818,19 @@ def root():
         fav = cfg.get('favicon','')
     title = cfg.get('title', 'BlobeVM Dashboard')
 
-    # Detect blobedash-v2 container and port, and build a user-facing URL like VMs
+    # Only show v2 dashboard link if custom domain is set and container is running
     dashboard_v2_url = None
     try:
         env = _read_env()
-        merged = env.get('NO_TRAEFIK', '1') == '0'
-        base_path = env.get('BASE_PATH', '/vm')
         domain = env.get('BLOBEVM_DOMAIN', '')
-        # Find blobedash-v2 container port
-        r = subprocess.run([
-            'docker', 'ps', '-q', '-f', 'name=^blobedash-v2$'
-        ], capture_output=True, text=True)
-        cid = r.stdout.strip()
-        if cid:
-            r2 = subprocess.run([
-                'docker', 'port', cid, '4173/tcp'
+        if domain:
+            # Check if container is running
+            r = subprocess.run([
+                'docker', 'ps', '-q', '-f', 'name=^blobedash-v2$'
             ], capture_output=True, text=True)
-            if r2.returncode == 0 and r2.stdout:
-                for line in r2.stdout.strip().splitlines():
-                    if ':' in line:
-                        _host, port = line.rsplit(':', 1)
-                        if merged and domain:
-                            # Merged mode: use custom domain and base path
-                            dashboard_v2_url = f'http://{domain}/Dashboard'
-                        else:
-                            # Direct mode: use the host the user used to access the dashboard
-                            host = _request_host()
-                            dashboard_v2_url = f'http://{host}:{port}/Dashboard'
-                        break
+            cid = r.stdout.strip()
+            if cid:
+                dashboard_v2_url = f'http://{domain}/Dashboard'
     except Exception:
         dashboard_v2_url = None
 
