@@ -1360,49 +1360,16 @@ install_manager() {
         DDIR="$src/dashboard_v2"
         LERR="$DDIR/last_error.txt"
         rm -f "$LERR" 2>/dev/null || true
-        if [[ -f "$DDIR/package.json" ]]; then
-          # Try npm ci, fall back to npm install if ci fails (no package-lock.json)
-          (cd "$DDIR" && npm ci --no-audit --no-fund) 2>"$LERR" || \
-            (cd "$DDIR" && npm install --no-audit --no-fund) 2>>"$LERR" || true
-          if (cd "$DDIR" && npm run build --if-present) 2>>"$LERR"; then
-            echo "dashboard_v2 built successfully at $DDIR"
-            rm -f "$LERR" 2>/dev/null || true
-          else
-            echo "dashboard_v2 build failed at $DDIR — see $LERR"
-            chown ${SUDO_USER:-root}:${SUDO_USER:-root} "$LERR" 2>/dev/null || true
-          fi
-          # Copy or sync the dashboard_v2 folder into /opt/blobe-vm so runtime scripts can pick it up
-          mkdir -p /opt/blobe-vm
-          rsync -a --delete "$src/dashboard_v2/" /opt/blobe-vm/dashboard_v2/ || true
-        fi
+        # Copy or sync the dashboard_v2 folder into /opt/blobe-vm so runtime scripts can pick it up
+        mkdir -p /opt/blobe-vm
+        rsync -a --delete "$src/dashboard_v2/" /opt/blobe-vm/dashboard_v2/ || true
         break
       fi
     done
     cp -f "$REPO_DIR/dashboard/app.py" /opt/blobe-vm/dashboard/app.py
   fi
   # Build dashboard_v2 frontend (if present) so /Dashboard is available after install
-  if [[ -d "/opt/blobe-vm/dashboard_v2" ]]; then
-    DASH_DIR="/opt/blobe-vm/dashboard_v2"
-    LAST_ERR="$DASH_DIR/last_error.txt"
-    # remove any previous error file
-    rm -f "$LAST_ERR" 2>/dev/null || true
-    if [[ -f "$DASH_DIR/package.json" ]]; then
-      echo "Building dashboard_v2 frontend at $DASH_DIR"
-      # install deps (try npm ci, fall back to npm install; capture stderr to last_error)
-      (cd "$DASH_DIR" && npm ci --no-audit --no-fund) 2>"$LAST_ERR" || \
-        (cd "$DASH_DIR" && npm install --no-audit --no-fund) 2>>"$LAST_ERR" || true
-      # build and append any stderr to last_error
-      if (cd "$DASH_DIR" && npm run build --if-present) 2>>"$LAST_ERR"; then
-        echo "dashboard_v2 built successfully"
-        rm -f "$LAST_ERR" 2>/dev/null || true
-      else
-        echo "dashboard_v2 build failed — see $LAST_ERR for details"
-        chown ${SUDO_USER:-root}:${SUDO_USER:-root} "$LAST_ERR" 2>/dev/null || true
-      fi
-    else
-      echo "No dashboard_v2/package.json found in /opt/blobe-vm; skipping v2 build"
-    fi
-  fi
+  # dashboard_v2 build is handled by Docker Compose only
   # Install dashboard service assets
   mkdir -p /opt/blobe-vm/server
   if [[ -f "$REPO_DIR/server/blobedash-ensure.sh" ]]; then

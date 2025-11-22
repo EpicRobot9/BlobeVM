@@ -74,6 +74,17 @@ if [[ -d "/opt/blobe-vm/dashboard_v2" ]]; then
       echo "dashboard_v2 Docker Compose failed" >&2
       exit 1
     }
+    # Copy built dist folder from container to host for Flask static serving
+    if docker compose -f "$DASH_DIR/docker-compose.yml" ps | grep -q dashboard_v2; then
+      echo "Copying dashboard_v2 dist folder from container to host..."
+      docker compose -f "$DASH_DIR/docker-compose.yml" cp dashboard_v2:/app/dist "$DASH_DIR/dist" || {
+        # Fallback for older compose versions
+        cid=$(docker compose -f "$DASH_DIR/docker-compose.yml" ps -q dashboard_v2)
+        if [[ -n "$cid" ]]; then
+          docker cp "$cid:/app/dist" "$DASH_DIR/dist"
+        fi
+      }
+    fi
   else
     echo "No docker-compose.yml in /opt/blobe-vm/dashboard_v2; skipping dashboard_v2 deployment"
   fi
