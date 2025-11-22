@@ -1,0 +1,26 @@
+version: '3.8'
+services:
+  dashboard_v2_dev:
+    container_name: dashboard_v2_dev
+    image: node:18-bullseye
+    working_dir: /app
+    volumes:
+      - ./:/app:cached
+    command: sh -lc "npm install --silent && npm run dev -- --host 0.0.0.0 --port 5173"
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy"
+      # Route for custom domain + /Dashboard path — use the BlobeVM domain env var
+      - "traefik.http.routers.dashboard_v2.rule=Host(`${BLOBEVM_DOMAIN}`) && PathPrefix(`/Dashboard`)"
+      - "traefik.http.routers.dashboard_v2.entrypoints=web"
+      - "traefik.http.routers.dashboard_v2.middlewares=dashboard_v2_strip"
+      - "traefik.http.middlewares.dashboard_v2_strip.stripprefix.prefixes=/Dashboard"
+      - "traefik.http.services.dashboard_v2.loadbalancer.server.port=5173"
+    environment:
+      - NODE_ENV=development
+
+networks:
+  proxy:
+    external: true

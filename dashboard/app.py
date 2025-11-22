@@ -70,6 +70,32 @@ def api_v2status():
         if cid and domain:
             running = True
             url = f'http://{domain}/Dashboard'
+        else:
+            # If no docker container, allow detecting a local dev server (Vite) for development.
+            # Use env var DASHBOARD_DEV_PORT to override default (5173).
+            try:
+                dev_port = int(env.get('DASHBOARD_DEV_PORT', '5173'))
+                # Prefer explicit host if provided, else detect server's outward-facing IP
+                host_to_check = env.get('DASHBOARD_DEV_HOST', '')
+                if not host_to_check:
+                    try:
+                        # determine outward-facing IP by creating a UDP socket
+                        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                        s.connect(('8.8.8.8', 80))
+                        host_to_check = s.getsockname()[0]
+                        s.close()
+                    except Exception:
+                        host_to_check = '127.0.0.1'
+                # try connecting to host_to_check:dev_port
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s2:
+                    s2.settimeout(0.5)
+                    res = s2.connect_ex((host_to_check, dev_port))
+                    if res == 0 and domain:
+                        running = True
+                        # The dashboard is being served by Vite on dev_port; report the same public domain path
+                        url = f'http://{domain}/Dashboard'
+            except Exception:
+                pass
     except Exception:
         running = False
         url = None
@@ -1687,8 +1713,31 @@ def api_set_domain():
             '-v', f'{dist_path}:/usr/share/nginx/html:ro',
             'nginx:alpine'
         ], check=False)
+        # Also attempt to start a dev compose service if present so Traefik labels are applied
+        dev_compose = os.path.join(dashboard_v2_path, 'docker-compose.dev.yml')
+        if os.path.isfile(dev_compose):
+            try:
+                # ensure proxy network exists
+                r = _docker('network', 'inspect', 'proxy')
+                if r.returncode != 0:
+                    _docker('network', 'create', 'proxy')
+                # run docker compose to start the dev service (detached)
+                envc = os.environ.copy()
+                envc['BLOBEVM_DOMAIN'] = dom
+                subprocess.run(['docker', 'compose', '-f', 'docker-compose.dev.yml', 'up', '--build', '-d'], cwd=dashboard_v2_path, check=False, env=envc)
+            except Exception as e:
+                print(f"Failed to start dashboard_v2 dev compose: {e}")
     def stop_v2_dashboard():
         subprocess.run(['docker', 'rm', '-f', 'blobedash-v2'], check=False)
+        # Also try to stop any dev compose service
+        try:
+            dc = os.path.join(dashboard_v2_path, 'docker-compose.dev.yml')
+                if os.path.isfile(dc):
+                    envc = os.environ.copy()
+                    envc['BLOBEVM_DOMAIN'] = ''
+                    subprocess.run(['docker', 'compose', '-f', 'docker-compose.dev.yml', 'down', '-v'], cwd=dashboard_v2_path, check=False, env=envc)
+        except Exception:
+            pass
     if dom:
         start_v2_dashboard()
     else:

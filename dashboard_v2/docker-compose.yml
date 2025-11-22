@@ -8,8 +8,8 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=proxy"
-      # Main router: custom domain + /Dashboard path (domain will be updated by dashboard function)
-      - "traefik.http.routers.dashboard_v2.rule=Host(`${DASHBOARD_DOMAIN}`) && PathPrefix(`/Dashboard`)"
+      # Main router: custom domain + /Dashboard path (use BlobeVM domain setting)
+      - "traefik.http.routers.dashboard_v2.rule=Host(`${BLOBEVM_DOMAIN}`) && PathPrefix(`/Dashboard`)"
       - "traefik.http.routers.dashboard_v2.entrypoints=web"
       - "traefik.http.services.dashboard_v2.loadbalancer.server.port=3000"
       - "traefik.http.routers.dashboard_v2.service=dashboard_v2"
