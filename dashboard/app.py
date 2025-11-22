@@ -1757,10 +1757,14 @@ def root():
         fav = cfg.get('favicon','')
     title = cfg.get('title', 'BlobeVM Dashboard')
 
-    # Detect dashboard_v2 container and port
-    import socket
+    # Detect dashboard_v2 container and port, and build a user-facing URL like VMs
     dashboard_v2_url = None
     try:
+        env = _read_env()
+        merged = env.get('NO_TRAEFIK', '1') == '0'
+        base_path = env.get('BASE_PATH', '/vm')
+        domain = env.get('BLOBEVM_DOMAIN', '')
+        # Find dashboard_v2 container port
         r = subprocess.run([
             'docker', 'ps', '-q', '-f', 'name=^dashboard_v2$'
         ], capture_output=True, text=True)
@@ -1772,9 +1776,14 @@ def root():
             if r2.returncode == 0 and r2.stdout:
                 for line in r2.stdout.strip().splitlines():
                     if ':' in line:
-                        host, port = line.rsplit(':', 1)
-                        ip = socket.gethostbyname(socket.gethostname())
-                        dashboard_v2_url = f'http://{ip}:{port}/Dashboard'
+                        _host, port = line.rsplit(':', 1)
+                        if merged and domain:
+                            # Merged mode: use custom domain and base path
+                            dashboard_v2_url = f'http://{domain}/Dashboard'
+                        else:
+                            # Direct mode: use the host the user used to access the dashboard
+                            host = _request_host()
+                            dashboard_v2_url = f'http://{host}:{port}/Dashboard'
                         break
     except Exception:
         dashboard_v2_url = None
