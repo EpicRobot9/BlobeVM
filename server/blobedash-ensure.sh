@@ -94,10 +94,16 @@ if [[ -d "/opt/blobe-vm/dashboard_v2" ]]; then
     done
     # Copy built dist folder from container to host for Flask static serving
     echo "Copying dashboard_v2 dist folder from container to host..."
-    docker cp "$cid:/app/dist" "$DASH_DIR/dist" || {
+    if docker cp "$cid:/app/dist" "$DASH_DIR/dist"; then
+      echo "Successfully copied dist folder from container."
+    else
       echo "Failed to copy dist folder from dashboard_v2 container." >&2
       exit 1
-    }
+    fi
+    echo "Listing contents of $DASH_DIR/dist after copy:"
+    ls -l "$DASH_DIR/dist"
+    echo "Listing contents of dist subfolders (if any):"
+    find "$DASH_DIR/dist" -type f
   else
     echo "No docker-compose.yml in /opt/blobe-vm/dashboard_v2; skipping dashboard_v2 deployment"
   fi
