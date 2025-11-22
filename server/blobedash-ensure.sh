@@ -74,16 +74,20 @@ if [[ -d "/opt/blobe-vm/dashboard_v2" ]]; then
       echo "dashboard_v2 Docker Compose failed" >&2
       exit 1
     }
-    # Wait for dashboard_v2 container to be running
+    # Wait for dashboard_v2 container to be running (robust check)
     echo "Waiting for dashboard_v2 container to be running..."
-    for i in {1..10}; do
+    for i in {1..15}; do
       cid=$(docker compose -f "$DASH_DIR/docker-compose.yml" ps -q dashboard_v2)
-      if [[ -n "$cid" ]] && docker ps | grep -q "$cid"; then
-        echo "dashboard_v2 container is running. Proceeding to copy dist folder."
-        break
+      if [[ -n "$cid" ]]; then
+        is_running=$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null)
+        if [[ "$is_running" == "true" ]]; then
+          echo "dashboard_v2 container is running (ID: $cid). Proceeding to copy dist folder."
+          break
+        fi
       fi
+      echo "dashboard_v2 not running yet, retry $i/15..."
       sleep 2
-      if [[ $i -eq 10 ]]; then
+      if [[ $i -eq 15 ]]; then
         echo "dashboard_v2 container did not start in time." >&2
         exit 1
       fi
