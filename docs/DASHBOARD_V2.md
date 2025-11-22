@@ -83,6 +83,20 @@ npm run build
 tail -n 200 /opt/blobe-vm/dashboard_v2/last_error.txt || true
 ```
 
+Temporary workaround for dependency conflicts
+--------------------------------------------
+
+If `npm install` fails with peer dependency resolution errors (ERESOLVE), you can retry the install as a temporary workaround using:
+
+```bash
+cd /opt/blobe-vm/dashboard_v2
+# allow installing despite peer dependency conflicts
+npm install --legacy-peer-deps --no-audit --no-fund
+npm run build
+```
+
+This accepts potentially incompatible peer dependencies (not ideal long-term). The repository now updates `@vitejs/plugin-react` to a Vite-5-compatible release to avoid this conflict.
+
 Notes
 -----
 - `vite` is a devDependency in `dashboard_v2/package.json`; building the production bundle requires it to be installed (either by `npm install` or by having it in node_modules from a prior `npm ci` with a lockfile).
