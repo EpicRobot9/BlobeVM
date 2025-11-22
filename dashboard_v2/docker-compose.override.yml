@@ -1,0 +1,41 @@
+version: "3.8"
+# Override to run the v2 dashboard like other VM containers and register it with Traefik.
+# Drop this file next to the existing docker-compose.yml in `dashboard_v2` and run
+# `docker compose up -d --build` to apply. It uses the external `proxy` network.
+services:
+  # If your base compose service is named `dashboard_v2` this will merge with it.
+  dashboard_v2:
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.blobedash.rule=Host(`${BLOBEVM_DOMAIN:-techxplore.us}`) && PathPrefix(`/Dashboard`)"
+      - "traefik.http.routers.blobedash.entrypoints=web"
+      - "traefik.http.routers.blobedash.priority=10"
+      - "traefik.http.middlewares.blobedash-strip.stripprefix.prefixes=/Dashboard"
+      - "traefik.http.routers.blobedash.middlewares=blobedash-strip"
+
+  # If your compose names the nginx/static service `blobedash-v2`, this will also
+  # ensure it has the correct labels. It's harmless if that service doesn't exist.
+  blobedash-v2:
+    restart: unless-stopped
+    ports:
+      - "4173:80"
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.blobedash.rule=Host(`${BLOBEVM_DOMAIN:-techxplore.us}`) && PathPrefix(`/Dashboard`)"
+      - "traefik.http.routers.blobedash.entrypoints=web"
+      - "traefik.http.routers.blobedash.priority=10"
+      - "traefik.http.middlewares.blobedash-strip.stripprefix.prefixes=/Dashboard"
+      - "traefik.http.routers.blobedash.middlewares=blobedash-strip"
+
+networks:
+  proxy:
+    external: true
