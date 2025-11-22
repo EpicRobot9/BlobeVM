@@ -916,48 +916,6 @@ async function checkVM(ev,name){
 </body></html>
 """
 
-app = Flask(__name__)
-
-BUSER = os.environ.get('BLOBEDASH_USER')
-BPASS = os.environ.get('BLOBEDASH_PASS')
-
-def need_auth():
-    return bool(BUSER and BPASS)
-
-def check_auth(header: str) -> bool:
-    if not header or not header.lower().startswith('basic '):
-        return False
-    try:
-        raw = base64.b64decode(header.split(None,1)[1]).decode('utf-8')
-        user, pw = raw.split(':',1)
-        return user == BUSER and pw == BPASS
-    except Exception:
-        return False
-
-def auth_required(fn):
-    @wraps(fn)
-    def wrapper(*args, **kwargs):
-        if need_auth():
-            # Allow basic auth via BUSER/BPASS or a valid v2 token (so dashboard_v2 can reuse existing APIs)
-            auth_header = request.headers.get('Authorization')
-            basic_ok = check_auth(auth_header)
-            token_ok = False
-            try:
-                if auth_header and auth_header.lower().startswith('bearer '):
-                    token = auth_header.split(None,1)[1].strip()
-                    token_ok = _verify_v2_token(token)
-                else:
-                    # also accept token via cookie
-                    token_cookie = request.cookies.get('Dashboard-Auth')
-                    if token_cookie:
-                        token_ok = _verify_v2_token(token_cookie)
-            except Exception:
-                token_ok = False
-            if not (basic_ok or token_ok):
-                return Response('Auth required', 401, {'WWW-Authenticate':'Basic realm="BlobeVM Dashboard"'})
-        return fn(*args, **kwargs)
-    return wrapper
-
 # --- New dashboard (v2) auth helpers ---
 _DASH_V2_SECRET = os.environ.get('DASH_V2_SECRET') or os.environ.get('SECRET_KEY') or 'blobevm-secret'
 
@@ -1732,10 +1690,10 @@ def api_set_domain():
         # Also try to stop any dev compose service
         try:
             dc = os.path.join(dashboard_v2_path, 'docker-compose.dev.yml')
-                if os.path.isfile(dc):
-                    envc = os.environ.copy()
-                    envc['BLOBEVM_DOMAIN'] = ''
-                    subprocess.run(['docker', 'compose', '-f', 'docker-compose.dev.yml', 'down', '-v'], cwd=dashboard_v2_path, check=False, env=envc)
+            if os.path.isfile(dc):
+                envc = os.environ.copy()
+                envc['BLOBEVM_DOMAIN'] = ''
+                subprocess.run(['docker', 'compose', '-f', 'docker-compose.dev.yml', 'down', '-v'], cwd=dashboard_v2_path, check=False, env=envc)
         except Exception:
             pass
     if dom:
