@@ -7,10 +7,17 @@ services:
       - proxy
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.dashboard_v2.rule=Host(`dashboard.localhost`) && PathPrefix(`/Dashboard`)"
+      - "traefik.docker.network=proxy"
+      # Main router: custom domain + /Dashboard path (domain will be updated by dashboard function)
+      - "traefik.http.routers.dashboard_v2.rule=Host(`${DASHBOARD_DOMAIN}`) && PathPrefix(`/Dashboard`)"
       - "traefik.http.routers.dashboard_v2.entrypoints=web"
       - "traefik.http.services.dashboard_v2.loadbalancer.server.port=3000"
       - "traefik.http.routers.dashboard_v2.service=dashboard_v2"
+      # Path-only router: allow /Dashboard on any host (for flexibility, like VMs)
+      - "traefik.http.routers.dashboard_v2-path.rule=PathPrefix(`/Dashboard`)"
+      - "traefik.http.routers.dashboard_v2-path.entrypoints=web"
+      - "traefik.http.services.dashboard_v2-path.loadbalancer.server.port=3000"
+      - "traefik.http.routers.dashboard_v2-path.service=dashboard_v2-path"
     environment:
       - NODE_ENV=production
     restart: unless-stopped
