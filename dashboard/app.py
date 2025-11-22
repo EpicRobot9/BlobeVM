@@ -1714,35 +1714,25 @@ def _disable_single_port(dash_port: int | None):
         except Exception:
             pass
 
-    # Ensure direct-mode dashboard is present: either call ensure script if available,
-    # or recreate a blobedash container with a high port.
-    ensure_script = '/opt/blobe-vm/server/blobedash-ensure.sh'
-    if os.path.isfile(ensure_script):
+    # Start/recreate v2 dashboard as a Docker container in production mode
+    port = dash_port or direct_start
+    # Remove any existing v2 dashboard container
+    _docker('rm', '-f', 'blobedash-v2')
+    # Build the v2 dashboard if not already built (optional: could be handled elsewhere)
+    dashboard_v2_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'dashboard_v2'))
+    dist_path = os.path.join(dashboard_v2_path, 'dist')
+    if not os.path.isdir(dist_path) or not os.path.isfile(os.path.join(dist_path, 'index.html')):
+        # Try to build if not present
         try:
-            if dash_port:
-                env2 = os.environ.copy(); env2['DASHBOARD_PORT'] = str(dash_port)
-                subprocess.run(['bash', ensure_script], env=env2, check=False)
-            else:
-                subprocess.run(['bash', ensure_script], check=False)
-        except Exception:
-            pass
-    else:
-        # Fallback: start direct dashboard on the provided port or choose one
-        port = dash_port or direct_start
-        # Free any existing blobedash
-        _docker('rm', '-f', 'blobedash')
-        _docker('run', '-d', '--name', 'blobedash', '--restart', 'unless-stopped',
-            '-p', f'{port}:5000',
-            '-v', f'{_state_dir()}:/opt/blobe-vm',
-            '-v', '/usr/local/bin/blobe-vm-manager:/usr/local/bin/blobe-vm-manager:ro',
-            '-v', DOCKER_VOLUME_BIND,
-            '-v', '/var/run/docker.sock:/var/run/docker.sock',
-            '-v', f'{_state_dir()}/dashboard/app.py:/app/app.py:ro',
-            '-e', f'BLOBEDASH_USER={os.environ.get("BLOBEDASH_USER","")}',
-            '-e', f'BLOBEDASH_PASS={os.environ.get("BLOBEDASH_PASS","")}',
-            '-e', f'HOST_DOCKER_BIN={HOST_DOCKER_BIN}',
-        'python:3.11-slim',
-            'bash', '-c', 'pip install --no-cache-dir flask && python /app/app.py')
+            subprocess.run(['npm', 'install'], cwd=dashboard_v2_path, check=True)
+            subprocess.run(['npm', 'run', 'build'], cwd=dashboard_v2_path, check=True)
+        except Exception as e:
+            print(f"Failed to build dashboard_v2: {e}")
+    # Start the v2 dashboard container to serve static files
+    _docker('run', '-d', '--name', 'blobedash-v2', '--restart', 'unless-stopped',
+        '-p', f'{port}:4173',
+        '-v', f'{dist_path}:/usr/share/nginx/html:ro',
+        'nginx:alpine')
 
 
 @app.get('/dashboard')

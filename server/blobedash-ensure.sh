@@ -63,48 +63,6 @@ if [[ ! -f "$APP_PATH" ]]; then
   fi
 fi
 
-# If dashboard_v2 sources exist under /opt/blobe-vm, deploy as a standalone container like a VM
-
-
-# Only deploy dashboard_v2 if a custom domain is set
-CUSTOM_DOMAIN="$(grep '^BLOBEVM_DOMAIN=' "$ENV_FILE" | cut -d'=' -f2 | tr -d "'\"")"
-if [[ -d "/opt/blobe-vm/dashboard_v2" && -n "$CUSTOM_DOMAIN" ]]; then
-  DASH_DIR="/opt/blobe-vm/dashboard_v2"
-  if [[ "$NO_TRAEFIK" == "0" && -f "$DASH_DIR/docker-compose.yml" ]]; then
-    echo "Deploying dashboard_v2 using Docker Compose (Traefik/proxy mode)"
-    (cd "$DASH_DIR" && DASHBOARD_DOMAIN="$CUSTOM_DOMAIN" docker compose up -d --build) || {
-      echo "dashboard_v2 Docker Compose failed" >&2
-      exit 1
-    }
-    # Wait for dashboard_v2 container to be running
-    echo "Waiting for dashboard_v2 container to be running..."
-    for i in {1..15}; do
-      cid=$(docker compose -f "$DASH_DIR/docker-compose.yml" ps -q dashboard_v2)
-      if [[ -n "$cid" ]]; then
-        is_running=$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null)
-        if [[ "$is_running" == "true" ]]; then
-          echo "dashboard_v2 container is running (ID: $cid)."
-          break
-        fi
-      fi
-      echo "dashboard_v2 not running yet, retry $i/15..."
-      sleep 2
-      if [[ $i -eq 15 ]]; then
-        echo "dashboard_v2 container did not start in time." >&2
-        exit 1
-      fi
-    done
-    echo "Dashboard V2: http://$CUSTOM_DOMAIN/Dashboard"
-  else
-    echo "NO_TRAEFIK is not 0 or docker-compose.yml missing; skipping dashboard_v2 deployment in proxy mode."
-  fi
-else
-  if [[ ! -d "/opt/blobe-vm/dashboard_v2" ]]; then
-    echo "No dashboard_v2 sources found at /opt/blobe-vm/dashboard_v2; skipping dashboard_v2 deployment"
-  else
-    echo "Custom domain not set; skipping dashboard_v2 deployment to avoid overwriting old dashboard."
-  fi
-fi
 
 # Determine or assign port
 DASHBOARD_PORT=${DASHBOARD_PORT:-}
