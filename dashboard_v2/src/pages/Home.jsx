@@ -27,33 +27,7 @@ export default function Home(){
         const now = Date.now()
         const prev = prevNetRef.current
         let netRate = 0
-        if(prev && prev.ts){
-          const dt = (now - prev.ts)/1000
-          netRate = dt>0 ? Math.max(0, Math.round(((netNow - prev.total)/dt)/1024)) : 0 // KB/s
-        }
-        prevNetRef.current = {ts: now, total: netNow}
-        setHistory(h=>{
-          const c = (s && s.cpu && typeof s.cpu.usage === 'number') ? s.cpu.usage : 0
-          const m = (s && s.memory && typeof s.memory.percent === 'number') ? s.memory.percent : 0
-          const n = netRate
-          const max = 40
-          return {cpu: [...(h.cpu||[]), c].slice(-max), mem: [...(h.mem||[]), m].slice(-max), net: [...(h.net||[]), n].slice(-max)}
-        })
-      }catch(e){ console.error('stats load error', e) }
-      setLoading(false)
-    }
-    let stopped = false
-    async function tick(){
-      if(stopped) return
-      await loadOnce()
-      const ivMs = parseInt(localStorage.getItem('nbv2_update_interval') || '3000', 10)
-      await new Promise(r=>setTimeout(r, Math.max(800, ivMs)))
-      if(!stopped) tick()
-    }
-    tick()
-    return ()=>{ mounted=false; stopped=true }
-  }, [])
-
+      }
   const cpuData = {
     labels: history.cpu.map((_,i)=>i),
     datasets: [{ label: 'CPU %', data: history.cpu, borderColor: 'rgba(30,144,255,0.9)', backgroundColor: 'rgba(30,144,255,0.15)', fill: true }]

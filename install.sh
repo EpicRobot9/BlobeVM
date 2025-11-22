@@ -114,12 +114,12 @@ else
     echo "Docker CLI present: $(docker --version)"
 fi
 
-# Install Node.js 18.x via NodeSource if missing (modern LTS)
+# Install Node.js 20.x via NodeSource if missing (modern LTS)
 if ! command -v node >/dev/null 2>&1; then
-    echo "Node.js not found — installing Node.js 18.x via NodeSource"
+    echo "Node.js not found — installing Node.js 20.x via NodeSource"
     sudo apt-get update -y
     sudo apt-get install -y curl ca-certificates gnupg lsb-release
-    curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+    curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
     sudo apt-get install -y nodejs
 else
     echo "Node already installed: $(node --version)"

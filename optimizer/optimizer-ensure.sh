@@ -28,11 +28,11 @@ ensure_node() {
   if command -v node >/dev/null 2>&1; then
     return 0
   fi
-  echo "Node.js not found — installing Node.js 18.x via NodeSource"
+  echo "Node.js not found — installing Node.js 20.x via NodeSource"
   # Install prerequisites
   apt-get update -y
   apt-get install -y curl ca-certificates gnupg lsb-release
-  curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
+  curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
   apt-get install -y nodejs
 }
 
