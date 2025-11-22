@@ -75,22 +75,7 @@ if [[ -d "/opt/blobe-vm/dashboard_v2" ]]; then
       exit 1
     }
   else
-    LAST_ERR="$DASH_DIR/last_error.txt"
-    rm -f "$LAST_ERR" 2>/dev/null || true
-    if [[ -f "$DASH_DIR/package.json" ]]; then
-      echo "Ensuring dashboard_v2 is built (dir: $DASH_DIR)"
-      (cd "$DASH_DIR" && npm ci --no-audit --no-fund) 2>"$LAST_ERR" || \
-        (cd "$DASH_DIR" && npm install --no-audit --no-fund) 2>>"$LAST_ERR" || true
-      if (cd "$DASH_DIR" && npm run build --if-present) 2>>"$LAST_ERR"; then
-        echo "dashboard_v2 build succeeded"
-        rm -f "$LAST_ERR" 2>/dev/null || true
-      else
-        echo "dashboard_v2 build failed — see $LAST_ERR for details"
-        chown ${SUDO_USER:-root}:${SUDO_USER:-root} "$LAST_ERR" 2>/dev/null || true
-      fi
-    else
-      echo "No package.json in /opt/blobe-vm/dashboard_v2; skipping build"
-    fi
+    echo "No docker-compose.yml in /opt/blobe-vm/dashboard_v2; skipping dashboard_v2 deployment"
   fi
 fi
 
