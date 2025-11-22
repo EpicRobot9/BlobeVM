@@ -1637,14 +1637,7 @@ main() {
   # Check dashboard runtime dependencies before deployment
   preflight_dashboard_runtime || true
   # Always ensure the dashboard direct-service is enabled and running
-  # Start dashboard_v2 using Docker Compose if present
-  if [[ -d /opt/blobe-vm/dashboard_v2 && -f /opt/blobe-vm/dashboard_v2/docker-compose.yml ]]; then
-    echo "Starting dashboard_v2 using Docker Compose..."
-    (cd /opt/blobe-vm/dashboard_v2 && docker compose up -d --build) || {
-      echo "dashboard_v2 Docker Compose failed" >&2
-      exit 1
-    }
-  fi
+  # dashboard_v2 deployment is now handled by blobedash-ensure.sh (direct mode, like VMs)
   if [[ -f /etc/systemd/system/blobedash.service ]]; then
     systemctl daemon-reload || true
     systemctl enable blobedash.service || true
