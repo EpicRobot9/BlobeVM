@@ -92,12 +92,16 @@ if [[ -d "/opt/blobe-vm/dashboard_v2" ]]; then
         exit 1
       fi
     done
-    # Copy built dist folder from container to host for Flask static serving
-    echo "Copying dashboard_v2 dist folder from container to host..."
-    if docker cp "$cid:/app/dist" "$DASH_DIR/dist"; then
-      echo "Successfully copied dist folder from container."
+    # Remove existing dist directory to avoid dist/dist nesting
+    echo "Removing any existing $DASH_DIR/dist..."
+    rm -rf "$DASH_DIR/dist"
+    mkdir -p "$DASH_DIR/dist"
+    # Copy contents of /app/dist (not the folder itself) from container to host
+    echo "Copying dashboard_v2 dist contents from container to host..."
+    if docker cp "$cid:/app/dist/." "$DASH_DIR/dist"; then
+      echo "Successfully copied dist contents from container."
     else
-      echo "Failed to copy dist folder from dashboard_v2 container." >&2
+      echo "Failed to copy dist contents from dashboard_v2 container." >&2
       exit 1
     fi
     echo "Listing contents of $DASH_DIR/dist after copy:"
