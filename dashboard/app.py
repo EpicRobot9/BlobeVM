@@ -1524,45 +1524,78 @@ def dashboard_vm_favicon(name):
 
 @app.get('/dashboard/vm/<name>/')
 def dashboard_vm_wrapper(name):
-    # Public wrapper page that opens the VM inside an iframe while setting the tab title and favicon.
-    # Resolve VM URL and per-VM title/fav
-    url = _build_vm_url(name) or ''
-    cfg = _load_dashboard_settings()
-    vm_titles = cfg.get('vm_titles', {}) if isinstance(cfg.get('vm_titles', {}), dict) else {}
-    # Default VM title: use saved per-VM title if present, else 'BlobeVM - <name>'
-    title = vm_titles.get(name) or f"EpicVM - {name}"
-    # prefer per-vm favicon if exists
-    vm_fav_path = os.path.join(_state_dir(), 'dashboard', 'vm-fav', f"{re.sub(r'[^A-Za-z0-9_-]', '_', name)}.ico")
-    if os.path.isfile(vm_fav_path):
-        # append server-side cache-bust using timestamp so updated favicons are picked up
-        fav_url = f'/dashboard/vm-favicon/{name}.ico?v={int(time.time())}'
-    else:
-        # fall back to global
-        fav_local = os.path.join(_state_dir(), 'dashboard', 'favicon.ico')
-        if os.path.isfile(fav_local):
-            fav_url = '/dashboard/favicon.ico'
+        # Public wrapper page that opens the VM inside an iframe while setting the tab title and favicon.
+        # We render a small client-side React app that will show either the iframe (when VM is running)
+        # or a full-screen fallback UI when the VM is stopped/unreachable.
+        url = _build_vm_url(name) or ''
+        cfg = _load_dashboard_settings()
+        vm_titles = cfg.get('vm_titles', {}) if isinstance(cfg.get('vm_titles', {}), dict) else {}
+        title = vm_titles.get(name) or f"EpicVM - {name}"
+        vm_fav_path = os.path.join(_state_dir(), 'dashboard', 'vm-fav', f"{re.sub(r'[^A-Za-z0-9_-]', '_', name)}.ico")
+        if os.path.isfile(vm_fav_path):
+                fav_url = f'/dashboard/vm-favicon/{name}.ico?v={int(time.time())}'
         else:
-            fav_url = cfg.get('favicon','')
-    # Render simple page with title, favicon and iframe
-    # Use json to safely embed title and fav_url in inline script
-    page = f'''<!doctype html><html><head><meta charset="utf-8"><title>{title}</title>'''
-    if fav_url:
-        page += f"<link rel=\"icon\" href=\"{fav_url}\" />"
-    # Inline script ensures the wrapper page sets title + favicon even if browser cached or modified
-    try:
-        js_title = json.dumps(title)
-        js_fav = json.dumps(fav_url)
-    except Exception:
-        js_title = '"%s"' % (title.replace('"','\"'))
-        js_fav = '"%s"' % (fav_url.replace('"','\"'))
-    # Build script using concatenation to avoid f-string brace escaping issues
-    page += (
-        "<script>try{document.title=" + js_title +
-        ";var __fav=" + js_fav +
-        ";if(__fav){var l=document.querySelector('link[rel=\"icon\"]')||document.createElement('link');l.rel='icon';l.href=__fav; if(!document.head.contains(l))document.head.appendChild(l);} }catch(e){}</script>"
-    )
-    page += f"</head><body style='margin:0;padding:0;overflow:hidden;background:#000'><iframe src=\"{url}\" style=\"position:fixed;top:0;left:0;width:100%;height:100%;border:none;background:#000\"></iframe></body></html>"
-    return page
+                fav_local = os.path.join(_state_dir(), 'dashboard', 'favicon.ico')
+                if os.path.isfile(fav_local):
+                        fav_url = '/dashboard/favicon.ico'
+                else:
+                        fav_url = cfg.get('favicon','')
+
+        # Safely embed necessary values for the client script
+        try:
+                js_title = json.dumps(title)
+                js_fav = json.dumps(fav_url)
+                js_url = json.dumps(url)
+                js_name = json.dumps(name)
+        except Exception:
+                js_title = '"%s"' % (title.replace('"','\"'))
+                js_fav = '"%s"' % (fav_url.replace('"','\"'))
+                js_url = '"%s"' % (url.replace('"','\"'))
+                js_name = '"%s"' % (name.replace('"','\"'))
+
+        # The page includes React + Babel via CDN so we can write a compact React component
+        # for the fallback UI without changing the project's build pipeline.
+        fav_link = f'<link rel="icon" href="{fav_url}" />' if fav_url else ''
+        tmpl = '''<!doctype html>
+    <html>
+        <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width,initial-scale=1">
+            <title>__TITLE__</title>
+            __FAV__
+            <style>
+                html,body,#root{height:100%;margin:0}
+                body{font-family:system-ui,Arial;background:#000;color:#fff}
+                .vm-iframe{position:fixed;top:0;left:0;width:100%;height:100%;border:none;background:#000}
+                .fallback{display:flex;align-items:center;justify-content:center;height:100%;background:#0b1020;color:#fff}
+                .card{max-width:720px;padding:28px;border-radius:8px;text-align:center;background:linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.01));box-shadow:0 8px 30px rgba(2,6,23,0.6)}
+                .vm-name{font-size:28px;margin-bottom:14px}
+                .btn-primary{background:#2563eb;color:#fff;border:none;padding:12px 20px;border-radius:8px;font-size:16px;cursor:pointer}
+                .btn-secondary{background:#374151;color:#fff;border:none;padding:8px 12px;border-radius:6px;font-size:14px;cursor:pointer}
+                .muted{opacity:.8;color:#9ca3af;margin-top:10px}
+                .errbox{background:#7f1d1d;color:#ffdede;padding:10px;border-radius:6px;margin-top:12px}
+                .spinner{width:48px;height:48px;border-radius:50%;border:6px solid rgba(255,255,255,0.12);border-top-color:#60a5fa;animation:spin 1s linear infinite;margin:14px auto}
+                @keyframes spin{to{transform:rotate(360deg)}}
+                .fade-enter{opacity:0;transform:translateY(6px)}
+                .fade-enter-active{opacity:1;transform:none;transition:opacity .25s,transform .25s}
+            </style>
+        </head>
+        <body>
+            <div id="root"></div>
+            <iframe id="vmframe" class="vm-iframe" src=__JS_URL__ style="display:none"></iframe>
+            <script>window.__VM_WRAPPER_INIT = { vmname: __JS_NAME__, vmurl: __JS_URL__ };</script>
+            <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+            <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+            <script src="https://unpkg.com/babel-standalone@6.26.0/babel.min.js"></script>
+            <script type="text/babel" src="/static/js/api/vms.js"></script>
+            <script type="text/babel" src="/static/js/hooks/useVMStatus.js"></script>
+            <script type="text/babel" src="/static/js/components/VMFallback.jsx"></script>
+            <script type="text/babel" src="/static/js/main_vm_wrapper.jsx"></script>
+        </body>
+    </html>
+    '''
+        page = tmpl.replace('__TITLE__', title).replace('__FAV__', fav_link).replace('__JS_URL__', js_url).replace('__JS_NAME__', js_name)
+        return page
 
 
 # Register an alias route under the configured base path (e.g. /vm/<name>/) so merged-mode
@@ -1929,8 +1962,42 @@ def api_create():
 @app.post('/dashboard/api/start/<name>')
 @auth_required
 def api_start(name):
-    subprocess.check_call([MANAGER, 'start', name])
-    return jsonify({'ok': True})
+    # Safe-start: reject if already running
+    try:
+        cname = f'blobevm_{name}'
+        r = _docker('ps', '-q', '-f', f'name=^{cname}$')
+        if r.returncode == 0 and r.stdout.strip():
+            return jsonify({'ok': False, 'error': 'VM already running'})
+    except Exception:
+        # If we can't determine, proceed to attempt start
+        pass
+    try:
+        result = subprocess.run([MANAGER, 'start', name], capture_output=True, text=True)
+        if result.returncode != 0:
+            return jsonify({'ok': False, 'error': result.stderr.strip() or 'Failed to start VM'}), 500
+        return jsonify({'ok': True})
+    except FileNotFoundError:
+        return jsonify({'ok': False, 'error': 'blobe-vm-manager not found'}), 500
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.get('/dashboard/api/vm/<name>/status')
+@auth_required
+def api_vm_status(name):
+    """Return status string for the VM container (e.g., 'Up Xs', 'Exited (0) Y ago')."""
+    try:
+        cname = f'blobevm_{name}'
+        r = _docker('ps', '-a', '--filter', f'name=^{cname}$', '--format', '{{.Status}}')
+        if r.returncode != 0:
+            return jsonify({'ok': False, 'error': r.stderr.strip() or 'docker error'}), 500
+        status = r.stdout.strip()
+        if not status:
+            # container not found
+            return jsonify({'ok': True, 'status': 'not-found'})
+        return jsonify({'ok': True, 'status': status})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
 
 @app.post('/dashboard/api/stop/<name>')
 @auth_required
