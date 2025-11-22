@@ -64,6 +64,7 @@ if [[ ! -f "$APP_PATH" ]]; then
 fi
 
 # If dashboard_v2 sources exist under /opt/blobe-vm, deploy as a standalone container like a VM
+
 if [[ -d "/opt/blobe-vm/dashboard_v2" ]]; then
   DASH_DIR="/opt/blobe-vm/dashboard_v2"
   DASHBOARD_V2_NAME="dashboard_v2"
@@ -77,8 +78,9 @@ if [[ -d "/opt/blobe-vm/dashboard_v2" ]]; then
     fi
     DASHBOARD_V2_PORT="$new_port"
   fi
-  # Remove any existing container
+  # Always remove any existing dashboard_v2 container to prevent conflicts
   if docker ps -a --format '{{.Names}}' | grep -qx "$DASHBOARD_V2_NAME"; then
+    echo "Removing existing dashboard_v2 container..."
     docker rm -f "$DASHBOARD_V2_NAME" >/dev/null 2>&1 || true
   fi
   # Build the dashboard_v2 image
