@@ -1747,21 +1747,21 @@ def root():
         fav = cfg.get('favicon','')
     title = cfg.get('title', 'BlobeVM Dashboard')
 
-    # Detect dashboard_v2 container and port, and build a user-facing URL like VMs
+    # Detect blobedash-v2 container and port, and build a user-facing URL like VMs
     dashboard_v2_url = None
     try:
         env = _read_env()
         merged = env.get('NO_TRAEFIK', '1') == '0'
         base_path = env.get('BASE_PATH', '/vm')
         domain = env.get('BLOBEVM_DOMAIN', '')
-        # Find dashboard_v2 container port
+        # Find blobedash-v2 container port
         r = subprocess.run([
-            'docker', 'ps', '-q', '-f', 'name=^dashboard_v2$'
+            'docker', 'ps', '-q', '-f', 'name=^blobedash-v2$'
         ], capture_output=True, text=True)
         cid = r.stdout.strip()
         if cid:
             r2 = subprocess.run([
-                'docker', 'port', cid, '3000/tcp'
+                'docker', 'port', cid, '4173/tcp'
             ], capture_output=True, text=True)
             if r2.returncode == 0 and r2.stdout:
                 for line in r2.stdout.strip().splitlines():
