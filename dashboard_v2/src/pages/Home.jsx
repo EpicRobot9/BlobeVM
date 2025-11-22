@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react'
 import apiFetch from '../lib/fetchWrapper'
-import { Line, Bar } from 'react-chartjs-2'
+import { Line } from 'react-chartjs-2'
 import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, BarElement, Filler, Tooltip } from 'chart.js'
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, Filler, Tooltip)
@@ -11,7 +11,6 @@ export default function Home(){
   const [history, setHistory] = useState({cpu:[], mem:[], net:[]})
   const prevNetRef = useRef(null)
   const [loading, setLoading] = useState(true)
-  const intervalRef = useRef(parseInt(localStorage.getItem('nbv2_update_interval') || '3000', 10))
 
   useEffect(()=>{
     let mounted = true
@@ -27,7 +26,33 @@ export default function Home(){
         const now = Date.now()
         const prev = prevNetRef.current
         let netRate = 0
-      }
+        if(prev && prev.ts){
+          const dt = (now - prev.ts)/1000
+          netRate = dt>0 ? Math.max(0, Math.round(((netNow - prev.total)/dt)/1024)) : 0 // KB/s
+        }
+        prevNetRef.current = {ts: now, total: netNow}
+        setHistory(h=>{
+          const c = (s && s.cpu && typeof s.cpu.usage === 'number') ? s.cpu.usage : 0
+          const m = (s && s.memory && typeof s.memory.percent === 'number') ? s.memory.percent : 0
+          const n = netRate
+          const max = 40
+          return {cpu: [...(h.cpu||[]), c].slice(-max), mem: [...(h.mem||[]), m].slice(-max), net: [...(h.net||[]), n].slice(-max)}
+        })
+      }catch(e){ console.error('stats load error', e) }
+      setLoading(false)
+    }
+    let stopped = false
+    async function tick(){
+      if(stopped) return
+      await loadOnce()
+      const ivMs = parseInt(localStorage.getItem('nbv2_update_interval') || '3000', 10)
+      await new Promise(r=>setTimeout(r, Math.max(800, ivMs)))
+      if(!stopped) tick()
+    }
+    tick()
+    return ()=>{ mounted=false; stopped=true }
+  }, [])
+
   const cpuData = {
     labels: history.cpu.map((_,i)=>i),
     datasets: [{ label: 'CPU %', data: history.cpu, borderColor: 'rgba(30,144,255,0.9)', backgroundColor: 'rgba(30,144,255,0.15)', fill: true }]
@@ -81,33 +106,6 @@ export default function Home(){
           <h3 style={{marginTop:0}}>VM Status</h3>
           <div style={{color:'var(--muted)'}}>Use the VM Manager page for detailed table and actions.</div>
         </div>
-      </div>
-    </div>
-  )
-}
-import React from 'react'
-
-function StatCard({title,value}){
-  return <div className="glass-card card-elev" style={{padding:16}}>
-    <div style={{fontSize:12,color:'var(--muted)'}}>{title}</div>
-    <div style={{fontSize:22,fontWeight:700}}>{value}</div>
-  </div>
-}
-
-export default function Home(){
-  return (
-    <div>
-      <h1 style={{marginTop:0}}>Overview</h1>
-      <div className="stat-grid">
-        <StatCard title="VMs" value="12" />
-        <StatCard title="CPU" value="23%" />
-        <StatCard title="RAM" value="6.4GB" />
-        <StatCard title="Disk" value="120GB" />
-      </div>
-      <div style={{height:20}} />
-      <div className="glass-card">
-        <h3>Live charts (demo)</h3>
-        <div style={{height:260,display:'flex',alignItems:'center',justifyContent:'center',color:'var(--muted)'}}>Charts placeholder</div>
       </div>
     </div>
   )

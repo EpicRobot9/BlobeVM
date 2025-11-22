@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { useTheme } from '../lib/theme'
+import { useTheme } from '../lib/theme.jsx'
 import Button from './Button'
 
 export default function Topbar({onLogout, collapsed, onToggle, onToggleMobile}){
