@@ -1,3 +1,60 @@
+#!/usr/bin/env python3
+import os, json, subprocess, shlex, base64, socket, threading, time
+import shutil
+import re
+from urllib import request as urlrequest, error as urlerror
+from functools import wraps
+from flask import Flask, jsonify, request, abort, send_from_directory, render_template_string, Response
+import optimizer as dash_optimizer
+import hmac, hashlib, time, base64
+try:
+    import psutil
+except Exception:
+    psutil = None
+
+app = Flask(__name__)
+ 
+# --- Auth helpers (must be defined before route decorators) ---
+BUSER = os.environ.get('BLOBEDASH_USER')
+BPASS = os.environ.get('BLOBEDASH_PASS')
+
+def need_auth():
+    return bool(BUSER and BPASS)
+
+def check_auth(header: str) -> bool:
+    if not header or not header.lower().startswith('basic '):
+        return False
+    try:
+        raw = base64.b64decode(header.split(None,1)[1]).decode('utf-8')
+        user, pw = raw.split(':',1)
+        return user == BUSER and pw == BPASS
+    except Exception:
+        return False
+
+def auth_required(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if need_auth():
+            # Allow basic auth via BUSER/BPASS or a valid v2 token (so dashboard_v2 can reuse existing APIs)
+            auth_header = request.headers.get('Authorization')
+            basic_ok = check_auth(auth_header)
+            token_ok = False
+            try:
+                if auth_header and auth_header.lower().startswith('bearer '):
+                    token = auth_header.split(None,1)[1].strip()
+                    token_ok = _verify_v2_token(token)
+                else:
+                    # also accept token via cookie
+                    token_cookie = request.cookies.get('Dashboard-Auth')
+                    if token_cookie:
+                        token_ok = _verify_v2_token(token_cookie)
+            except Exception:
+                token_ok = False
+            if not (basic_ok or token_ok):
+                return Response('Auth required', 401, {'WWW-Authenticate':'Basic realm="BlobeVM Dashboard"'})
+        return fn(*args, **kwargs)
+    return wrapper
+
 @app.get('/dashboard/api/v2status')
 @auth_required
 def api_v2status():
@@ -17,19 +74,6 @@ def api_v2status():
         running = False
         url = None
     return jsonify({'running': running, 'url': url})
-#!/usr/bin/env python3
-import os, json, subprocess, shlex, base64, socket, threading, time
-import shutil
-import re
-from urllib import request as urlrequest, error as urlerror
-from functools import wraps
-from flask import Flask, jsonify, request, abort, send_from_directory, render_template_string, Response
-import optimizer as dash_optimizer
-import hmac, hashlib, time, base64
-try:
-    import psutil
-except Exception:
-    psutil = None
 
 APP_ROOT = '/opt/blobe-vm'
 MANAGER = 'blobe-vm-manager'
@@ -108,6 +152,7 @@ window.addEventListener('DOMContentLoaded', pollV2Status);
     <strong style="display:block;margin-bottom:.25rem">Dashboard Settings</strong>
     <input id="setting-title" placeholder="Dashboard title" style="width:320px" />
     <input id="setting-favicon" placeholder="Favicon URL (http/https)" style="width:320px;margin-left:.5rem" />
+    <input id="setting-v2pw" placeholder="New Dashboard v2 admin password (leave blank to keep)" style="width:420px;display:block;margin-top:.5rem" />
     <!-- Removed favicon upload -->
     <button onclick="saveSettings()" style="margin-left:.5rem">Save</button>
     <button onclick="clearFavicon()" class="btn-gray" style="margin-left:.25rem">Clear Favicon</button>
@@ -628,6 +673,9 @@ async function checkVM(ev,name){
             const j = await r.json().catch(()=>({}));
             document.getElementById('setting-title').value = j.title || '';
             document.getElementById('setting-favicon').value = j.favicon_url || j.favicon || '';
+            // Do not populate the v2 admin password for security; leave blank.
+            const v2pwEl = document.getElementById('setting-v2pw');
+            if(v2pwEl) v2pwEl.value = '';
         }catch(e){ console.error('loadSettings', e); }
     }
 
@@ -635,9 +683,12 @@ async function checkVM(ev,name){
         try{
             const title = document.getElementById('setting-title').value || '';
             const fav = document.getElementById('setting-favicon').value || '';
+            const newpw = (document.getElementById('setting-v2pw') && document.getElementById('setting-v2pw').value) || '';
             const body = new URLSearchParams();
             body.append('title', title);
             body.append('favicon', fav);
+            // Only send the new password when provided; empty means no change
+            if(newpw !== '') body.append('new_dashboard_admin_password', newpw);
             const r = await fetch('/dashboard/api/settings', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: body});
             const j = await r.json().catch(()=>({}));
             const msg = document.getElementById('settings-msg');
@@ -1258,6 +1309,13 @@ def api_set_settings():
     cfg = _load_dashboard_settings()
     if title:
         cfg['title'] = title
+    # Allow setting the v2 dashboard admin password from the old dashboard settings UI
+    try:
+        if new_pw is not None:
+            # store raw (it is only editable from the old dashboard as requested)
+            cfg['new_dashboard_admin_password'] = new_pw.strip()
+    except Exception:
+        pass
     # If favicon is empty string, clear both saved file and url
     if favicon == '':
         cfg['favicon'] = ''
@@ -1290,13 +1348,7 @@ def api_set_settings():
         else:
             # treat as direct URL or path; store it
             cfg['favicon'] = favicon
-        # Allow setting the v2 dashboard admin password from the old dashboard settings UI
-        try:
-            if new_pw is not None:
-                # store raw (it is only editable from the old dashboard as requested)
-                cfg['new_dashboard_admin_password'] = new_pw.strip()
-        except Exception:
-            pass
+        
     ok = _save_dashboard_settings(cfg)
     return jsonify({'ok': bool(ok)})
 
