@@ -73,8 +73,10 @@ if [[ -d "/opt/blobe-vm/dashboard_v2" ]]; then
   rm -f "$LAST_ERR" 2>/dev/null || true
   if [[ -f "$DASH_DIR/package.json" ]]; then
     echo "Ensuring dashboard_v2 is built (dir: $DASH_DIR)"
-    # Try to run npm ci then build; capture stderr
-    (cd "$DASH_DIR" && npm ci --unsafe-perm=true --no-audit --no-fund) 2>"$LAST_ERR" || true
+    # Try to run npm ci then fall back to npm install; capture stderr
+    # Use npm install fallback because `npm ci` requires a package-lock.json.
+    (cd "$DASH_DIR" && npm ci --no-audit --no-fund) 2>"$LAST_ERR" || \
+      (cd "$DASH_DIR" && npm install --no-audit --no-fund) 2>>"$LAST_ERR" || true
     if (cd "$DASH_DIR" && npm run build --if-present) 2>>"$LAST_ERR"; then
       echo "dashboard_v2 build succeeded"
       rm -f "$LAST_ERR" 2>/dev/null || true

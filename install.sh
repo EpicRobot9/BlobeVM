@@ -166,7 +166,9 @@ if [[ -d /opt/blobe-vm/dashboard_v2 ]]; then
     # remove previous error
     sudo rm -f "$LAST_ERR" 2>/dev/null || true
     if [[ -f "$DASH_DIR/package.json" ]]; then
-        (cd "$DASH_DIR" && sudo npm ci --unsafe-perm=true --no-audit --no-fund) 2>"$LAST_ERR" || true
+                # Try npm ci first; if it fails (no package-lock.json), fall back to npm install
+                (cd "$DASH_DIR" && sudo npm ci --no-audit --no-fund) 2>"$LAST_ERR" || \
+                    (cd "$DASH_DIR" && sudo npm install --no-audit --no-fund) 2>>"$LAST_ERR" || true
         # run build; capture stderr to last_error.txt for troubleshooting
         if (cd "$DASH_DIR" && sudo npm run build --if-present) 2>>"$LAST_ERR"; then
             echo "dashboard_v2 built successfully"

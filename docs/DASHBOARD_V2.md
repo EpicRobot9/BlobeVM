@@ -52,6 +52,44 @@ Installer & Build Behavior
 - `install.sh` now ensures `pip3` and `psutil` (for host metrics) and that a Docker CLI is available (installs `docker.io` if missing). Adjust Docker installation for your distro if needed.
 - When `dashboard_v2/package.json` exists, the installer runs `npm ci` and `npm run build` in `dashboard_v2` and captures stderr to `dashboard_v2/last_error.txt` on failure. The server endpoint `GET /dashboard/api/v2/info` reads this file to present build diagnostics in the original dashboard UI.
 
+Recommended workflow
+--------------------
+
+There are two ways to keep dashboard_v2 builds reproducible and avoid installer failures:
+
+- **Preferred — commit a lockfile (deterministic installs):**
+	- Locally run `npm install` in `dashboard_v2` to generate `package-lock.json`, commit that lockfile to the repository, then the installer can use `npm ci` reliably on target machines.
+	- Example:
+
+```bash
+cd dashboard_v2
+npm install --no-audit --no-fund
+git add package-lock.json
+git commit -m "chore(dashboard_v2): add package-lock.json for reproducible installs"
+```
+
+- **Alternative — allow installer fallback (already implemented):**
+	- The installer now attempts `npm ci` and falls back to `npm install` when no lockfile is present. This ensures devDependencies like `vite` are installed so `npm run build` can succeed even if no lockfile exists.
+
+Quick fix on a target machine (what to run on the server)
+------------------------------------------------------
+
+If your install failed with `vite: not found`, run these commands on the target machine as root (or with `sudo`) inside `/opt/blobe-vm/dashboard_v2`:
+
+```bash
+cd /opt/blobe-vm/dashboard_v2
+npm install --no-audit --no-fund
+npm run build
+tail -n 200 /opt/blobe-vm/dashboard_v2/last_error.txt || true
+```
+
+Notes
+-----
+- `vite` is a devDependency in `dashboard_v2/package.json`; building the production bundle requires it to be installed (either by `npm install` or by having it in node_modules from a prior `npm ci` with a lockfile).
+- The installer now appends build stderr to `dashboard_v2/last_error.txt` so the original dashboard can show diagnostics.
+
+Contact me if you want me to either commit a generated `package-lock.json` to the repo or attempt a local build in this workspace to verify the process.
+
 Build & Local Development
 
 ```bash
