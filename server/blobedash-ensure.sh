@@ -74,17 +74,26 @@ if [[ -d "/opt/blobe-vm/dashboard_v2" ]]; then
       echo "dashboard_v2 Docker Compose failed" >&2
       exit 1
     }
+    # Wait for dashboard_v2 container to be running
+    echo "Waiting for dashboard_v2 container to be running..."
+    for i in {1..10}; do
+      cid=$(docker compose -f "$DASH_DIR/docker-compose.yml" ps -q dashboard_v2)
+      if [[ -n "$cid" ]] && docker ps | grep -q "$cid"; then
+        echo "dashboard_v2 container is running. Proceeding to copy dist folder."
+        break
+      fi
+      sleep 2
+      if [[ $i -eq 10 ]]; then
+        echo "dashboard_v2 container did not start in time." >&2
+        exit 1
+      fi
+    done
     # Copy built dist folder from container to host for Flask static serving
-    if docker compose -f "$DASH_DIR/docker-compose.yml" ps | grep -q dashboard_v2; then
-      echo "Copying dashboard_v2 dist folder from container to host..."
-      docker compose -f "$DASH_DIR/docker-compose.yml" cp dashboard_v2:/app/dist "$DASH_DIR/dist" || {
-        # Fallback for older compose versions
-        cid=$(docker compose -f "$DASH_DIR/docker-compose.yml" ps -q dashboard_v2)
-        if [[ -n "$cid" ]]; then
-          docker cp "$cid:/app/dist" "$DASH_DIR/dist"
-        fi
-      }
-    fi
+    echo "Copying dashboard_v2 dist folder from container to host..."
+    docker cp "$cid:/app/dist" "$DASH_DIR/dist" || {
+      echo "Failed to copy dist folder from dashboard_v2 container." >&2
+      exit 1
+    }
   else
     echo "No docker-compose.yml in /opt/blobe-vm/dashboard_v2; skipping dashboard_v2 deployment"
   fi
