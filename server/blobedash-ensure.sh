@@ -68,24 +68,29 @@ fi
 # so the original dashboard can display diagnostics.
 if [[ -d "/opt/blobe-vm/dashboard_v2" ]]; then
   DASH_DIR="/opt/blobe-vm/dashboard_v2"
-  LAST_ERR="$DASH_DIR/last_error.txt"
-  # remove previous error file unless we will append
-  rm -f "$LAST_ERR" 2>/dev/null || true
-  if [[ -f "$DASH_DIR/package.json" ]]; then
-    echo "Ensuring dashboard_v2 is built (dir: $DASH_DIR)"
-    # Try to run npm ci then fall back to npm install; capture stderr
-    # Use npm install fallback because `npm ci` requires a package-lock.json.
-    (cd "$DASH_DIR" && npm ci --no-audit --no-fund) 2>"$LAST_ERR" || \
-      (cd "$DASH_DIR" && npm install --no-audit --no-fund) 2>>"$LAST_ERR" || true
-    if (cd "$DASH_DIR" && npm run build --if-present) 2>>"$LAST_ERR"; then
-      echo "dashboard_v2 build succeeded"
-      rm -f "$LAST_ERR" 2>/dev/null || true
-    else
-      echo "dashboard_v2 build failed — see $LAST_ERR for details"
-      chown ${SUDO_USER:-root}:${SUDO_USER:-root} "$LAST_ERR" 2>/dev/null || true
-    fi
+  if [[ -f "$DASH_DIR/docker-compose.yml" ]]; then
+    echo "Starting dashboard_v2 using Docker Compose (dir: $DASH_DIR)"
+    (cd "$DASH_DIR" && docker compose up -d --build) || {
+      echo "dashboard_v2 Docker Compose failed" >&2
+      exit 1
+    }
   else
-    echo "No package.json in /opt/blobe-vm/dashboard_v2; skipping build"
+    LAST_ERR="$DASH_DIR/last_error.txt"
+    rm -f "$LAST_ERR" 2>/dev/null || true
+    if [[ -f "$DASH_DIR/package.json" ]]; then
+      echo "Ensuring dashboard_v2 is built (dir: $DASH_DIR)"
+      (cd "$DASH_DIR" && npm ci --no-audit --no-fund) 2>"$LAST_ERR" || \
+        (cd "$DASH_DIR" && npm install --no-audit --no-fund) 2>>"$LAST_ERR" || true
+      if (cd "$DASH_DIR" && npm run build --if-present) 2>>"$LAST_ERR"; then
+        echo "dashboard_v2 build succeeded"
+        rm -f "$LAST_ERR" 2>/dev/null || true
+      else
+        echo "dashboard_v2 build failed — see $LAST_ERR for details"
+        chown ${SUDO_USER:-root}:${SUDO_USER:-root} "$LAST_ERR" 2>/dev/null || true
+      fi
+    else
+      echo "No package.json in /opt/blobe-vm/dashboard_v2; skipping build"
+    fi
   fi
 fi
 
