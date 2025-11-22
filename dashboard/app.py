@@ -1363,6 +1363,29 @@ def api_upload_vm_favicon(name):
         return 'Dashboard v2 not built', 404
 
 
+    # Serve dashboard v2 production assets requested from absolute `/assets/*` paths
+    @app.route('/assets/<path:path>')
+    def serve_dashboard_v2_root_assets(path):
+        base = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', 'dashboard_v2'))
+        assets_dir = os.path.join(base, 'dist', 'assets')
+        cand = os.path.join(assets_dir, path)
+        if os.path.isfile(cand):
+            return send_from_directory(assets_dir, path)
+        # not found here - 404 and let other handlers handle it if needed
+        return 'Not found', 404
+
+
+    # Also handle requests that include the Dashboard prefix explicitly
+    @app.route('/Dashboard/assets/<path:path>')
+    def serve_dashboard_v2_prefixed_assets(path):
+        base = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', 'dashboard_v2'))
+        assets_dir = os.path.join(base, 'dist', 'assets')
+        cand = os.path.join(assets_dir, path)
+        if os.path.isfile(cand):
+            return send_from_directory(assets_dir, path)
+        return 'Not found', 404
+
+
 @app.post('/dashboard/api/set-vm-title/<name>')
 @auth_required
 def api_set_vm_title(name):
