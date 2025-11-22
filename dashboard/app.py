@@ -24,7 +24,10 @@ TEMPLATE = r"""
 </head><body>
 <h1 id="dash-title">{{ title }}</h1>
 <div id=errbox style="display:none;background:#7f1d1d;color:#fff;padding:.5rem .75rem;border-radius:4px;margin:.5rem 0"></div>
-<div id=v2status style="margin:.5rem 0;padding:.5rem;border:1px dashed #233;background:#071229;border-radius:6px;color:#cfe8ff">New dashboard: <span id="v2state">Checking…</span></div>
+<div id=v2status style="margin:.5rem 0;padding:.5rem;border:1px dashed #233;background:#071229;border-radius:6px;color:#cfe8ff">
+New dashboard: <span id="v2state">Checking…</span>
+{% if dashboard_v2_url %}<br><a href="{{ dashboard_v2_url }}" target="_blank" style="color:#4fd1c5;font-weight:bold">Open Dashboard V2</a>{% endif %}
+</div>
 <form method=post action="/dashboard/api/create" onsubmit="return createVM(event)">
 <input name=name placeholder="name" required pattern="[a-zA-Z0-9-]+" />
 <button type=submit>Create</button>
@@ -1741,6 +1744,7 @@ def _disable_single_port(dash_port: int | None):
         'python:3.11-slim',
             'bash', '-c', 'pip install --no-cache-dir flask && python /app/app.py')
 
+
 @app.get('/dashboard')
 @auth_required
 def root():
@@ -1752,7 +1756,30 @@ def root():
     else:
         fav = cfg.get('favicon','')
     title = cfg.get('title', 'BlobeVM Dashboard')
-    return render_template_string(TEMPLATE, title=title, favicon_url=fav)
+
+    # Detect dashboard_v2 container and port
+    import socket
+    dashboard_v2_url = None
+    try:
+        r = subprocess.run([
+            'docker', 'ps', '-q', '-f', 'name=^dashboard_v2$'
+        ], capture_output=True, text=True)
+        cid = r.stdout.strip()
+        if cid:
+            r2 = subprocess.run([
+                'docker', 'port', cid, '3000/tcp'
+            ], capture_output=True, text=True)
+            if r2.returncode == 0 and r2.stdout:
+                for line in r2.stdout.strip().splitlines():
+                    if ':' in line:
+                        host, port = line.rsplit(':', 1)
+                        ip = socket.gethostbyname(socket.gethostname())
+                        dashboard_v2_url = f'http://{ip}:{port}/Dashboard'
+                        break
+    except Exception:
+        dashboard_v2_url = None
+
+    return render_template_string(TEMPLATE, title=title, favicon_url=fav, dashboard_v2_url=dashboard_v2_url)
 
 @app.get('/dashboard/api/list')
 @auth_required

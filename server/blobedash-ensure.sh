@@ -63,54 +63,59 @@ if [[ ! -f "$APP_PATH" ]]; then
   fi
 fi
 
-# If dashboard_v2 sources exist under /opt/blobe-vm, attempt to build them so
-# the v2 UI is available at /Dashboard. Capture stderr to last_error.txt
-# so the original dashboard can display diagnostics.
+# If dashboard_v2 sources exist under /opt/blobe-vm, deploy as a standalone container like a VM
 if [[ -d "/opt/blobe-vm/dashboard_v2" ]]; then
   DASH_DIR="/opt/blobe-vm/dashboard_v2"
-  if [[ -f "$DASH_DIR/docker-compose.yml" ]]; then
-    echo "Starting dashboard_v2 using Docker Compose (dir: $DASH_DIR)"
-    (cd "$DASH_DIR" && docker compose up -d --build) || {
-      echo "dashboard_v2 Docker Compose failed" >&2
-      exit 1
-    }
-    # Wait for dashboard_v2 container to be running (robust check)
-    echo "Waiting for dashboard_v2 container to be running..."
-    for i in {1..15}; do
-      cid=$(docker compose -f "$DASH_DIR/docker-compose.yml" ps -q dashboard_v2)
-      if [[ -n "$cid" ]]; then
-        is_running=$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null)
-        if [[ "$is_running" == "true" ]]; then
-          echo "dashboard_v2 container is running (ID: $cid). Proceeding to copy dist folder."
-          break
-        fi
-      fi
-      echo "dashboard_v2 not running yet, retry $i/15..."
-      sleep 2
-      if [[ $i -eq 15 ]]; then
-        echo "dashboard_v2 container did not start in time." >&2
-        exit 1
-      fi
-    done
-    # Remove existing dist directory to avoid dist/dist nesting
-    echo "Removing any existing $DASH_DIR/dist..."
-    rm -rf "$DASH_DIR/dist"
-    mkdir -p "$DASH_DIR/dist"
-    # Copy contents of /app/dist (not the folder itself) from container to host
-    echo "Copying dashboard_v2 dist contents from container to host..."
-    if docker cp "$cid:/app/dist/." "$DASH_DIR/dist"; then
-      echo "Successfully copied dist contents from container."
-    else
-      echo "Failed to copy dist contents from dashboard_v2 container." >&2
+  DASHBOARD_V2_NAME="dashboard_v2"
+  DASHBOARD_V2_PORT=${DASHBOARD_V2_PORT:-3000}
+  # Find a free port if needed
+  if port_in_use "$DASHBOARD_V2_PORT"; then
+    new_port=$(find_free_port "$DIRECT_PORT_START" 1000 || true)
+    if [[ -z "$new_port" ]]; then
+      echo "Unable to find a free port for dashboard_v2" >&2
       exit 1
     fi
-    echo "Listing contents of $DASH_DIR/dist after copy:"
-    ls -l "$DASH_DIR/dist"
-    echo "Listing contents of dist subfolders (if any):"
-    find "$DASH_DIR/dist" -type f
-  else
-    echo "No docker-compose.yml in /opt/blobe-vm/dashboard_v2; skipping dashboard_v2 deployment"
+    DASHBOARD_V2_PORT="$new_port"
   fi
+  # Remove any existing container
+  if docker ps -a --format '{{.Names}}' | grep -qx "$DASHBOARD_V2_NAME"; then
+    docker rm -f "$DASHBOARD_V2_NAME" >/dev/null 2>&1 || true
+  fi
+  # Build the dashboard_v2 image
+  echo "Building dashboard_v2 image..."
+  (cd "$DASH_DIR" && docker build -t dashboard_v2:latest .) || {
+    echo "dashboard_v2 Docker build failed" >&2
+    exit 1
+  }
+  # Run the dashboard_v2 container
+  echo "Running dashboard_v2 container on port $DASHBOARD_V2_PORT..."
+  docker run -d --name "$DASHBOARD_V2_NAME" --restart unless-stopped \
+    -p "${DASHBOARD_V2_PORT}:3000" \
+    -v "$STATE_DIR:/opt/blobe-vm" \
+    -e NODE_ENV=production \
+    dashboard_v2:latest \
+    >/dev/null
+  # Wait for the container to be running
+  echo "Waiting for dashboard_v2 container to be running..."
+  for i in {1..15}; do
+    cid=$(docker ps -q -f name="^${DASHBOARD_V2_NAME}$")
+    if [[ -n "$cid" ]]; then
+      is_running=$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null)
+      if [[ "$is_running" == "true" ]]; then
+        echo "dashboard_v2 container is running (ID: $cid)."
+        break
+      fi
+    fi
+    echo "dashboard_v2 not running yet, retry $i/15..."
+    sleep 2
+    if [[ $i -eq 15 ]]; then
+      echo "dashboard_v2 container did not start in time." >&2
+      exit 1
+    fi
+  done
+  echo "Dashboard V2: http://$(hostname -I | awk '{print $1}'):${DASHBOARD_V2_PORT}/Dashboard"
+else
+  echo "No dashboard_v2 sources found at /opt/blobe-vm/dashboard_v2; skipping dashboard_v2 deployment"
 fi
 
 # Determine or assign port
