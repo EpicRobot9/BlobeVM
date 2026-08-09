@@ -116,6 +116,8 @@ function Get-EpicVMTemplateGuestSanitizer {
         $raw=[Text.Encoding]::UTF8.GetBytes([string]$BootstrapPassword)
         try { $sealed=[Security.Cryptography.ProtectedData]::Protect($raw,$null,[Security.Cryptography.DataProtectionScope]::LocalMachine) }
         finally { [Array]::Clear($raw,0,$raw.Length) }
+        $bootstrapParent=Split-Path -Parent $BootstrapPath
+        if(-not (Test-Path -LiteralPath $bootstrapParent)){New-Item -ItemType Directory -Path $bootstrapParent -Force | Out-Null}
         [IO.File]::WriteAllBytes($BootstrapPath,$sealed)
         $acl=Get-Acl -LiteralPath $BootstrapPath
         $acl.SetAccessRuleProtection($true,$false)

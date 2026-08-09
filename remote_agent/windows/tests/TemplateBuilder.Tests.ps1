@@ -25,4 +25,9 @@ Describe 'EpicVM template builder' {
         $text | Should -Match 'machine-dpapi-encrypted-system-admin'
         $text | Should -Match 'immutable=\$true'
     }
+
+    It 'creates the protected bootstrap parent on the isolated guest copy' {
+        (Get-EpicVMTemplateGuestSanitizer).ToString() | Should -Match 'bootstrapParent'
+        (Get-EpicVMTemplateGuestSanitizer).ToString() | Should -Match 'New-Item -ItemType Directory'
+    }
 }
