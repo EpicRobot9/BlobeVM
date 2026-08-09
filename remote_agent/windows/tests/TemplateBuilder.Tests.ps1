@@ -30,4 +30,14 @@ Describe 'EpicVM template builder' {
         (Get-EpicVMTemplateGuestSanitizer).ToString() | Should -Match 'bootstrapParent'
         (Get-EpicVMTemplateGuestSanitizer).ToString() | Should -Match 'New-Item -ItemType Directory'
     }
+
+    It 'restarts the source immediately after the independent builder copy' {
+        $builder = Get-Content -LiteralPath (Join-Path $windowsRoot 'TemplateBuilder.ps1') -Raw
+        $copyIndex = $builder.IndexOf('Destination $builderDisk')
+        $restartIndex = $builder.IndexOf('Name=$SourceName; ErrorAction=''Stop''', $copyIndex)
+        $switchIndex = $builder.IndexOf("Get-VMSwitch", $copyIndex)
+        $copyIndex | Should -BeGreaterThan -1
+        $restartIndex | Should -BeGreaterThan $copyIndex
+        $restartIndex | Should -BeLessThan $switchIndex
+    }
 }

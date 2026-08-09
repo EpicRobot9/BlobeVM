@@ -178,6 +178,13 @@ function Invoke-EpicVMTemplateBuild {
         Invoke-EpicVMTemplateCommand -Name 'Export-VM' -Parameters @{ Name=$SourceName; Path=$exportRoot; ErrorAction='Stop' } | Out-Null
         $exportedDisk=Get-EpicVMSourceDisk -ExportPath $exportRoot
         Copy-Item -LiteralPath $exportedDisk -Destination $builderDisk -Force -ErrorAction Stop
+        # The independent builder disk now exists.  Bring the source back
+        # immediately; all sanitation and Sysprep work continues on the copy.
+        if($sourceStopped -and $sourceWasRunning){
+            Invoke-EpicVMTemplateCommand -Name 'Start-VM' -Parameters @{ Name=$SourceName; ErrorAction='Stop' } | Out-Null
+            $sourceRestarted=$true
+            $sourceStopped=$false
+        }
         $switch=@(Invoke-EpicVMTemplateCommand -Name 'Get-VMSwitch' -Parameters @{ Name=$PrivateSwitch; ErrorAction='SilentlyContinue' }) | Select-Object -First 1
         if ($null -eq $switch) { Invoke-EpicVMTemplateCommand -Name 'New-VMSwitch' -Parameters @{ Name=$PrivateSwitch; SwitchType='Private'; ErrorAction='Stop' } | Out-Null }
         elseif ([string]$switch.SwitchType -ine 'Private') { throw (New-EpicVMTemplateError -Code 'network_isolation_gate' -Message 'The template switch is not Private.') }
