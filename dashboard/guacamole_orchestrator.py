@@ -425,7 +425,10 @@ COMMIT;
             (stage / "docker-compose.yml").write_text(plan.compose, encoding="utf-8")
             (stage / "initdb.sql").write_text(schema.rstrip() + "\n" + plan.sql_seed, encoding="utf-8")
             (stage / "plan.json").write_text(json.dumps({"owner": "EpicVM", "version": 1, "name": plan.name, "guestIp": plan.guest_ip, "routePrefix": plan.route_prefix}, separators=(",", ":")), encoding="utf-8")
-            os.chmod(stage / "initdb.sql", 0o600)
+            # The PostgreSQL image runs as its own UID and must be able to read
+            # this bind-mounted file.  The containing directory remains 0700,
+            # while the file contains only schema and a salted verifier.
+            os.chmod(stage / "initdb.sql", 0o644)
             os.chmod(stage / "plan.json", 0o600)
             stage.rename(target)
             return target
