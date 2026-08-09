@@ -423,12 +423,24 @@ function New-EpicVMHyperVVM {
     $createdDisk = $false
     try {
         New-Item -ItemType Directory -Path $vmPath -Force -ErrorAction Stop | Out-Null
-        Invoke-EpicVMHyperVCmdlet -Provider $Provider -CommandName 'New-VHD' -Parameters @{
-            Path = $diskPath
-            SizeBytes = [long]$options.diskSizeBytes
-            Dynamic = $true
-            ErrorAction = 'Stop'
-        } | Out-Null
+        $templateDiskPath = [string](Get-EpicVMHyperVValue -Object $Request -Name 'templateDiskPath' -Default '')
+        $templateRequired = [bool](Get-EpicVMHyperVValue -Object $Request -Name 'templateRequired' -Default $false)
+        if ($templateRequired) {
+            if ([string]::IsNullOrWhiteSpace($templateDiskPath) -or -not (Test-Path -LiteralPath $templateDiskPath -PathType Leaf)) {
+                throw (New-EpicVMHyperVError -Code 'InvalidInput' -Message 'The validated template disk is unavailable.')
+            }
+            # Full independent copy.  Differencing disks are intentionally not
+            # used because template identity and recovery depend on isolation.
+            Copy-Item -LiteralPath $templateDiskPath -Destination $diskPath -Force -ErrorAction Stop
+        }
+        else {
+            Invoke-EpicVMHyperVCmdlet -Provider $Provider -CommandName 'New-VHD' -Parameters @{
+                Path = $diskPath
+                SizeBytes = [long]$options.diskSizeBytes
+                Dynamic = $true
+                ErrorAction = 'Stop'
+            } | Out-Null
+        }
         $createdDisk = $true
 
         $newVmParameters = @{

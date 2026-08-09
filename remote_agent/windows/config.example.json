@@ -13,5 +13,8 @@
   "MinCpuCount": 1,
   "MaxCpuCount": 16,
   "MaxDiskSizeBytes": 549755813888,
-  "Generation": 2
+  "Generation": 2,
+  "TemplateManifestPath": "E:\\EpicVM\\templates\\win11-25h2\\manifest.json",
+  "ProvisioningStatePath": "E:\\EpicVM\\provisioning-jobs.json",
+  "GamingVMNames": ["testre"]
 }

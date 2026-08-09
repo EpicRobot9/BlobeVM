@@ -22,6 +22,10 @@ $providerPath = Join-Path $PSScriptRoot 'providers/HyperVProvider.ps1'
 if (Test-Path -LiteralPath $providerPath) {
     . $providerPath
 }
+$provisioningPath = Join-Path $PSScriptRoot 'Provisioning.ps1'
+if (Test-Path -LiteralPath $provisioningPath) {
+    . $provisioningPath
+}
 
 function Get-EpicVMDefaultConfig {
     return [pscustomobject]@{
@@ -41,6 +45,9 @@ function Get-EpicVMDefaultConfig {
         MaxCpuCount = 16
         MaxDiskSizeBytes = 549755813888
         Generation = 2
+        TemplateManifestPath = 'E:\EpicVM\templates\win11-25h2\manifest.json'
+        ProvisioningStatePath = 'E:\EpicVM\provisioning-jobs.json'
+        GamingVMNames = @('testre')
     }
 }
 
@@ -146,7 +153,7 @@ function New-EpicVMAgentState {
         [Parameter(Mandatory)] [string] $Token,
         [Parameter(Mandatory)] [object] $Provider
     )
-    return [pscustomobject]@{
+    $agentState = [pscustomobject]@{
         Config = $Config
         Token = $Token
         Provider = $Provider
@@ -154,6 +161,10 @@ function New-EpicVMAgentState {
         SyncRoot = [object]::new()
         CompletedOperations = @{}
     }
+    if (Get-Command -Name New-EpicVMProvisioningStore -ErrorAction SilentlyContinue) {
+        $agentState | Add-Member -MemberType NoteProperty -Name Provisioning -Value (New-EpicVMProvisioningStore -Config $Config)
+    }
+    return $agentState
 }
 
 function New-EpicVMApiError {
@@ -267,6 +278,33 @@ function Invoke-EpicVMApiRequest {
             $vms = @(& $State.Provider.GetVMs)
             return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok = $true; vms = $vms })
         }
+        if ($null -ne $State.Provisioning -and $Method -eq 'POST' -and $normalizedPath -eq '/v1/provisioning-jobs') {
+            $request = Get-EpicVMRequestBody -Body $Body
+            $job = New-EpicVMProvisioningJob -State $State -Request $request
+            try { $claim = Start-EpicVMProvisioningJob -State $State -Job $job }
+            catch { return ConvertTo-EpicVMJsonResponse -StatusCode 422 -Body ([ordered]@{ ok=$false; job=(ConvertTo-EpicVMRedactedJob -Job $job) }) }
+            return ConvertTo-EpicVMJsonResponse -StatusCode 202 -Body ([ordered]@{ ok=$true; job=(ConvertTo-EpicVMRedactedJob -Job $job); claimToken=$claim })
+        }
+        if ($null -ne $State.Provisioning -and $segments.Count -ge 3 -and $segments[0] -eq 'v1' -and $segments[1] -eq 'provisioning-jobs') {
+            $job = $State.Provisioning.Jobs[$segments[2]]
+            if ($null -eq $job) { return ConvertTo-EpicVMJsonResponse -StatusCode 404 -Body (New-EpicVMApiError -Code 'not_found' -Message 'The provisioning job was not found.') }
+            if ($Method -eq 'GET') { return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok=$true; job=(ConvertTo-EpicVMRedactedJob -Job $job) }) }
+            if ($Method -eq 'POST' -and $segments.Count -eq 4 -and $segments[3] -eq 'claim') {
+                try { Invoke-EpicVMProvisioningClaim -State $State -Job $job -Request (Get-EpicVMRequestBody -Body $Body) }
+                catch { $job.state='failed'; $job.errorCode='claim_failed'; $job.errorMessage='Guest claim could not be completed.'; Save-EpicVMProvisioningStore -Store $State.Provisioning; return ConvertTo-EpicVMJsonResponse -StatusCode 422 -Body ([ordered]@{ ok=$false; job=(ConvertTo-EpicVMRedactedJob -Job $job) }) }
+                return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok=$true; job=(ConvertTo-EpicVMRedactedJob -Job $job) })
+            }
+        }
+        if ($null -ne $State.Provisioning -and $Method -eq 'POST' -and $normalizedPath -eq '/v1/deprovisioning-jobs') {
+            try { $job=New-EpicVMDeprovisioningJob -State $State -Request (Get-EpicVMRequestBody -Body $Body) }
+            catch { return ConvertTo-EpicVMJsonResponse -StatusCode 422 -Body (New-EpicVMApiError -Code 'teardown_rejected' -Message 'The exact managed VM name and confirmation are required.') }
+            return ConvertTo-EpicVMJsonResponse -StatusCode 202 -Body ([ordered]@{ ok=$true; job=(ConvertTo-EpicVMRedactedJob -Job $job) })
+        }
+        if ($null -ne $State.Provisioning -and $segments.Count -eq 3 -and $segments[0] -eq 'v1' -and $segments[1] -eq 'deprovisioning-jobs' -and $Method -eq 'GET') {
+            $job=$State.Provisioning.Deprovisioning[$segments[2]]
+            if ($null -eq $job) { return ConvertTo-EpicVMJsonResponse -StatusCode 404 -Body (New-EpicVMApiError -Code 'not_found' -Message 'The deprovisioning job was not found.') }
+            return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok=$true; job=(ConvertTo-EpicVMRedactedJob -Job $job) })
+        }
         if ($Method -eq 'POST' -and $segments.Count -eq 2 -and $segments[0] -eq 'v1' -and $segments[1] -eq 'vms') {
             $request = Get-EpicVMRequestBody -Body $Body
             $name = [string](Get-EpicVMProperty -Object $request -Name 'name' -Default (Get-EpicVMProperty -Object $request -Name 'Name' -Default ''))
@@ -323,6 +361,7 @@ function Test-EpicVMMutationRequest {
         [Parameter(Mandatory)] [string] $Path
     )
     if ($Method -eq 'DELETE' -and $Path -match '^/v1/vms/[^/]+$') { return $true }
+    if ($Method -eq 'POST' -and ($Path -eq '/v1/provisioning-jobs' -or $Path -eq '/v1/deprovisioning-jobs' -or $Path -match '^/v1/(provisioning|deprovisioning)-jobs/[^/]+/claim$')) { return $true }
     if ($Method -eq 'POST' -and ($Path -eq '/v1/vms' -or $Path -match '^/v1/vms/[^/]+/(start|stop|restart)$' -or $Path -match '^/v1/vms/[^/]+/actions/(start|stop|restart|delete)$')) { return $true }
     return $false
 }

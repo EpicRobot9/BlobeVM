@@ -166,6 +166,38 @@ class RemoteAgentClient:
         )
         return self._result(result)
 
+    def provision(self, name: str, profile: str = "standard", *, idempotency_key: str | None = None) -> dict[str, Any]:
+        """Create a validated full-copy VM provisioning job."""
+        result = self._request(
+            "POST", "/v1/provisioning-jobs", {"name": str(name), "profile": str(profile)},
+            idempotency_key=idempotency_key or uuid.uuid4().hex, timeout=self.operation_timeout,
+        )
+        return result if isinstance(result, dict) else {"ok": True, "job": result}
+
+    def provisioning_status(self, job_id: str) -> dict[str, Any]:
+        safe_id = quote(str(job_id), safe="")
+        result = self._request("GET", f"/v1/provisioning-jobs/{safe_id}")
+        return result if isinstance(result, dict) else {"job": result}
+
+    def claim(self, job_id: str, username: str, password: str, claim_token: str) -> dict[str, Any]:
+        """Forward a one-time claim without persisting or logging credentials."""
+        safe_id = quote(str(job_id), safe="")
+        payload = {"username": str(username), "password": str(password), "claimToken": str(claim_token)}
+        result = self._request("POST", f"/v1/provisioning-jobs/{safe_id}/claim", payload, timeout=self.operation_timeout)
+        return result if isinstance(result, dict) else {"ok": True, "job": result}
+
+    def deprovision(self, name: str, *, confirm_name: str, idempotency_key: str | None = None) -> dict[str, Any]:
+        result = self._request(
+            "POST", "/v1/deprovisioning-jobs", {"name": str(name), "confirmName": str(confirm_name)},
+            idempotency_key=idempotency_key or uuid.uuid4().hex, timeout=self.operation_timeout,
+        )
+        return result if isinstance(result, dict) else {"ok": True, "job": result}
+
+    def deprovisioning_status(self, job_id: str) -> dict[str, Any]:
+        safe_id = quote(str(job_id), safe="")
+        result = self._request("GET", f"/v1/deprovisioning-jobs/{safe_id}")
+        return result if isinstance(result, dict) else {"job": result}
+
     def lifecycle(self, action: str, name: str, *, idempotency_key: str | None = None, **options: Any) -> RemoteOperationResult:
         action = str(action).lower()
         safe_name = quote(str(name), safe="")
@@ -218,6 +250,21 @@ class RemoteAgentHost:
     @property
     def id(self) -> str:
         return self.host_id
+
+    def provision(self, name: str, profile: str = "standard", *, idempotency_key: str | None = None) -> dict[str, Any]:
+        return self.client.provision(name, profile, idempotency_key=idempotency_key)
+
+    def provisioning_status(self, job_id: str) -> dict[str, Any]:
+        return self.client.provisioning_status(job_id)
+
+    def claim(self, job_id: str, username: str, password: str, claim_token: str) -> dict[str, Any]:
+        return self.client.claim(job_id, username, password, claim_token)
+
+    def deprovision(self, name: str, *, confirm_name: str, idempotency_key: str | None = None) -> dict[str, Any]:
+        return self.client.deprovision(name, confirm_name=confirm_name, idempotency_key=idempotency_key)
+
+    def deprovisioning_status(self, job_id: str) -> dict[str, Any]:
+        return self.client.deprovisioning_status(job_id)
 
     @property
     def online(self) -> bool:

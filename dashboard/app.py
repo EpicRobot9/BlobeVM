@@ -3356,6 +3356,115 @@ def api_create():
         return jsonify({'ok': False, 'error': f'Error creating VM: {e}'}), 500
     return jsonify({'ok': True, 'host_id': getattr(host, 'host_id', 'local'), 'placement': getattr(host, 'kind', 'local')})
 
+
+@app.post('/dashboard/api/provisioning-jobs')
+@auth_required
+def api_provisioning_job_create():
+    payload = request.get_json(silent=True) if request.is_json else request.form.to_dict(flat=True)
+    payload = payload if isinstance(payload, dict) else {}
+    host_id = str(payload.get('host_id') or payload.get('host') or '').strip()
+    name = str(payload.get('name') or '').strip()
+    profile = str(payload.get('profile') or 'standard').strip().lower()
+    if not host_id or not name or profile not in {'standard', 'gaming'}:
+        return jsonify({'ok': False, 'error': 'host_id, name, and a valid profile are required'}), 400
+    try:
+        host = _vm_host(host_id)
+        if getattr(host, 'kind', 'local') != 'remote' or not hasattr(host, 'provision'):
+            return jsonify({'ok': False, 'error': 'Provisioning is available only on an enrolled Windows host'}), 409
+        result = host.provision(name, profile, idempotency_key=request.headers.get('Idempotency-Key'))
+        response = jsonify({'ok': True, 'host_id': host_id, **result})
+        response.headers['Cache-Control'] = 'no-store'
+        return response, 202
+    except VmHostUnavailable as exc:
+        return _vm_host_error_response(exc)
+    except Exception:
+        return jsonify({'ok': False, 'error': 'Unable to start the provisioning job'}), 502
+
+
+@app.get('/dashboard/api/provisioning-jobs/<job_id>')
+@auth_required
+def api_provisioning_job_status(job_id):
+    host_id = str(request.args.get('host_id') or '').strip()
+    if not host_id:
+        return jsonify({'ok': False, 'error': 'host_id is required'}), 400
+    try:
+        host = _vm_host(host_id)
+        if not hasattr(host, 'provisioning_status'):
+            return jsonify({'ok': False, 'error': 'Provisioning is unavailable on this host'}), 409
+        return jsonify({'ok': True, 'host_id': host_id, **host.provisioning_status(job_id)})
+    except VmHostUnavailable as exc:
+        return _vm_host_error_response(exc)
+    except Exception:
+        return jsonify({'ok': False, 'error': 'Unable to read the provisioning job'}), 502
+
+
+@app.post('/dashboard/api/provisioning-jobs/<job_id>/claim')
+@auth_required
+def api_provisioning_job_claim(job_id):
+    if not _request_is_https():
+        return jsonify({'ok': False, 'error': 'Guest claims require HTTPS'}), 426
+    payload = request.get_json(silent=True) if request.is_json else request.form.to_dict(flat=True)
+    payload = payload if isinstance(payload, dict) else {}
+    host_id = str(payload.get('host_id') or '').strip()
+    username = str(payload.get('username') or '')
+    password = str(payload.get('password') or '')
+    claim_token = str(payload.get('claimToken') or payload.get('claim_token') or '')
+    if not host_id or not username or not password or not claim_token:
+        return jsonify({'ok': False, 'error': 'host_id and claim fields are required'}), 400
+    try:
+        host = _vm_host(host_id)
+        if not hasattr(host, 'claim'):
+            return jsonify({'ok': False, 'error': 'Guest claiming is unavailable on this host'}), 409
+        result = host.claim(job_id, username, password, claim_token)
+        response = jsonify({'ok': True, 'host_id': host_id, **result})
+        response.headers['Cache-Control'] = 'no-store'
+        response.headers['Pragma'] = 'no-cache'
+        return response
+    except VmHostUnavailable as exc:
+        return _vm_host_error_response(exc)
+    except Exception:
+        # Never reflect exception text from a credential-bearing request.
+        return jsonify({'ok': False, 'error': 'Unable to complete the one-time guest claim'}), 502
+
+
+@app.post('/dashboard/api/deprovisioning-jobs')
+@auth_required
+def api_deprovisioning_job_create():
+    payload = request.get_json(silent=True) if request.is_json else request.form.to_dict(flat=True)
+    payload = payload if isinstance(payload, dict) else {}
+    host_id = str(payload.get('host_id') or payload.get('host') or '').strip()
+    name = str(payload.get('name') or '').strip()
+    confirm_name = str(payload.get('confirmName') or payload.get('confirm_name') or '')
+    if not host_id or not name or confirm_name != name:
+        return jsonify({'ok': False, 'error': 'Exact VM name confirmation is required'}), 400
+    try:
+        host = _vm_host(host_id)
+        if not hasattr(host, 'deprovision'):
+            return jsonify({'ok': False, 'error': 'Teardown is unavailable on this host'}), 409
+        result = host.deprovision(name, confirm_name=confirm_name, idempotency_key=request.headers.get('Idempotency-Key'))
+        return jsonify({'ok': True, 'host_id': host_id, **result}), 202
+    except VmHostUnavailable as exc:
+        return _vm_host_error_response(exc)
+    except Exception:
+        return jsonify({'ok': False, 'error': 'Unable to start the teardown job'}), 502
+
+
+@app.get('/dashboard/api/deprovisioning-jobs/<job_id>')
+@auth_required
+def api_deprovisioning_job_status(job_id):
+    host_id = str(request.args.get('host_id') or '').strip()
+    if not host_id:
+        return jsonify({'ok': False, 'error': 'host_id is required'}), 400
+    try:
+        host = _vm_host(host_id)
+        if not hasattr(host, 'deprovisioning_status'):
+            return jsonify({'ok': False, 'error': 'Teardown is unavailable on this host'}), 409
+        return jsonify({'ok': True, 'host_id': host_id, **host.deprovisioning_status(job_id)})
+    except VmHostUnavailable as exc:
+        return _vm_host_error_response(exc)
+    except Exception:
+        return jsonify({'ok': False, 'error': 'Unable to read the teardown job'}), 502
+
 @app.post('/dashboard/api/start/<name>')
 @auth_required
 def api_start(name):
