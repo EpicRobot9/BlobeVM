@@ -126,6 +126,13 @@ Describe 'EpicVM agent binding defaults' {
         $setup | Should -Match 'install.ps1'
     }
 
+    It 'keeps the PowerShell agent behind the NSSM service wrapper' {
+        $install = Get-Content -LiteralPath (Join-Path $windowsRoot 'install.ps1') -Raw
+        $install | Should -Match 'nssm\.exe'
+        $install | Should -Match 'AppParameters'
+        $install | Should -Not -Match 'New-Service'
+    }
+
     It 'ships a downloader that invokes guided setup' {
         $downloadPath = Join-Path $windowsRoot 'download-setup.ps1'
         Test-Path -LiteralPath $downloadPath | Should -BeTrue

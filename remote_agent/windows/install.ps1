@@ -114,15 +114,26 @@ Set-Acl -LiteralPath $tokenPath -AclObject $acl
 
 $serviceName = 'EpicVMRemoteAgent'
 $pwsh = (Get-Command pwsh -ErrorAction Stop).Source
-$binPath = '"{0}" -NoProfile -ExecutionPolicy Bypass -File "{1}" -ConfigPath "{2}"' -f $pwsh, $agentPath, $configPath
+$nssm = Join-Path $InstallRoot 'nssm.exe'
+if (-not (Test-Path -LiteralPath $nssm -PathType Leaf)) {
+    throw 'The existing EpicVM NSSM service wrapper is required and was not found.'
+}
+$appParameters = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -ConfigPath "{1}"' -f $agentPath, $configPath
 $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 if ($service) {
     if ($service.Status -ne 'Stopped') { Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue }
-    sc.exe config $serviceName binPath= $binPath start= auto | Out-Null
+    # Preserve the existing LocalSystem service identity and restore the NSSM
+    # wrapper if a previous installer accidentally pointed SCM at pwsh.exe.
+    sc.exe config $serviceName binPath= ('"' + $nssm + '"') start= auto | Out-Null
 }
 else {
-    New-Service -Name $serviceName -DisplayName 'EpicVM RemoteVM Agent' -Description 'EpicVM Hyper-V VM lifecycle agent' -BinaryPathName $binPath -StartupType Automatic | Out-Null
+    & $nssm install $serviceName $pwsh $appParameters | Out-Null
+    sc.exe config $serviceName DisplayName= 'EpicVM RemoteVM Agent' start= auto obj= LocalSystem | Out-Null
 }
+& $nssm set $serviceName Application $pwsh | Out-Null
+& $nssm set $serviceName AppParameters $appParameters | Out-Null
+& $nssm set $serviceName AppDirectory $InstallRoot | Out-Null
+& $nssm set $serviceName Start SERVICE_AUTO_START | Out-Null
 
 # Do not expose the API to the public network. Tailscale uses 100.64.0.0/10.
 $ruleName = 'EpicVM RemoteVM Agent (Tailscale)'
