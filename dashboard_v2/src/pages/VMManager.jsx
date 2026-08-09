@@ -7,7 +7,7 @@ import { useToasts } from '../components/ToastProvider'
 import { instanceNamesKey, pollDelayMs } from '../lib/polling'
 import { canCacheVmSettingsResponse, clearRemovedVmState, createLoadInFlightRunner, createLogSelectionTracker } from '../lib/vmManagerRaces'
 import { canUseRemotePlacement, createPlacementPayload, getEligibleRemoteHosts, getPlacementValidationReason, hostOptionLabel, normalizeHostInventory, remotePlacementDisabledReason } from '../lib/hostPlacement'
-import { canClaimProvisioningJob, canOpenInventoryVm, canOpenProvisionedVm, deprovisioningPayload, provisioningClaimPayload, provisioningProgress } from '../lib/provisioningUi'
+import { canClaimProvisioningJob, canOpenInventoryVm, canOpenProvisionedVm, canRetryProvisioningConsole, deprovisioningPayload, provisioningClaimPayload, provisioningConsoleRetryPayload, provisioningProgress } from '../lib/provisioningUi'
 
 function toneFor(status){
   const s = (status || '').toLowerCase()
@@ -477,7 +477,7 @@ export default function VMManager(){
   }
 
   useEffect(()=>{
-    if(!provisioningJob?.id || !provisioningHostId || ['ready','failed'].includes(String(provisioningJob.state || ''))) return undefined
+    if(!provisioningJob?.id || !provisioningHostId || ['ready','failed','console_failed'].includes(String(provisioningJob.state || ''))) return undefined
     let stopped = false
     const tick = async()=>{
       try{ if(!stopped) await refreshProvisioningJob() }catch(err){ if(!stopped) addToast({title:'Provisioning status unavailable', message:String(err), type:'error', timeout:7000}) }
@@ -499,8 +499,29 @@ export default function VMManager(){
       setClaimDraft({ username:'', password:'', confirm:'' })
       setProvisioningJob(body.job || provisioningJob)
       addToast({title:'Guest claimed', message:'Continuing Tailscale, console, and readiness verification.', type:'success', timeout:7000})
-    }catch(err){ addToast({title:'Claim failed', message:String(err), type:'error', timeout:8000}) }
-    finally{ setProvisioningBusy(false) }
+    }catch(err){
+      setProvisioningClaimToken('')
+      await refreshProvisioningJob().catch(()=>null)
+      addToast({title:'Claim failed', message:String(err), type:'error', timeout:8000})
+    }
+    finally{ setClaimDraft({ username:'', password:'', confirm:'' }); setProvisioningBusy(false) }
+  }
+
+  async function retryProvisioningConsole(e){
+    e?.preventDefault?.()
+    if(!provisioningJob || !canRetryProvisioningConsole(provisioningJob)) return
+    if(claimDraft.password !== claimDraft.confirm) { addToast({title:'Retry rejected', message:'Passwords do not match.', type:'error', timeout:6000}); return }
+    setProvisioningBusy(true)
+    try{
+      const res = await apiFetch(`/provisioning-jobs/${encodeURIComponent(provisioningJob.id)}/retry-console`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(provisioningConsoleRetryPayload({hostId:provisioningHostId, username:claimDraft.username, password:claimDraft.password})) })
+      const body = await res.json().catch(()=>({ ok:res.ok }))
+      if(!res.ok || body.ok === false) throw new Error(body.error?.message || body.error || 'Console retry failed')
+      setProvisioningJob(body.job || provisioningJob)
+      addToast({title:'Console ready', message:'The isolated browser console passed its reachability gate.', type:'success', timeout:7000})
+    }catch(err){
+      await refreshProvisioningJob().catch(()=>null)
+      addToast({title:'Console retry failed', message:String(err), type:'error', timeout:8000})
+    }finally{ setClaimDraft({ username:'', password:'', confirm:'' }); setProvisioningBusy(false) }
   }
 
   async function startTeardown(name, hostId){
@@ -828,7 +849,7 @@ export default function VMManager(){
                 <span>Provisioning profile</span>
                 <select value={provisioningProfile} onChange={e=>setProvisioningProfile(e.target.value)} disabled={createBusy}>
                   <option value="standard">Standard · 4 vCPU · 8 GB · 96 GB</option>
-                  <option value="gaming">Gaming · 6 vCPU · 12 GB · 128 GB · GPU-P 50%</option>
+                  <option value="gaming" disabled>Gaming · disabled until GPU-P pilot</option>
                 </select>
               </label>
             ) : null}
@@ -857,8 +878,19 @@ export default function VMManager(){
                   <Button type="submit" disabled={provisioningBusy}>{provisioningBusy ? 'Claiming…' : 'Claim guest securely'}</Button>
                 </form>
               ) : null}
+              {canRetryProvisioningConsole(provisioningJob) ? (
+                <form onSubmit={retryProvisioningConsole} style={{display:'grid',gap:8,marginTop:12}}>
+                  <strong>Retry retained console</strong>
+                  <span style={{color:'var(--muted)',fontSize:13}}>The VM was retained. Re-enter its credentials to rebuild only the stopped console bundle.</span>
+                  <input value={claimDraft.username} onChange={e=>setClaimDraft(s=>({...s,username:e.target.value}))} placeholder="Guest administrator" autoComplete="username" required />
+                  <input value={claimDraft.password} onChange={e=>setClaimDraft(s=>({...s,password:e.target.value}))} placeholder="Guest password" type="password" autoComplete="current-password" minLength={12} required />
+                  <input value={claimDraft.confirm} onChange={e=>setClaimDraft(s=>({...s,confirm:e.target.value}))} placeholder="Repeat password" type="password" autoComplete="current-password" minLength={12} required />
+                  <Button type="submit" disabled={provisioningBusy}>{provisioningBusy ? 'Retrying…' : 'Retry console securely'}</Button>
+                </form>
+              ) : null}
               {canOpenProvisionedVm(provisioningJob) ? <div style={{color:'#86efac',marginTop:10}}>Ready. The VM will appear in the fleet after the next refresh.</div> : null}
-              {provisioningJob.state === 'failed' ? <div role="alert" style={{color:'#fca5a5',marginTop:10}}>Provisioning stopped safely. No console route was exposed.</div> : null}
+              {provisioningJob.state === 'failed' ? <div role="alert" style={{color:'#fca5a5',marginTop:10}}>Guest setup stopped safely. The VM was retained for diagnosis.</div> : null}
+              {provisioningJob.state === 'console_failed' ? <div role="alert" style={{color:'#fca5a5',marginTop:10}}>Console setup stopped safely. Its route is down and diagnostic data was retained.</div> : null}
             </div>
           ) : null}
         </form>

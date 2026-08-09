@@ -268,6 +268,7 @@ class ConfiguredVmHostRegistry(VmHostRegistry):
                 "restart": True,
                 "delete": True,
                 "console": True,
+                "provisioning": True,
             },
             "resources": {},
             "last_error": "",
@@ -287,7 +288,7 @@ class ConfiguredVmHostRegistry(VmHostRegistry):
                     "provider": getattr(provider, "provider", "unknown"),
                     "transport": "tailscale",
                     "online": False,
-                    "capabilities": {"create_vm": False, "start": False, "stop": False, "restart": False, "delete": False, "console": False},
+                    "capabilities": {"create_vm": False, "start": False, "stop": False, "restart": False, "delete": False, "console": False, "provisioning": False},
                     "resources": {},
                     "last_error": str(exc)[:500],
                 })

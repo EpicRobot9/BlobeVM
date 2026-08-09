@@ -24,6 +24,9 @@ class FakeRemoteHost:
     host_id = "epic-pc"
     host_name = "Epic PC"
 
+    def public_record(self):
+        return {"online": True, "capabilities": {"provisioning": True}}
+
     def provision(self, name, profile, idempotency_key=None):
         return {"job": {"id": "job-1", "name": name, "profile": profile, "state": "awaiting_claim"}, "claimToken": "one-use"}
 
@@ -31,7 +34,13 @@ class FakeRemoteHost:
         return {"job": {"id": job_id, "state": "awaiting_claim"}}
 
     def claim(self, job_id, username, password, claim_token):
-        return {"job": {"id": job_id, "state": "ready"}}
+        return {"job": {"id": job_id, "name": "alpha", "state": "awaiting_console", "tailnetIp": "100.111.82.1"}}
+
+    def console_complete(self, job_id, route_prefix, guest_tcp_verified):
+        return {"job": {"id": job_id, "name": "alpha", "state": "ready", "consoleRoutePrefix": route_prefix}}
+
+    def console_failed(self, job_id, code="console_failed"):
+        return {"job": {"id": job_id, "name": "alpha", "state": "console_failed", "errorCode": code}}
 
     def deprovision(self, name, confirm_name, idempotency_key=None):
         return {"job": {"id": "tear-1", "name": name, "state": "ready"}}
@@ -53,6 +62,21 @@ def attach_host(module):
             return host
 
     module.VM_HOST_REGISTRY = Registry()
+
+    class Console:
+        def build_plan(self, name, guest_ip, username, password):
+            return SimpleNamespace(name=name, route_prefix=f"/vm/{name}/")
+        def stage_plan(self, plan):
+            return None
+        def start_staged(self, name):
+            return {"ok": True, "routePrefix": f"/vm/{name}/", "guestTcpVerified": True}
+        def stop_staged(self, name):
+            return None
+        def quarantine_staged(self, name):
+            return None
+        def teardown(self, **kwargs):
+            return {"ok": True}
+    module._CONSOLE_ORCHESTRATOR = Console()
 
 
 def authenticated_client(module):
@@ -83,6 +107,32 @@ def test_mutating_provisioning_api_requires_session_csrf(monkeypatch, tmp_path):
     assert response.status_code == 202
     assert response.headers["Cache-Control"] == "no-store"
     assert response.get_json()["claimToken"] == "one-use"
+
+
+def test_provisioning_fails_closed_until_host_prerequisites_are_ready(monkeypatch, tmp_path):
+    module = load_app(monkeypatch, tmp_path)
+
+    class NotReadyHost(FakeRemoteHost):
+        def public_record(self):
+            return {"online": True, "capabilities": {"provisioning": False}}
+
+    class Registry:
+        def refresh(self):
+            return None
+
+        def get(self, host_id="local"):
+            return NotReadyHost()
+
+    module.VM_HOST_REGISTRY = Registry()
+    client = authenticated_client(module)
+    csrf = client.get("/dashboard/api/auth/csrf").get_json()["csrfToken"]
+    response = client.post(
+        "/dashboard/api/provisioning-jobs",
+        json={"host_id": "epic-pc", "name": "alpha", "profile": "standard"},
+        headers={"Origin": "http://localhost", "X-CSRF-Token": csrf},
+    )
+    assert response.status_code == 409
+    assert response.get_json()["code"] == "provisioning_unavailable"
 
 
 def test_claim_is_https_only_and_never_reflects_password(monkeypatch, tmp_path):
@@ -132,3 +182,24 @@ def test_remote_409_is_preserved(monkeypatch, tmp_path):
         headers={"Origin": "http://localhost", "X-CSRF-Token": csrf},
     )
     assert response.status_code == 409
+
+
+def test_console_retry_requires_failed_state_and_reentered_credentials(monkeypatch, tmp_path):
+    module = load_app(monkeypatch, tmp_path)
+    attach_host(module)
+
+    class RetryHost(FakeRemoteHost):
+        def provisioning_status(self, job_id):
+            return {"job": {"id": job_id, "name": "alpha", "state": "console_failed", "tailnetIp": "100.111.82.1"}}
+
+    module.VM_HOST_REGISTRY.get = lambda host_id="local": RetryHost()
+    client = authenticated_client(module)
+    csrf = client.get("/dashboard/api/auth/csrf").get_json()["csrfToken"]
+    response = client.post(
+        "/dashboard/api/provisioning-jobs/job-1/retry-console",
+        json={"host_id": "epic-pc", "username": "operator", "password": "transient-password"},
+        headers={"Origin": "http://localhost", "X-Forwarded-Proto": "https", "X-CSRF-Token": csrf},
+    )
+    assert response.status_code == 200
+    assert response.get_json()["job"]["state"] == "ready"
+    assert "transient-password" not in response.get_data(as_text=True)

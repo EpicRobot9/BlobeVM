@@ -13,9 +13,11 @@ from branding import PRODUCT_NAME, DASHBOARD_TITLE, MANAGER_NAME, AUTH_REALM
 try:
     from .vm_hosts import LocalDockerHost, VmHostRegistry, VmHostUnavailable
     from .remote_hosts import ConfiguredVmHostRegistry, RemoteHostConfigError, redact_host_record, upsert_remote_host_config
+    from .guacamole_orchestrator import GuacamoleOrchestrator, ConsoleOrchestrationError
 except ImportError:
     from vm_hosts import LocalDockerHost, VmHostRegistry, VmHostUnavailable
     from remote_hosts import ConfiguredVmHostRegistry, RemoteHostConfigError, redact_host_record, upsert_remote_host_config
+    from guacamole_orchestrator import GuacamoleOrchestrator, ConsoleOrchestrationError
 try:
     import psutil
 except Exception:
@@ -202,6 +204,20 @@ DOCKER_VOLUME_BIND = f'{HOST_DOCKER_BIN}:{CONTAINER_DOCKER_BIN}:ro'
 LOCAL_VM_HOST = LocalDockerHost(manager=MANAGER)
 VM_HOST_REGISTRY = ConfiguredVmHostRegistry(LOCAL_VM_HOST)
 VM_HOSTS = VM_HOST_REGISTRY
+_CONSOLE_ORCHESTRATOR = None
+
+def _console_orchestrator():
+    global _CONSOLE_ORCHESTRATOR
+    if _CONSOLE_ORCHESTRATOR is None:
+        _CONSOLE_ORCHESTRATOR = GuacamoleOrchestrator(
+            root=os.environ.get('EPICVM_CONSOLE_ROOT', '/opt/epicvm/instances'),
+            proxy_network=os.environ.get('EPICVM_TRAEFIK_NETWORK', 'proxy'),
+            public_host=os.environ.get('EPICVM_PUBLIC_HOST', ''),
+            tls_resolver=os.environ.get('EPICVM_TRAEFIK_CERTRESOLVER', ''),
+            auth_middleware=os.environ.get('EPICVM_TRAEFIK_AUTH_MIDDLEWARE', ''),
+            router_priority=os.environ.get('EPICVM_TRAEFIK_ROUTER_PRIORITY', ''),
+        )
+    return _CONSOLE_ORCHESTRATOR
 
 def _vm_host(host_id=None):
     VM_HOST_REGISTRY.refresh()
@@ -3414,6 +3430,11 @@ def api_provisioning_job_create():
             response = jsonify({'ok': False, 'error': 'Provisioning is available only on an enrolled Windows host'})
             response.headers['Cache-Control'] = 'no-store'
             return response, 409
+        host_record = host.public_record() if hasattr(host, 'public_record') else {}
+        if not (host_record.get('online') and (host_record.get('capabilities') or {}).get('provisioning')):
+            response = jsonify({'ok': False, 'error': 'Provisioning prerequisites are not ready on this host', 'code': 'provisioning_unavailable'})
+            response.headers['Cache-Control'] = 'no-store'
+            return response, 409
         result = host.provision(name, profile, idempotency_key=request.headers.get('Idempotency-Key'))
         response = jsonify({'ok': True, 'host_id': host_id, **result})
         response.headers['Cache-Control'] = 'no-store'
@@ -3471,16 +3492,48 @@ def api_provisioning_job_claim(job_id):
             response.headers['Cache-Control'] = 'no-store'
             return response, 409
         result = host.claim(job_id, username, password, claim_token)
+        job = result.get('job') if isinstance(result, dict) else None
+        if not isinstance(job, dict) or job.get('state') != 'awaiting_console':
+            raise ConsoleOrchestrationError('The Windows host did not reach the console gate.', status=422, code='console_gate_missing')
+        guest_ip = str(job.get('tailnetIp') or '')
+        name = str(job.get('name') or '')
+        orchestrator = _console_orchestrator()
+        plan = orchestrator.build_plan(name=name, guest_ip=guest_ip, username=username, password=password)
+        orchestrator.stage_plan(plan)
+        started = orchestrator.start_staged(name)
+        result = host.console_complete(
+            job_id,
+            route_prefix=str(started.get('routePrefix') or plan.route_prefix),
+            guest_tcp_verified=bool(started.get('guestTcpVerified')),
+        )
         response = jsonify({'ok': True, 'host_id': host_id, **result})
         response.headers['Cache-Control'] = 'no-store'
         response.headers['Pragma'] = 'no-cache'
         return response
+    except ConsoleOrchestrationError as exc:
+        try:
+            if 'orchestrator' in locals() and 'name' in locals():
+                orchestrator.stop_staged(name)
+            if 'host' in locals() and hasattr(host, 'console_failed'):
+                host.console_failed(job_id, code=str(getattr(exc, 'code', 'console_failed')))
+        except Exception:
+            pass
+        response = jsonify({'ok': False, 'error': {'code': str(getattr(exc, 'code', 'console_failed')), 'message': str(exc)}})
+        response.headers['Cache-Control'] = 'no-store'
+        return response, int(getattr(exc, 'status', 502) or 502)
     except VmHostUnavailable as exc:
         response, status = _vm_host_error_response(exc)
         response.headers['Cache-Control'] = 'no-store'
         return response, status
     except Exception:
         # Never reflect exception text from a credential-bearing request.
+        try:
+            if 'orchestrator' in locals() and 'name' in locals():
+                orchestrator.stop_staged(name)
+            if 'host' in locals() and hasattr(host, 'console_failed'):
+                host.console_failed(job_id, code='console_failed')
+        except Exception:
+            pass
         response = jsonify({'ok': False, 'error': 'Unable to complete the one-time guest claim'})
         response.headers['Cache-Control'] = 'no-store'
         return response, 502
@@ -3488,6 +3541,65 @@ def api_provisioning_job_claim(job_id):
         # Drop local references after the transport call. The request body is
         # never logged or returned, and the agent owns the one-time verifier.
         username = password = claim_token = ''
+
+
+@app.post('/dashboard/api/provisioning-jobs/<job_id>/retry-console')
+@auth_required
+def api_provisioning_job_retry_console(job_id):
+    if not _request_is_https():
+        response = jsonify({'ok': False, 'error': 'Console retry requires HTTPS'})
+        response.headers['Cache-Control'] = 'no-store'
+        return response, 426
+    payload = request.get_json(silent=True) if request.is_json else request.form.to_dict(flat=True)
+    payload = payload if isinstance(payload, dict) else {}
+    host_id = str(payload.get('host_id') or '').strip()
+    username = str(payload.get('username') or '')
+    password = str(payload.get('password') or '')
+    if not host_id or not username or not password:
+        return jsonify({'ok': False, 'error': 'host_id and console credentials are required'}), 400
+    try:
+        host = _vm_host(host_id)
+        current = host.provisioning_status(job_id)
+        job = current.get('job') if isinstance(current, dict) else None
+        if not isinstance(job, dict) or job.get('state') != 'console_failed':
+            raise ConsoleOrchestrationError('Only a failed console step may be retried.', status=409, code='console_retry_not_allowed')
+        name = str(job.get('name') or '')
+        guest_ip = str(job.get('tailnetIp') or '')
+        orchestrator = _console_orchestrator()
+        orchestrator.quarantine_staged(name)
+        plan = orchestrator.build_plan(name=name, guest_ip=guest_ip, username=username, password=password)
+        orchestrator.stage_plan(plan)
+        started = orchestrator.start_staged(name)
+        result = host.console_complete(job_id, route_prefix=plan.route_prefix, guest_tcp_verified=bool(started.get('guestTcpVerified')))
+        response = jsonify({'ok': True, 'host_id': host_id, **result})
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+    except ConsoleOrchestrationError as exc:
+        try:
+            if 'orchestrator' in locals() and 'name' in locals():
+                orchestrator.stop_staged(name)
+            if 'host' in locals() and hasattr(host, 'console_failed'):
+                host.console_failed(job_id, code=str(getattr(exc, 'code', 'console_failed')))
+        except Exception:
+            pass
+        response = jsonify({'ok': False, 'error': {'code': str(getattr(exc, 'code', 'console_failed')), 'message': str(exc)}})
+        response.headers['Cache-Control'] = 'no-store'
+        return response, int(getattr(exc, 'status', 502) or 502)
+    except VmHostUnavailable as exc:
+        return _vm_host_error_response(exc)
+    except Exception:
+        try:
+            if 'orchestrator' in locals() and 'name' in locals():
+                orchestrator.stop_staged(name)
+            if 'host' in locals() and hasattr(host, 'console_failed'):
+                host.console_failed(job_id, code='console_failed')
+        except Exception:
+            pass
+        response = jsonify({'ok': False, 'error': 'Unable to retry console configuration'})
+        response.headers['Cache-Control'] = 'no-store'
+        return response, 502
+    finally:
+        username = password = ''
 
 
 @app.post('/dashboard/api/deprovisioning-jobs')
@@ -3508,10 +3620,18 @@ def api_deprovisioning_job_create():
             response = jsonify({'ok': False, 'error': 'Teardown is unavailable on this host'})
             response.headers['Cache-Control'] = 'no-store'
             return response, 409
+        # Remove the externally reachable route first. The orchestrator only
+        # accepts exact EpicVM-owned bundle directories and quarantines rather
+        # than deleting their volumes.
+        _console_orchestrator().teardown(name=name, confirm_name=confirm_name)
         result = host.deprovision(name, confirm_name=confirm_name, idempotency_key=request.headers.get('Idempotency-Key'))
         response = jsonify({'ok': True, 'host_id': host_id, **result})
         response.headers['Cache-Control'] = 'no-store'
         return response, 202
+    except ConsoleOrchestrationError as exc:
+        response = jsonify({'ok': False, 'error': {'code': str(getattr(exc, 'code', 'console_teardown_failed')), 'message': str(exc)}})
+        response.headers['Cache-Control'] = 'no-store'
+        return response, int(getattr(exc, 'status', 502) or 502)
     except VmHostUnavailable as exc:
         return _vm_host_error_response(exc)
     except Exception:

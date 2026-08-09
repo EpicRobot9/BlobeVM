@@ -277,6 +277,7 @@ def test_remote_capability_features_make_agent_eligible():
             "ok": True,
             "available": True,
             "features": ["create", "lifecycle", "delete-owned"],
+            "provisioning": True,
         },
     )
 
@@ -289,6 +290,7 @@ def test_remote_capability_features_make_agent_eligible():
         "restart": True,
         "delete": True,
         "console": False,
+        "provisioning": True,
     }
 
 

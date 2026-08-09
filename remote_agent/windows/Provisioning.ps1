@@ -4,7 +4,8 @@
 Set-StrictMode -Version Latest
 $script:EpicVMProvisioningStates = @(
     'queued', 'cloning', 'booting', 'awaiting_claim', 'configuring_guest',
-    'enrolling_tailscale', 'configuring_console', 'verifying', 'ready', 'failed'
+    'enrolling_tailscale', 'awaiting_console', 'console_failed', 'verifying',
+    'ready', 'failed'
 )
 
 function New-EpicVMProvisioningError {
@@ -51,7 +52,8 @@ function ConvertTo-EpicVMRedactedJob {
     foreach ($name in @(
         'id', 'name', 'profile', 'state', 'createdAt', 'updatedAt', 'errorCode',
         'errorMessage', 'templateVersion', 'vmId', 'tailnetIp',
-        'tailnetDeviceId', 'quarantineUntil'
+        'tailnetDeviceId', 'consoleRoutePrefix', 'consoleVerifiedAt',
+        'quarantineUntil'
     )) {
         $value = Get-EpicVMProperty -Object $Job -Name $name -Default $null
         if ($null -ne $value) { $safe[$name] = $value }
@@ -78,6 +80,8 @@ function New-EpicVMProvisioningJobObject {
         vmId = $null
         tailnetIp = $null
         tailnetDeviceId = $null
+        consoleRoutePrefix = $null
+        consoleVerifiedAt = $null
         quarantineUntil = $null
         errorCode = $null
         errorMessage = $null
@@ -92,7 +96,7 @@ function New-EpicVMProvisioningStore {
     param([Parameter(Mandatory)] [object] $Config)
     $path = [string](Get-EpicVMProperty -Object $Config -Name 'ProvisioningStatePath' -Default '')
     if ([string]::IsNullOrWhiteSpace($path)) {
-        $root = [string](Get-EpicVMProperty -Object $Config -Name 'VmRoot' -Default 'C:\ProgramData\EpicVM\vms')
+        $root = [string](Get-EpicVMProperty -Object $Config -Name 'VmRoot' -Default 'E:\EpicVM\vms')
         $path = Join-Path $root '..\provisioning-jobs.json'
     }
     $store = [pscustomobject]@{
@@ -116,7 +120,8 @@ function New-EpicVMProvisioningStore {
                 -State ([string](Get-EpicVMProperty -Object $record -Name 'state' -Default 'failed'))
             foreach ($name in @(
                 'createdAt', 'updatedAt', 'templateVersion', 'vmId', 'tailnetIp',
-                'tailnetDeviceId', 'quarantineUntil', 'errorCode', 'errorMessage',
+                'tailnetDeviceId', 'consoleRoutePrefix', 'consoleVerifiedAt',
+                'quarantineUntil', 'errorCode', 'errorMessage',
                 'claimHash', 'claimExpires', 'claimUsed'
             )) {
                 $job.$name = Get-EpicVMProperty -Object $record -Name $name -Default $job.$name
@@ -209,6 +214,20 @@ function Test-EpicVMTemplateManifest {
     catch { return $false }
 }
 
+function Test-EpicVMProvisioningPrerequisites {
+    param([Parameter(Mandatory)] [object] $Config)
+
+    if (-not (Test-EpicVMTemplateManifest -Config $Config)) { return $false }
+    foreach ($pathField in @('BootstrapCredentialPath', 'TailscaleOAuthSecretPath')) {
+        $path = [string](Get-EpicVMProperty -Object $Config -Name $pathField -Default '')
+        if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
+    }
+    foreach ($valueField in @('BootstrapUser', 'TailscaleOAuthClientId', 'TailscaleTailnet')) {
+        if ([string]::IsNullOrWhiteSpace([string](Get-EpicVMProperty -Object $Config -Name $valueField -Default ''))) { return $false }
+    }
+    return $true
+}
+
 function ConvertTo-EpicVMClaimHash {
     param([Parameter(Mandatory)] [string] $Value)
     $bytes = [Text.Encoding]::UTF8.GetBytes($Value)
@@ -270,7 +289,7 @@ function Invoke-EpicVMProvisioningRecovery {
     param([Parameter(Mandatory)] [object] $State)
     $changed = $false
     foreach ($job in @($State.Provisioning.Jobs.Values)) {
-        if ($job.state -in @('cloning', 'booting', 'configuring_guest', 'enrolling_tailscale', 'configuring_console', 'verifying')) {
+        if ($job.state -in @('cloning', 'booting', 'configuring_guest', 'enrolling_tailscale', 'verifying')) {
             $job.state = 'failed'
             $job.errorCode = 'agent_restarted'
             $job.errorMessage = 'The worker restarted before verification completed.'
@@ -281,7 +300,7 @@ function Invoke-EpicVMProvisioningRecovery {
         if ($job.state -eq 'ready') {
             $verify = Get-EpicVMProperty -Object $State.Provider -Name 'VerifyGuest' -Default $null
             $verified = $false
-            if ($null -ne $verify) { try { $verified = [bool](& $verify $job.name) } catch { $verified = $false } }
+            if ($null -ne $verify) { try { $verified = [bool](& $verify $job.name $job.tailnetIp) } catch { $verified = $false } }
             if (-not $verified) {
                 $job.state = 'failed'
                 $job.errorCode = 'reverification_failed'
@@ -301,6 +320,9 @@ function New-EpicVMProvisioningJob {
     if (-not (Test-EpicVMName $name)) { throw (New-EpicVMProvisioningError -Code 'invalid_name' -Message 'The VM name is invalid.' -Status 400) }
     try { $profile = Get-EpicVMProvisioningProfile -Profile $profileName }
     catch { throw (New-EpicVMProvisioningError -Code 'invalid_profile' -Message 'The VM profile is invalid.' -Status 400) }
+    if ($profile.profile -eq 'gaming' -and -not [bool](Get-EpicVMProperty -Object $State.Config -Name 'EnableGamingProvisioning' -Default $false)) {
+        throw (New-EpicVMProvisioningError -Code 'gaming_not_validated' -Message 'Gaming provisioning remains disabled until a GPU-P pilot passes.' -Status 409)
+    }
 
     $existingJob = @($State.Provisioning.Jobs.Values | Where-Object {
         [string]$_.name -ceq $name -and $_.state -ne 'failed'
@@ -404,29 +426,77 @@ function Invoke-EpicVMProvisioningClaim {
         $tailnet = & $enroll $Job.name $username $password
         $Job.tailnetIp = [string](Get-EpicVMProperty -Object $tailnet -Name 'ip' -Default '')
         $Job.tailnetDeviceId = [string](Get-EpicVMProperty -Object $tailnet -Name 'deviceId' -Default '')
-        $Job.state = 'configuring_console'; $Job.updatedAt = [DateTime]::UtcNow.ToString('o'); Save-EpicVMProvisioningStore -Store $State.Provisioning
-        $console = Get-EpicVMProperty -Object $State.Provider -Name 'ConfigureConsole' -Default $null
-        if ($null -eq $console) { throw (New-EpicVMProvisioningError -Code 'console_unavailable' -Message 'Console configuration is unavailable.' -Status 503) }
-        & $console $Job.name $username $password $Job.tailnetIp $Job.tailnetDeviceId | Out-Null
-        $Job.state = 'verifying'; $Job.updatedAt = [DateTime]::UtcNow.ToString('o'); Save-EpicVMProvisioningStore -Store $State.Provisioning
-        $verify = Get-EpicVMProperty -Object $State.Provider -Name 'VerifyGuest' -Default $null
-        if ($null -eq $verify -or -not [bool](& $verify $Job.name)) { throw (New-EpicVMProvisioningError -Code 'verification_failed' -Message 'Guest verification failed.' -Status 422) }
-        $Job.state = 'ready'; $Job.updatedAt = [DateTime]::UtcNow.ToString('o'); Save-EpicVMProvisioningStore -Store $State.Provisioning
+        if ($Job.tailnetIp -notmatch '^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.\d{1,3}\.\d{1,3}$' -or [string]::IsNullOrWhiteSpace($Job.tailnetDeviceId)) {
+            throw (New-EpicVMProvisioningError -Code 'tailscale_verification_failed' -Message 'Tailscale enrollment did not return a verified device.' -Status 422)
+        }
+        # The Windows trust boundary ends here. The HTTPS dashboard retains the
+        # request credentials only long enough to build the isolated console on
+        # kvm2, then calls console-complete without any credential material.
+        $Job.state = 'awaiting_console'
+        $Job.errorCode = $null
+        $Job.errorMessage = $null
+        $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
+        Save-EpicVMProvisioningStore -Store $State.Provisioning
     }
     catch {
-        Invoke-EpicVMProvisioningFailedCleanup -State $State -Job $Job
-        if ($Job.state -ne 'failed') {
-            $Job.state = 'failed'
-            $Job.errorCode = [string](Get-EpicVMProperty -Object $_.Exception -Name 'ErrorCode' -Default 'claim_failed')
-            $Job.errorMessage = 'Guest claim or readiness verification failed.'
-            $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
-            Save-EpicVMProvisioningStore -Store $State.Provisioning
-        }
+        # Guest mutation may already have happened. Retain the exact owned VM
+        # for diagnosis instead of deleting it automatically.
+        $Job.state = 'failed'
+        $Job.errorCode = [string](Get-EpicVMProperty -Object $_.Exception -Name 'ErrorCode' -Default 'claim_failed')
+        $Job.errorMessage = 'Guest configuration or Tailscale enrollment failed; the VM was retained.'
+        $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
+        Save-EpicVMProvisioningStore -Store $State.Provisioning
         throw
     }
     finally {
         $claim = $null; $username = $null; $password = $null
     }
+}
+
+function Set-EpicVMProvisioningConsoleFailed {
+    param([Parameter(Mandatory)] [object] $State, [Parameter(Mandatory)] [object] $Job, [Parameter(Mandatory)] [object] $Request)
+    if ($Job.state -notin @('awaiting_console', 'console_failed')) {
+        throw (New-EpicVMProvisioningError -Code 'console_failure_not_allowed' -Message 'The job is not awaiting console configuration.' -Status 409)
+    }
+    $code = [string](Get-EpicVMProperty -Object $Request -Name 'code' -Default 'console_failed')
+    if ($code -notmatch '^[a-z][a-z0-9_]{2,63}$') { $code = 'console_failed' }
+    $Job.state = 'console_failed'
+    $Job.errorCode = $code
+    $Job.errorMessage = 'Console configuration failed; the VM and stopped console data were retained.'
+    $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
+    Save-EpicVMProvisioningStore -Store $State.Provisioning
+}
+
+function Complete-EpicVMProvisioningConsole {
+    param([Parameter(Mandatory)] [object] $State, [Parameter(Mandatory)] [object] $Job, [Parameter(Mandatory)] [object] $Request)
+    if ($Job.state -notin @('awaiting_console', 'console_failed')) {
+        throw (New-EpicVMProvisioningError -Code 'console_complete_not_allowed' -Message 'The job is not awaiting console verification.' -Status 409)
+    }
+    $expectedRoute = '/vm/' + $Job.name + '/'
+    $route = [string](Get-EpicVMProperty -Object $Request -Name 'routePrefix' -Default '')
+    $serverVerified = [bool](Get-EpicVMProperty -Object $Request -Name 'guestTcpVerified' -Default $false)
+    if ($route -cne $expectedRoute -or -not $serverVerified) {
+        throw (New-EpicVMProvisioningError -Code 'console_verification_failed' -Message 'The kvm2 console evidence is incomplete.' -Status 422)
+    }
+    $Job.state = 'verifying'
+    $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
+    Save-EpicVMProvisioningStore -Store $State.Provisioning
+    $verify = Get-EpicVMProperty -Object $State.Provider -Name 'VerifyGuest' -Default $null
+    if ($null -eq $verify -or -not [bool](& $verify $Job.name $Job.tailnetIp)) {
+        $Job.state = 'console_failed'
+        $Job.errorCode = 'guest_reverification_failed'
+        $Job.errorMessage = 'The guest did not pass credential-free RDP reachability verification.'
+        $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
+        Save-EpicVMProvisioningStore -Store $State.Provisioning
+        throw (New-EpicVMProvisioningError -Code 'guest_reverification_failed' -Message 'Guest verification failed.' -Status 422)
+    }
+    $Job.consoleRoutePrefix = $route
+    $Job.consoleVerifiedAt = [DateTime]::UtcNow.ToString('o')
+    $Job.state = 'ready'
+    $Job.errorCode = $null
+    $Job.errorMessage = $null
+    $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
+    Save-EpicVMProvisioningStore -Store $State.Provisioning
 }
 
 function New-EpicVMDeprovisioningJob {

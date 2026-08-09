@@ -21,9 +21,21 @@ NO_TRAEFIK=${NO_TRAEFIK:-0}
 ENABLE_DASHBOARD=${ENABLE_DASHBOARD:-0}
 DIRECT_PORT_START=${DIRECT_PORT_START:-20000}
 HOST_DOCKER_BIN=${HOST_DOCKER_BIN:-}
+HOST_DOCKER_COMPOSE_BIN=${HOST_DOCKER_COMPOSE_BIN:-}
 
 if [[ -z "$HOST_DOCKER_BIN" || ! -e "$HOST_DOCKER_BIN" ]]; then
   HOST_DOCKER_BIN="$(command -v docker || true)"
+fi
+
+if [[ -z "$HOST_DOCKER_COMPOSE_BIN" || ! -x "$HOST_DOCKER_COMPOSE_BIN" ]]; then
+  for candidate in /usr/libexec/docker/cli-plugins/docker-compose /usr/lib/docker/cli-plugins/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose; do
+    if [[ -x "$candidate" ]]; then HOST_DOCKER_COMPOSE_BIN="$candidate"; break; fi
+  done
+fi
+
+if [[ -z "$HOST_DOCKER_COMPOSE_BIN" || ! -x "$HOST_DOCKER_COMPOSE_BIN" ]]; then
+  echo "Unable to locate the Docker Compose plugin for console orchestration." >&2
+  exit 1
 fi
 
 if [[ -z "$HOST_DOCKER_BIN" || ! -e "$HOST_DOCKER_BIN" ]]; then
@@ -59,6 +71,8 @@ blobedash_build_hash() {
   local hash_input=""
   for p in \
     "$STATE_DIR/dashboard/app.py" \
+    "$STATE_DIR/dashboard/guacamole_orchestrator.py" \
+    "$STATE_DIR/dashboard/remote_agent_client.py" \
     "$STATE_DIR/dashboard/optimizer.py" \
     "$STATE_DIR/server/blobedash.Dockerfile"
   do
@@ -125,6 +139,7 @@ if [[ -z "$DASHBOARD_PORT" ]] || { port_in_use "$DASHBOARD_PORT" && ! container_
 fi
 
 ensure_blobedash_image
+install -d -m 700 /opt/epicvm /opt/epicvm/instances
 
 # Recreate container to ensure correct port mapping
 if docker ps -a --format '{{.Names}}' | grep -qx "$NAME"; then
@@ -178,9 +193,11 @@ docker run -d --name "$NAME" --restart unless-stopped \
   -p "${DASHBOARD_PORT}:5000" \
   "${NET_ARGS[@]}" \
   -v "$STATE_DIR:/opt/blobe-vm" \
+  -v /opt/epicvm:/opt/epicvm \
   -v /var/blobe:/var/blobe \
   -v /usr/local/bin/blobe-vm-manager:/usr/local/bin/blobe-vm-manager:ro \
   -v "${HOST_DOCKER_BIN}:/usr/bin/docker:ro" \
+  -v "${HOST_DOCKER_COMPOSE_BIN}:/usr/libexec/docker/cli-plugins/docker-compose:ro" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v "$STATE_DIR/dashboard:/app:ro" \
   -e BLOBEDASH_USER="${BLOBEDASH_USER:-}" \
@@ -189,6 +206,15 @@ docker run -d --name "$NAME" --restart unless-stopped \
   -e BLOBEVM_USER_SECRET="${BLOBEVM_USER_SECRET:-}" \
   -e BLOBEVM_ALLOW_INSECURE_DASHBOARD="${BLOBEVM_ALLOW_INSECURE_DASHBOARD:-0}" \
   -e HOST_DOCKER_BIN="${HOST_DOCKER_BIN}" \
+  -e EPICVM_CONSOLE_ROOT="${EPICVM_CONSOLE_ROOT:-/opt/epicvm/instances}" \
+  -e EPICVM_TRAEFIK_NETWORK="${EPICVM_TRAEFIK_NETWORK:-}" \
+  -e EPICVM_PUBLIC_HOST="${EPICVM_PUBLIC_HOST:-}" \
+  -e EPICVM_TRAEFIK_CERTRESOLVER="${EPICVM_TRAEFIK_CERTRESOLVER:-}" \
+  -e EPICVM_TRAEFIK_AUTH_MIDDLEWARE="${EPICVM_TRAEFIK_AUTH_MIDDLEWARE:-}" \
+  -e EPICVM_TRAEFIK_ROUTER_PRIORITY="${EPICVM_TRAEFIK_ROUTER_PRIORITY:-}" \
+  -e EPICVM_GUACAMOLE_IMAGE="${EPICVM_GUACAMOLE_IMAGE:-}" \
+  -e EPICVM_GUACD_IMAGE="${EPICVM_GUACD_IMAGE:-}" \
+  -e EPICVM_POSTGRES_IMAGE="${EPICVM_POSTGRES_IMAGE:-}" \
   "$IMAGE_NAME" \
   >/dev/null
 

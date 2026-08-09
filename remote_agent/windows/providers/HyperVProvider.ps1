@@ -14,8 +14,6 @@ $guestProviderPath = Join-Path $PSScriptRoot 'GuestProvider.ps1'
 if (Test-Path -LiteralPath $guestProviderPath) { . $guestProviderPath }
 $tailscaleProviderPath = Join-Path $PSScriptRoot 'TailscaleProvider.ps1'
 if (Test-Path -LiteralPath $tailscaleProviderPath) { . $tailscaleProviderPath }
-$consoleProviderPath = Join-Path $PSScriptRoot 'ConsoleProvider.ps1'
-if (Test-Path -LiteralPath $consoleProviderPath) { . $consoleProviderPath }
 
 $script:EpicVMHyperVOwnershipMarker = 'EpicVM-Managed: true'
 
@@ -300,7 +298,7 @@ function Get-EpicVMHyperVCreateOptions {
     $gpu = [bool](Get-EpicVMHyperVValue -Object $Request -Name 'Gpu' -Default ($profile -eq 'gaming'))
     if ($profile -notin @('standard','gaming')) { throw (New-EpicVMHyperVError -Code 'InvalidInput' -Message 'The VM profile is invalid.') }
     if ($profile -eq 'gaming' -and -not $gpu) { throw (New-EpicVMHyperVError -Code 'InvalidInput' -Message 'Gaming VMs require GPU-P.') }
-    $vmRoot = [string](Get-EpicVMHyperVOption -Config $config -Name 'VmRoot' -Default 'C:\ProgramData\EpicVM\vms')
+    $vmRoot = [string](Get-EpicVMHyperVOption -Config $config -Name 'VmRoot' -Default 'E:\EpicVM\vms')
     if ([string]::IsNullOrWhiteSpace($vmRoot)) {
         throw (New-EpicVMHyperVError -Code 'InvalidInput' -Message 'The Hyper-V VM root is not configured.')
     }
@@ -347,6 +345,13 @@ function Get-EpicVMHyperVCapabilities {
     $logicalProcessors = Get-EpicVMHyperVValue -Object $hostInfo -Name 'LogicalProcessorCount' -Default $null
     $memoryCapacity = Get-EpicVMHyperVValue -Object $hostInfo -Name 'MemoryCapacity' -Default $null
     $defaultSwitch = Get-EpicVMHyperVOption -Config (Get-EpicVMHyperVValue -Object $Provider -Name 'Config') -Name 'SwitchName' -Default ''
+    $provisioningReady = $false
+    if ($available -and (Get-Command -Name Test-EpicVMProvisioningPrerequisites -ErrorAction SilentlyContinue)) {
+        try {
+            $provisioningReady = [bool](Test-EpicVMProvisioningPrerequisites -Config (Get-EpicVMHyperVValue -Object $Provider -Name 'Config'))
+        }
+        catch { $provisioningReady = $false }
+    }
 
     return [ordered]@{
         provider = 'HyperV'
@@ -361,7 +366,8 @@ function Get-EpicVMHyperVCapabilities {
         stop = $available
         restart = $available
         delete = $available
-        console = ($null -ne (Get-EpicVMHyperVValue -Object $Provider -Name 'ConsoleOrchestratorInvoker' -Default $null))
+        console = $false
+        provisioning = $provisioningReady
         features = @('capabilities', 'list', 'create', 'lifecycle', 'delete-owned', 'full-copy-template', 'powershell-direct', 'tailscale-enrollment')
         resources = [ordered]@{
             logicalProcessorCount = $logicalProcessors
@@ -661,9 +667,7 @@ function New-EpicVMHyperVProvider {
         [AllowNull()] [scriptblock] $BootstrapCredentialLoader = $null,
         [AllowNull()] [scriptblock] $TailscaleHttpInvoker = $null,
         [AllowNull()] [scriptblock] $TailscaleOAuthInvoker = $null,
-        [AllowNull()] [scriptblock] $ConsoleOrchestratorInvoker = $null,
-        [AllowNull()] [scriptblock] $ConsoleTeardownInvoker = $null,
-        [AllowNull()] [scriptblock] $ConsoleVerifyInvoker = $null
+        [AllowNull()] [scriptblock] $TailscaleOAuthSecretLoader = $null
     )
 
     $missing = @()
@@ -685,10 +689,7 @@ function New-EpicVMHyperVProvider {
         BootstrapCredentialLoader = $BootstrapCredentialLoader
         TailscaleHttpInvoker = $TailscaleHttpInvoker
         TailscaleOAuthInvoker = $TailscaleOAuthInvoker
-        ConsoleOrchestratorInvoker = $ConsoleOrchestratorInvoker
-        ConsoleTeardownInvoker = $ConsoleTeardownInvoker
-        ConsoleVerifyInvoker = $ConsoleVerifyInvoker
-        LastGuestCredential = $null
+        TailscaleOAuthSecretLoader = $TailscaleOAuthSecretLoader
         LastTailscaleEnrollment = $null
         GetCapabilities = $null
         GetVMs = $null
@@ -697,6 +698,12 @@ function New-EpicVMHyperVProvider {
         StopVM = $null
         RestartVM = $null
         DeleteVM = $null
+        ConfigureGuest = $null
+        EnrollTailscale = $null
+        VerifyGuest = $null
+        RevokeTailscale = $null
+        TeardownConsole = $null
+        QuarantineVM = $null
     }
 
     $getCapabilities = ${function:Get-EpicVMHyperVCapabilities}
@@ -715,7 +722,6 @@ function New-EpicVMHyperVProvider {
     $provider.DeleteVM = ({ param($Name) & $deleteVM -Provider $provider -Name $Name }.GetNewClosure())
     $provider.ConfigureGuest = ({ param($Name,$Username,$Password)
             $result = Invoke-EpicVMGuestConfiguration -Provider $provider -Config $provider.Config -VmName $Name -DesiredUser $Username -DesiredPassword $Password
-            $provider.LastGuestCredential = [PSCredential]::new($Username,(ConvertTo-SecureString $Password -AsPlainText -Force))
             return $result
         }.GetNewClosure())
     $provider.EnrollTailscale = ({ param($Name,$Username,$Password)
@@ -723,21 +729,15 @@ function New-EpicVMHyperVProvider {
             $provider.LastTailscaleEnrollment = $result
             return $result
         }.GetNewClosure())
-    $provider.ConfigureConsole = ({ param($Name,$Username,$Password,$GuestIp,$DeviceId)
-            $ip = if ($GuestIp) { $GuestIp } else { [string](Get-EpicVMHyperVValue -Object $provider.LastTailscaleEnrollment -Name 'ip' -Default '') }
-            $device = if ($DeviceId) { $DeviceId } else { [string](Get-EpicVMHyperVValue -Object $provider.LastTailscaleEnrollment -Name 'deviceId' -Default '') }
-            return Invoke-EpicVMConsoleConfiguration -Provider $provider -VmName $Name -Username $Username -Password $Password -GuestIp $ip -DeviceId $device
-        }.GetNewClosure())
-    $provider.VerifyGuest = ({ param($Name)
-            if ($null -eq $provider.LastGuestCredential) { return $false }
-            if ($null -eq $provider.LastTailscaleEnrollment -or -not [bool](Get-EpicVMHyperVValue -Object $provider.LastTailscaleEnrollment -Name 'ok' -Default $false)) { return $false }
-            if (-not (Test-EpicVMGuestConfiguration -Provider $provider -VmName $Name -Credential $provider.LastGuestCredential)) { return $false }
-            $verify = $provider.ConsoleVerifyInvoker
-            if ($null -eq $verify) { return $false }
-            return [bool](& $verify $Name ([string](Get-EpicVMHyperVValue -Object $provider.LastTailscaleEnrollment -Name 'ip' -Default '')))
+    $provider.VerifyGuest = ({ param($Name,$GuestIp)
+            $vm = @(& $provider.GetVMs | Where-Object {
+                [string](Get-EpicVMHyperVValue -Object $_ -Name 'name' -Default '') -ceq $Name
+            }) | Select-Object -First 1
+            if ($null -eq $vm -or -not [bool](Get-EpicVMHyperVValue -Object $vm -Name 'managed' -Default $false)) { return $false }
+            if ([string](Get-EpicVMHyperVValue -Object $vm -Name 'state' -Default '') -ine 'Running') { return $false }
+            return Test-EpicVMGuestRdpReachability -Address ([string]$GuestIp)
         }.GetNewClosure())
     $provider.RevokeTailscale = ({ param($DeviceId) Revoke-EpicVMTailscaleDevice -Provider $provider -DeviceId $DeviceId }.GetNewClosure())
-    $provider.TeardownConsole = ({ param($Name,$ConfirmName,$DeviceId) Remove-EpicVMConsoleConfiguration -Provider $provider -VmName $Name -ConfirmName $ConfirmName -DeviceId $DeviceId }.GetNewClosure())
     $provider.QuarantineVM = ({ param($Name) Move-EpicVMHyperVQuarantine -Provider $provider -Name $Name }.GetNewClosure())
 
     return $provider

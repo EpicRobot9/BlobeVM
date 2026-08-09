@@ -2,6 +2,7 @@
 [CmdletBinding()]
 param(
     [string] $InstallRoot = 'C:\ProgramData\EpicVM\agent',
+    [string] $VmRoot = 'E:\EpicVM\vms',
     [int] $Port = 8765,
     [string] $TailscaleAddress
 )
@@ -12,7 +13,13 @@ $sourceRoot = $PSScriptRoot
 New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $InstallRoot 'providers') -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $InstallRoot 'logs') -Force | Out-Null
-New-Item -ItemType Directory -Path (Join-Path $InstallRoot 'vms') -Force | Out-Null
+$vmDrive = Split-Path -Qualifier $VmRoot
+if ([string]::IsNullOrWhiteSpace($vmDrive) -or -not (Test-Path -LiteralPath $vmDrive)) {
+    throw 'The configured EpicVM VM drive is unavailable.'
+}
+$VmRoot = [IO.Path]::GetFullPath($VmRoot)
+New-Item -ItemType Directory -Path $VmRoot -Force | Out-Null
+New-Item -ItemType Directory -Path 'E:\EpicVM\templates' -Force | Out-Null
 
 $tokenPath = Join-Path $InstallRoot 'agent.txt'
 $legacyTokenPath = Join-Path $InstallRoot 'agent.token'
@@ -33,7 +40,12 @@ else {
 $agentPath = Join-Path $InstallRoot 'EpicVM.Agent.ps1'
 $providerPath = Join-Path $InstallRoot 'providers/HyperVProvider.ps1'
 Copy-Item -LiteralPath (Join-Path $sourceRoot 'EpicVM.Agent.ps1') -Destination $agentPath -Force
-Copy-Item -LiteralPath (Join-Path $sourceRoot 'providers/HyperVProvider.ps1') -Destination $providerPath -Force
+foreach ($sourceFile in @('Provisioning.ps1','TemplateBuilder.ps1','Set-TailscaleOAuthSecret.ps1')) {
+    Copy-Item -LiteralPath (Join-Path $sourceRoot $sourceFile) -Destination (Join-Path $InstallRoot $sourceFile) -Force
+}
+foreach ($providerFile in @('HyperVProvider.ps1','GuestProvider.ps1','TailscaleProvider.ps1')) {
+    Copy-Item -LiteralPath (Join-Path $sourceRoot ('providers/' + $providerFile)) -Destination (Join-Path $InstallRoot ('providers/' + $providerFile)) -Force
+}
 $configPath = Join-Path $InstallRoot 'config.json'
 if ([string]::IsNullOrWhiteSpace($TailscaleAddress)) {
     $tailscaleAddresses = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
@@ -52,7 +64,7 @@ $config = [ordered]@{
     Provider = 'HyperV'
     TokenFile = $tokenPath
     ConfigFile = $configPath
-    VmRoot = (Join-Path $InstallRoot 'vms')
+    VmRoot = $VmRoot
     SwitchName = ''
     DefaultMemoryBytes = 4294967296
     DefaultCpuCount = 2
@@ -63,7 +75,31 @@ $config = [ordered]@{
     MaxCpuCount = 16
     MaxDiskSizeBytes = 549755813888
     Generation = 2
+    TemplateManifestPath = 'E:\EpicVM\templates\win11-25h2\manifest.json'
+    ProvisioningStatePath = 'E:\EpicVM\provisioning-jobs.json'
+    GamingVMNames = @('testre')
+    BootstrapUser = 'EpicVMBootstrap'
+    BootstrapCredentialPath = (Join-Path $InstallRoot 'bootstrap.dpapi')
+    TailscaleOAuthClientId = ''
+    TailscaleOAuthSecretPath = (Join-Path $InstallRoot 'tailscale-oauth.dpapi')
+    TailscaleTailnet = ''
+    TailscaleGuestTag = 'tag:epicvm-guest'
+    TailscaleExecutable = 'C:\Program Files\Tailscale\tailscale.exe'
+    EnableGamingProvisioning = $false
 }
+if (Test-Path -LiteralPath $configPath -PathType Leaf) {
+    try {
+        $existingConfig = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($property in $existingConfig.PSObject.Properties) { $config[$property.Name] = $property.Value }
+    }
+    catch { throw 'The existing EpicVM agent configuration is invalid; it was not overwritten.' }
+}
+$config.BindAddress = $TailscaleAddress
+$config.Port = $Port
+$config.Provider = 'HyperV'
+$config.TokenFile = $tokenPath
+$config.ConfigFile = $configPath
+$config.VmRoot = $VmRoot
 $config | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $configPath -Encoding UTF8
 
 # Keep the credential readable only by LocalSystem and local administrators.

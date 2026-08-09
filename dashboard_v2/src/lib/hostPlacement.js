@@ -50,7 +50,8 @@ export function getEligibleRemoteHosts(hosts){
     host.id !== LOCAL_HOST_ID &&
     String(host.kind || 'remote').toLowerCase() !== 'local' &&
     host.online === true &&
-    host.capabilities?.create_vm === true
+    host.capabilities?.create_vm === true &&
+    host.capabilities?.provisioning === true
   ))
 }
 

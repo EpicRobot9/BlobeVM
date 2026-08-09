@@ -3,7 +3,7 @@
   "Port": 8765,
   "Provider": "HyperV",
   "TokenFile": "C:\\ProgramData\\EpicVM\\agent\\agent.txt",
-  "VmRoot": "C:\\ProgramData\\EpicVM\\vms",
+  "VmRoot": "E:\\EpicVM\\vms",
   "SwitchName": "",
   "DefaultMemoryBytes": 4294967296,
   "DefaultCpuCount": 2,
@@ -23,5 +23,6 @@
   "TailscaleOAuthSecretPath": "C:\\ProgramData\\EpicVM\\agent\\tailscale-oauth.dpapi",
   "TailscaleTailnet": "",
   "TailscaleGuestTag": "tag:epicvm-guest",
-  "TailscaleExecutable": "C:\\Program Files\\Tailscale\\tailscale.exe"
+  "TailscaleExecutable": "C:\\Program Files\\Tailscale\\tailscale.exe",
+  "EnableGamingProvisioning": false
 }

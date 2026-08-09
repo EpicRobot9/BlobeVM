@@ -125,3 +125,15 @@ function Test-EpicVMGuestConfiguration {
     }
     try{return [bool](Invoke-EpicVMPowerShellDirect -Provider $Provider -VmName $VmName -Credential $Credential -Script $script)}catch{return $false}
 }
+
+function Test-EpicVMGuestRdpReachability {
+    param([Parameter(Mandatory)][string]$Address,[int]$Port=3389,[int]$TimeoutMilliseconds=3000)
+    if($Address -notmatch '^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.\d{1,3}\.\d{1,3}$'){return $false}
+    $client=[Net.Sockets.TcpClient]::new()
+    try {
+        $task=$client.ConnectAsync($Address,$Port)
+        if(-not $task.Wait($TimeoutMilliseconds)){return $false}
+        return $client.Connected
+    } catch { return $false }
+    finally { $client.Dispose() }
+}

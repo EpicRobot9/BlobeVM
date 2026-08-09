@@ -186,6 +186,17 @@ class RemoteAgentClient:
         result = self._request("POST", f"/v1/provisioning-jobs/{safe_id}/claim", payload, timeout=self.operation_timeout)
         return result if isinstance(result, dict) else {"ok": True, "job": result}
 
+    def console_complete(self, job_id: str, *, route_prefix: str, guest_tcp_verified: bool) -> dict[str, Any]:
+        safe_id = quote(str(job_id), safe="")
+        payload = {"routePrefix": str(route_prefix), "guestTcpVerified": bool(guest_tcp_verified)}
+        result = self._request("POST", f"/v1/provisioning-jobs/{safe_id}/console-complete", payload, timeout=self.operation_timeout)
+        return result if isinstance(result, dict) else {"ok": True, "job": result}
+
+    def console_failed(self, job_id: str, *, code: str = "console_failed") -> dict[str, Any]:
+        safe_id = quote(str(job_id), safe="")
+        result = self._request("POST", f"/v1/provisioning-jobs/{safe_id}/console-failed", {"code": str(code)}, timeout=self.operation_timeout)
+        return result if isinstance(result, dict) else {"ok": True, "job": result}
+
     def deprovision(self, name: str, *, confirm_name: str, idempotency_key: str | None = None) -> dict[str, Any]:
         result = self._request(
             "POST", "/v1/deprovisioning-jobs", {"name": str(name), "confirmName": str(confirm_name)},
@@ -273,6 +284,18 @@ class RemoteAgentHost:
             code = {400: "invalid_request", 401: "authentication_failed", 403: "forbidden", 404: "not_found", 409: "conflict", 422: "claim_failed"}.get(status, "host_unavailable")
             raise VmHostUnavailable("Guest claim was rejected.", status=status, code=code) from exc
 
+    def console_complete(self, job_id: str, *, route_prefix: str, guest_tcp_verified: bool) -> dict[str, Any]:
+        try:
+            return self.client.console_complete(job_id, route_prefix=route_prefix, guest_tcp_verified=guest_tcp_verified)
+        except RemoteAgentError as exc:
+            raise self._host_error(exc) from exc
+
+    def console_failed(self, job_id: str, *, code: str = "console_failed") -> dict[str, Any]:
+        try:
+            return self.client.console_failed(job_id, code=code)
+        except RemoteAgentError as exc:
+            raise self._host_error(exc) from exc
+
     def deprovision(self, name: str, *, confirm_name: str, idempotency_key: str | None = None) -> dict[str, Any]:
         try:
             return self.client.deprovision(name, confirm_name=confirm_name, idempotency_key=idempotency_key)
@@ -317,7 +340,7 @@ class RemoteAgentHost:
     @staticmethod
     def _normalize_capabilities(value: Mapping[str, Any] | None) -> dict[str, bool]:
         value = value if isinstance(value, Mapping) else {}
-        result = {"create_vm": False, "start": False, "stop": False, "restart": False, "delete": False, "console": False}
+        result = {"create_vm": False, "start": False, "stop": False, "restart": False, "delete": False, "console": False, "provisioning": False}
         if value.get("available") is False:
             return result
         aliases = {
@@ -328,6 +351,7 @@ class RemoteAgentHost:
             "restart": "restart",
             "delete": "delete",
             "console": "console",
+            "provisioning": "provisioning",
         }
         for key, output in aliases.items():
             if key in value:

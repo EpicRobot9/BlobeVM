@@ -33,7 +33,7 @@ const hosts = [
     platform: 'windows',
     provider: 'hyperv',
     online: true,
-    capabilities: { create_vm: true },
+    capabilities: { create_vm: true, provisioning: true },
     resources: {
       memory_available_bytes: 17179869184,
       storage_free_bytes: 536870912000
@@ -56,6 +56,11 @@ test('eligible hosts excludes offline and create-incapable hosts', () => {
   assert.match(hostOptionLabel(eligible[0]), /windows.*hyperv/)
   assert.match(hostOptionLabel(eligible[0]), /RAM 16 GB free/)
   assert.match(hostOptionLabel(eligible[0]), /disk 500 GB free/)
+})
+
+test('eligible hosts excludes a host whose template or OAuth prerequisites are not ready', () => {
+  const notReady = [{ id: 'not-ready', kind: 'remote', online: true, capabilities: { create_vm: true, provisioning: false } }]
+  assert.deepEqual(getEligibleRemoteHosts(notReady), [])
 })
 
 test('host inventory accepts the normalized API envelope and host aliases', () => {

@@ -2,6 +2,7 @@
 [CmdletBinding()]
 param(
     [string] $InstallRoot = 'C:\ProgramData\EpicVM\agent',
+    [string] $VmRoot = 'E:\EpicVM\vms',
     [int] $Port = 8765,
     [string] $TailscaleAddress,
     [string] $SwitchName,
@@ -71,7 +72,7 @@ if ([string]::IsNullOrWhiteSpace($SwitchName) -and -not $NonInteractive) {
 Write-SetupStep "Installing the EpicVM RemoteVM agent on $TailscaleAddress"
 $installer = Join-Path $PSScriptRoot 'install.ps1'
 & $pwsh.Source -NoProfile -ExecutionPolicy Bypass -File $installer `
-    -InstallRoot $InstallRoot -Port $Port -TailscaleAddress $TailscaleAddress
+    -InstallRoot $InstallRoot -VmRoot $VmRoot -Port $Port -TailscaleAddress $TailscaleAddress
 
 if (-not [string]::IsNullOrWhiteSpace($SwitchName)) {
     Write-SetupStep "Configuring Hyper-V switch '$SwitchName'"

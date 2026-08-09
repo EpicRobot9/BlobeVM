@@ -104,6 +104,7 @@ Describe 'Hyper-V provider capabilities' {
         $capabilities.stop | Should -BeTrue
         $capabilities.restart | Should -BeTrue
         $capabilities.delete | Should -BeTrue
+        $capabilities.provisioning | Should -BeFalse
         $capabilities.features | Should -Contain 'lifecycle'
         $capabilities.resources.logicalProcessorCount | Should -Be 16
         $capabilities.resources.memoryCapacityBytes | Should -Be 68719476736

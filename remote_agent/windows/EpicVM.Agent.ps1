@@ -26,7 +26,7 @@ $provisioningPath = Join-Path $PSScriptRoot 'Provisioning.ps1'
 if (Test-Path -LiteralPath $provisioningPath) {
     . $provisioningPath
 }
-foreach ($providerExtension in @('GuestProvider.ps1','TailscaleProvider.ps1','ConsoleProvider.ps1')) {
+foreach ($providerExtension in @('GuestProvider.ps1','TailscaleProvider.ps1')) {
     $extensionPath = Join-Path $PSScriptRoot ('providers/' + $providerExtension)
     if (Test-Path -LiteralPath $extensionPath) { . $extensionPath }
 }
@@ -38,7 +38,7 @@ function Get-EpicVMDefaultConfig {
         Provider = 'HyperV'
         TokenFile = 'C:\ProgramData\EpicVM\agent\agent.txt'
         ConfigFile = 'C:\ProgramData\EpicVM\agent\config.json'
-        VmRoot = 'C:\ProgramData\EpicVM\vms'
+        VmRoot = 'E:\EpicVM\vms'
         SwitchName = ''
         DefaultMemoryBytes = 4294967296
         DefaultCpuCount = 2
@@ -59,6 +59,7 @@ function Get-EpicVMDefaultConfig {
         TailscaleTailnet = ''
         TailscaleGuestTag = 'tag:epicvm-guest'
         TailscaleExecutable = 'C:\Program Files\Tailscale\tailscale.exe'
+        EnableGamingProvisioning = $false
     }
 }
 
@@ -342,6 +343,24 @@ function Invoke-EpicVMApiRequest {
                 }
                 return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok=$true; job=(ConvertTo-EpicVMRedactedJob -Job $job) })
             }
+            if ($Method -eq 'POST' -and $segments.Count -eq 4 -and $segments[3] -eq 'console-complete') {
+                try { Complete-EpicVMProvisioningConsole -State $State -Job $job -Request (Get-EpicVMRequestBody -Body $Body) }
+                catch {
+                    $code = [string](Get-EpicVMProperty -Object $_.Exception -Name 'ErrorCode' -Default 'console_verification_failed')
+                    $status = [int](Get-EpicVMProperty -Object $_.Exception -Name 'HttpStatus' -Default 422)
+                    return ConvertTo-EpicVMJsonResponse -StatusCode $status -Body ([ordered]@{ ok=$false; error=[ordered]@{code=$code;message=[string]$_.Exception.Message}; job=(ConvertTo-EpicVMRedactedJob -Job $job) })
+                }
+                return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok=$true; job=(ConvertTo-EpicVMRedactedJob -Job $job) })
+            }
+            if ($Method -eq 'POST' -and $segments.Count -eq 4 -and $segments[3] -eq 'console-failed') {
+                try { Set-EpicVMProvisioningConsoleFailed -State $State -Job $job -Request (Get-EpicVMRequestBody -Body $Body) }
+                catch {
+                    $code = [string](Get-EpicVMProperty -Object $_.Exception -Name 'ErrorCode' -Default 'console_failure_not_allowed')
+                    $status = [int](Get-EpicVMProperty -Object $_.Exception -Name 'HttpStatus' -Default 409)
+                    return ConvertTo-EpicVMJsonResponse -StatusCode $status -Body (New-EpicVMApiError -Code $code -Message ([string]$_.Exception.Message))
+                }
+                return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok=$true; job=(ConvertTo-EpicVMRedactedJob -Job $job) })
+            }
         }
         if ($null -ne $State.Provisioning -and $Method -eq 'POST' -and $normalizedPath -eq '/v1/deprovisioning-jobs') {
             try { $job=New-EpicVMDeprovisioningJob -State $State -Request (Get-EpicVMRequestBody -Body $Body) }
@@ -409,7 +428,7 @@ function Test-EpicVMMutationRequest {
         [Parameter(Mandatory)] [string] $Path
     )
     if ($Method -eq 'DELETE' -and $Path -match '^/v1/vms/[^/]+$') { return $true }
-    if ($Method -eq 'POST' -and ($Path -eq '/v1/provisioning-jobs' -or $Path -eq '/v1/deprovisioning-jobs' -or $Path -match '^/v1/(provisioning|deprovisioning)-jobs/[^/]+/claim$')) { return $true }
+    if ($Method -eq 'POST' -and ($Path -eq '/v1/provisioning-jobs' -or $Path -eq '/v1/deprovisioning-jobs' -or $Path -match '^/v1/provisioning-jobs/[^/]+/(claim|console-complete|console-failed)$')) { return $true }
     if ($Method -eq 'POST' -and ($Path -eq '/v1/vms' -or $Path -match '^/v1/vms/[^/]+/(start|stop|restart)$' -or $Path -match '^/v1/vms/[^/]+/actions/(start|stop|restart|delete)$')) { return $true }
     return $false
 }

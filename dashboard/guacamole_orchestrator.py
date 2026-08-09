@@ -15,9 +15,11 @@ import json
 import os
 import re
 import secrets
+import shutil
 import socket
 import subprocess
 import time
+from urllib import error as urlerror, request as urlrequest
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -50,10 +52,13 @@ def derive_guacamole_verifier(username: str, password: str, *, salt: bytes | Non
     user = str(username or "")
     if not re.fullmatch(r"^[A-Za-z][A-Za-z0-9._-]{2,31}$", user):
         raise ConsoleOrchestrationError("Invalid console username.", status=400, code="invalid_username")
+    if user.casefold() == "guacadmin":
+        raise ConsoleOrchestrationError("The reserved Guacamole administrator name cannot be used.", status=400, code="reserved_username")
     if not password or len(password) < 12:
         raise ConsoleOrchestrationError("Console password policy rejected the claim.", status=400, code="invalid_password")
     salt = salt if salt is not None else secrets.token_bytes(32)
-    digest = hashlib.sha256(salt + password.encode("utf-8")).digest()
+    # Guacamole hashes the UTF-8 password followed by the raw 32-byte salt.
+    digest = hashlib.sha256(password.encode("utf-8") + salt).digest()
     return {
         "username": user,
         "password_hash": base64.b64encode(digest).decode("ascii"),
@@ -101,17 +106,97 @@ class GuacamoleOrchestrator:
         *,
         root: str = "/opt/epicvm/instances",
         proxy_network: str = "proxy",
-        forward_auth: str = "http://blobedash:5000/dashboard/auth/vm",
+        public_host: str | None = None,
+        tls_resolver: str | None = None,
+        auth_middleware: str | None = None,
+        router_priority: int | str | None = None,
         digests: Mapping[str, str] | None = None,
         tcp_probe: Callable[[str, int, float], bool] | None = None,
+        disk_probe: Callable[[], bool] | None = None,
+        route_owner_probe: Callable[[str], bool] | None = None,
+        routing_probe: Callable[[], bool] | None = None,
+        auth_status_probe: Callable[[str], bool] | None = None,
         command_runner: Callable[..., Any] | None = None,
     ):
         self.root = Path(root)
         self.proxy_network = str(proxy_network)
-        self.forward_auth = str(forward_auth).rstrip("/")
+        self.public_host = str(public_host or os.environ.get("EPICVM_PUBLIC_HOST", "")).strip().lower()
+        self.tls_resolver = str(tls_resolver or os.environ.get("EPICVM_TRAEFIK_CERTRESOLVER", "")).strip()
+        self.auth_middleware = str(auth_middleware or os.environ.get("EPICVM_TRAEFIK_AUTH_MIDDLEWARE", "")).strip()
+        self.router_priority = str(router_priority or os.environ.get("EPICVM_TRAEFIK_ROUTER_PRIORITY", "")).strip()
         self.digests = dict(digests or {})
         self.tcp_probe = tcp_probe or self._tcp_probe
+        self.disk_probe = disk_probe or self._disk_ready
+        self.route_owner_probe = route_owner_probe or self._route_available
+        self.routing_probe = routing_probe or self._routing_available
+        self.auth_status_probe = auth_status_probe or self._public_auth_rejected
         self.command_runner = command_runner or subprocess.run
+
+    def _routing_config(self) -> tuple[str, str, str, int]:
+        if not re.fullmatch(r"[a-z0-9.-]+", self.public_host) or not self.tls_resolver or not self.auth_middleware or not self.router_priority.isdigit():
+            raise ConsoleOrchestrationError("Verified Traefik routing configuration is unavailable.", status=503, code="routing_config_required")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+(?:@[A-Za-z0-9_.-]+)?", self.auth_middleware):
+            raise ConsoleOrchestrationError("The Traefik authentication middleware is invalid.", status=503, code="routing_config_invalid")
+        priority = int(self.router_priority)
+        if priority < 1 or priority > 100000:
+            raise ConsoleOrchestrationError("The Traefik router priority is invalid.", status=503, code="routing_config_invalid")
+        return self.public_host, self.tls_resolver, self.auth_middleware, priority
+
+    def _disk_ready(self) -> bool:
+        candidate = self.root
+        while not candidate.exists() and candidate != candidate.parent:
+            candidate = candidate.parent
+        usage = shutil.disk_usage(candidate)
+        used_percent = ((usage.total - usage.free) / usage.total * 100) if usage.total else 100
+        return usage.free >= 20 * 1024**3 and used_percent < 85
+
+    def _route_available(self, route_prefix: str) -> bool:
+        try:
+            listed = self.command_runner(["docker", "ps", "-aq"], check=True, capture_output=True, text=True)
+            ids = str(getattr(listed, "stdout", "") or "").split()
+            if not ids:
+                return True
+            inspected = self.command_runner(["docker", "inspect", *ids], check=True, capture_output=True, text=True)
+            records = json.loads(str(getattr(inspected, "stdout", "[]") or "[]"))
+            route_variants = (route_prefix, route_prefix.rstrip("/"))
+            for record in records:
+                labels = (((record or {}).get("Config") or {}).get("Labels") or {})
+                route_values = (
+                    str(value) for key, value in labels.items()
+                    if str(key).startswith("traefik.http.routers.") and str(key).endswith(".rule")
+                )
+                if any(any(variant in value for variant in route_variants) for value in route_values):
+                    return False
+            return True
+        except (OSError, subprocess.SubprocessError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ConsoleOrchestrationError("Traefik route ownership could not be verified.", status=503, code="route_probe_failed") from exc
+
+    def _routing_available(self) -> bool:
+        _, tls_resolver, auth_middleware, _ = self._routing_config()
+        middleware_name = auth_middleware.split("@", 1)[0]
+        try:
+            self.command_runner(["docker", "network", "inspect", self.proxy_network], check=True, capture_output=True, text=True)
+            listed = self.command_runner(["docker", "ps", "-q"], check=True, capture_output=True, text=True)
+            ids = str(getattr(listed, "stdout", "") or "").split()
+            if not ids:
+                return False
+            inspected = self.command_runner(["docker", "inspect", *ids], check=True, capture_output=True, text=True)
+            records = json.loads(str(getattr(inspected, "stdout", "[]") or "[]"))
+            labels = [
+                (((record or {}).get("Config") or {}).get("Labels") or {})
+                for record in records
+            ]
+            middleware_prefix = f"traefik.http.middlewares.{middleware_name}."
+            middleware_defined = any(any(str(key).startswith(middleware_prefix) for key in item) for item in labels)
+            middleware_reused = any(any(
+                str(key).endswith(".middlewares") and auth_middleware in [part.strip() for part in str(value).split(",")]
+                for key, value in item.items()
+            ) for item in labels)
+            middleware_ok = middleware_defined or middleware_reused
+            resolver_ok = any(any(str(key).endswith(".tls.certresolver") and str(value) == tls_resolver for key, value in item.items()) for item in labels)
+            return middleware_ok and resolver_ok
+        except (OSError, subprocess.SubprocessError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ConsoleOrchestrationError("Traefik authentication and TLS ownership could not be verified.", status=503, code="routing_probe_failed") from exc
 
     @staticmethod
     def _tcp_probe(host: str, port: int, timeout: float) -> bool:
@@ -119,6 +204,16 @@ class GuacamoleOrchestrator:
             with socket.create_connection((host, int(port)), timeout=float(timeout)):
                 return True
         except OSError:
+            return False
+
+    def _public_auth_rejected(self, route_prefix: str) -> bool:
+        url = f"https://{self.public_host}{route_prefix}"
+        try:
+            with urlrequest.urlopen(url, timeout=8):
+                return False
+        except urlerror.HTTPError as exc:
+            return int(exc.code) in (401, 403)
+        except (OSError, urlerror.URLError):
             return False
 
     def _image(self, key: str) -> str:
@@ -131,23 +226,30 @@ class GuacamoleOrchestrator:
         safe = validate_vm_name(name)
         return self.root / safe
 
+    @staticmethod
+    def _project_name(name: str) -> str:
+        return f"epicvm-{validate_vm_name(name).replace('.', '-')}-rdp"
+
     def build_compose(self, *, name: str, guest_ip: str) -> str:
         safe = validate_vm_name(name)
         connection = build_rdp_connection(guest_ip=guest_ip)
+        public_host, tls_resolver, auth_middleware, router_priority = self._routing_config()
         guac_image = self._image("guacamole")
         guacd_image = self._image("guacd")
         postgres_image = self._image("postgres")
         db_name = f"epicvm_{safe.replace('-', '_').replace('.', '_')}"
         labels = {
             "traefik.enable": "true",
+            "com.epicvm.console": "1",
+            "com.epicvm.vm.name": safe,
             "traefik.docker.network": self.proxy_network,
-            f"traefik.http.routers.epicvm-{safe}.rule": f"PathPrefix(`/vm/{safe}/`)",
+            f"traefik.http.routers.epicvm-{safe}.rule": f"Host(`{public_host}`) && PathPrefix(`/vm/{safe}/`)",
             f"traefik.http.routers.epicvm-{safe}.entrypoints": "websecure",
             f"traefik.http.routers.epicvm-{safe}.tls": "true",
+            f"traefik.http.routers.epicvm-{safe}.tls.certresolver": tls_resolver,
+            f"traefik.http.routers.epicvm-{safe}.priority": str(router_priority),
             f"traefik.http.routers.epicvm-{safe}.service": f"epicvm-{safe}",
-            f"traefik.http.routers.epicvm-{safe}.middlewares": f"epicvm-{safe}-auth,epicvm-{safe}-strip",
-            f"traefik.http.middlewares.epicvm-{safe}-auth.forwardauth.address": f"{self.forward_auth}/{safe}",
-            f"traefik.http.middlewares.epicvm-{safe}-auth.forwardauth.trustForwardHeader": "true",
+            f"traefik.http.routers.epicvm-{safe}.middlewares": f"{auth_middleware},epicvm-{safe}-strip",
             f"traefik.http.middlewares.epicvm-{safe}-strip.stripprefix.prefixes": f"/vm/{safe}",
             f"traefik.http.services.epicvm-{safe}.loadbalancer.server.port": "8080",
         }
@@ -164,6 +266,11 @@ class GuacamoleOrchestrator:
       POSTGRES_HOST_AUTH_METHOD: "trust"
     networks:
       - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U guac -d {db_name}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
     volumes:
       - ./postgres:/var/lib/postgresql/data
       - ./initdb.sql:/docker-entrypoint-initdb.d/20-epicvm.sql:ro
@@ -176,17 +283,25 @@ class GuacamoleOrchestrator:
     image: {_yaml_quote(guac_image)}
     restart: unless-stopped
     depends_on:
-      - postgres
-      - guacd
+      postgres:
+        condition: service_healthy
+      guacd:
+        condition: service_started
     environment:
+      POSTGRESQL_ENABLED: "true"
+      WEBAPP_CONTEXT: "ROOT"
       GUACD_HOSTNAME: "guacd"
       POSTGRESQL_HOSTNAME: "postgres"
       POSTGRESQL_DATABASE: {_yaml_quote(db_name)}
       POSTGRESQL_USERNAME: "guac"
-      GUACAMOLE_HOME: "/etc/guacamole"
-    volumes:
-      - ./guacamole:/etc/guacamole:ro
-      - ./guacamole.properties:/etc/guacamole/guacamole.properties:ro
+      POSTGRESQL_PASSWORD: ""
+      POSTGRESQL_SSL_MODE: "disable"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/ >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
     networks:
       - internal
       - proxy
@@ -220,29 +335,31 @@ networks:
         # salted verifier and Guacamole token placeholders, never the claim
         # password itself.
         return f"""BEGIN;
+DELETE FROM guacamole_entity WHERE name = 'guacadmin' AND type = 'USER';
 INSERT INTO guacamole_entity (name, type)
-VALUES ({values['username']}, 'USER')
-ON CONFLICT (name, type) DO NOTHING;
+VALUES ({values['username']}, 'USER');
 INSERT INTO guacamole_user (entity_id, password_hash, password_salt, password_date)
 SELECT entity_id, decode({values['hash']}, 'base64'), decode({values['salt']}, 'base64'), NOW()
 FROM guacamole_entity
-WHERE name = {values['username']} AND type = 'USER'
-ON CONFLICT (entity_id) DO UPDATE SET password_hash = EXCLUDED.password_hash, password_salt = EXCLUDED.password_salt, password_date = EXCLUDED.password_date;
-INSERT INTO guacamole_connection (connection_name, protocol, proxy_hostname, proxy_port)
-VALUES ({values['connection']}, 'rdp', {values['guest_ip']}, 3389)
-ON CONFLICT (connection_name) DO UPDATE SET proxy_hostname = EXCLUDED.proxy_hostname, proxy_port = EXCLUDED.proxy_port;
+WHERE name = {values['username']} AND type = 'USER';
+INSERT INTO guacamole_connection (connection_name, protocol)
+VALUES ({values['connection']}, 'rdp');
 INSERT INTO guacamole_connection_parameter (connection_id, parameter_name, parameter_value)
-SELECT connection_id, 'security', 'nla' FROM guacamole_connection WHERE connection_name = {values['connection']}
-ON CONFLICT (connection_id, parameter_name) DO UPDATE SET parameter_value = EXCLUDED.parameter_value;
+SELECT connection_id, 'hostname', {values['guest_ip']} FROM guacamole_connection WHERE connection_name = {values['connection']};
 INSERT INTO guacamole_connection_parameter (connection_id, parameter_name, parameter_value)
-SELECT connection_id, 'ignore-cert', 'true' FROM guacamole_connection WHERE connection_name = {values['connection']}
-ON CONFLICT (connection_id, parameter_name) DO UPDATE SET parameter_value = EXCLUDED.parameter_value;
+SELECT connection_id, 'port', '3389' FROM guacamole_connection WHERE connection_name = {values['connection']};
 INSERT INTO guacamole_connection_parameter (connection_id, parameter_name, parameter_value)
-SELECT connection_id, 'username', '${{GUAC_USERNAME}}' FROM guacamole_connection WHERE connection_name = {values['connection']}
-ON CONFLICT (connection_id, parameter_name) DO UPDATE SET parameter_value = EXCLUDED.parameter_value;
+SELECT connection_id, 'security', 'nla' FROM guacamole_connection WHERE connection_name = {values['connection']};
 INSERT INTO guacamole_connection_parameter (connection_id, parameter_name, parameter_value)
-SELECT connection_id, 'password', '${{GUAC_PASSWORD}}' FROM guacamole_connection WHERE connection_name = {values['connection']}
-ON CONFLICT (connection_id, parameter_name) DO UPDATE SET parameter_value = EXCLUDED.parameter_value;
+SELECT connection_id, 'ignore-cert', 'true' FROM guacamole_connection WHERE connection_name = {values['connection']};
+INSERT INTO guacamole_connection_parameter (connection_id, parameter_name, parameter_value)
+SELECT connection_id, 'username', '${{GUAC_USERNAME}}' FROM guacamole_connection WHERE connection_name = {values['connection']};
+INSERT INTO guacamole_connection_parameter (connection_id, parameter_name, parameter_value)
+SELECT connection_id, 'password', '${{GUAC_PASSWORD}}' FROM guacamole_connection WHERE connection_name = {values['connection']};
+INSERT INTO guacamole_connection_permission (entity_id, connection_id, permission)
+SELECT e.entity_id, c.connection_id, 'READ'
+FROM guacamole_entity e, guacamole_connection c
+WHERE e.name = {values['username']} AND e.type = 'USER' AND c.connection_name = {values['connection']};
 COMMIT;
 """
 
@@ -283,22 +400,32 @@ COMMIT;
         target = self._instance_root(plan.name)
         if target.exists():
             raise ConsoleOrchestrationError("A console instance with this name already exists.", status=409, code="console_exists")
+        if not self.disk_probe():
+            raise ConsoleOrchestrationError("kvm2 storage is below the provisioning safety threshold.", status=507, code="storage_gate")
+        if not self.routing_probe():
+            raise ConsoleOrchestrationError("The verified Traefik authentication or TLS route is unavailable.", status=503, code="routing_probe_failed")
+        if not self.route_owner_probe(plan.route_prefix):
+            raise ConsoleOrchestrationError("The requested console route is already owned.", status=409, code="route_collision")
+        try:
+            schema_result = self.command_runner(
+                ["docker", "run", "--rm", self._image("guacamole"), "/opt/guacamole/bin/initdb.sh", "--postgresql"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            schema = str(getattr(schema_result, "stdout", "") or "")
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ConsoleOrchestrationError("The official Guacamole schema could not be generated.", status=503, code="schema_generation_failed") from exc
+        if "CREATE TABLE guacamole_entity" not in schema:
+            raise ConsoleOrchestrationError("The generated Guacamole schema was invalid.", status=503, code="schema_generation_failed")
         target.parent.mkdir(parents=True, exist_ok=True)
         stage = target.parent / f".{plan.name}-{secrets.token_hex(8)}"
         stage.mkdir(mode=0o700)
         try:
             (stage / "docker-compose.yml").write_text(plan.compose, encoding="utf-8")
-            (stage / "guacamole").mkdir(mode=0o700)
-            verifier = dict(plan.verifier)
-            (stage / "guacamole" / "user-verifier.json").write_text(json.dumps(verifier, separators=(",", ":")), encoding="utf-8")
-            (stage / "guacamole" / "connection.json").write_text(json.dumps(plan.connection, separators=(",", ":")), encoding="utf-8")
-            (stage / "initdb.sql").write_text(plan.sql_seed, encoding="utf-8")
-            (stage / "guacamole.properties").write_text(plan.guacamole_properties, encoding="utf-8")
-            (stage / "plan.json").write_text(json.dumps({"name": plan.name, "guestIp": plan.guest_ip, "routePrefix": plan.route_prefix}, separators=(",", ":")), encoding="utf-8")
-            os.chmod(stage / "guacamole" / "user-verifier.json", 0o600)
-            os.chmod(stage / "guacamole" / "connection.json", 0o600)
+            (stage / "initdb.sql").write_text(schema.rstrip() + "\n" + plan.sql_seed, encoding="utf-8")
+            (stage / "plan.json").write_text(json.dumps({"owner": "EpicVM", "version": 1, "name": plan.name, "guestIp": plan.guest_ip, "routePrefix": plan.route_prefix}, separators=(",", ":")), encoding="utf-8")
             os.chmod(stage / "initdb.sql", 0o600)
-            os.chmod(stage / "guacamole.properties", 0o600)
             os.chmod(stage / "plan.json", 0o600)
             stage.rename(target)
             return target
@@ -312,19 +439,81 @@ COMMIT;
                 stage.rmdir()
             raise
 
-    def start_staged(self, name: str) -> None:
+    def start_staged(self, name: str) -> dict[str, Any]:
         target = self._instance_root(name)
         if not target.is_dir() or not (target / "docker-compose.yml").is_file():
             raise ConsoleOrchestrationError("The named console plan is not staged.", status=404, code="console_not_found")
         try:
             staged = json.loads((target / "plan.json").read_text(encoding="utf-8"))
+            if staged.get("owner") != "EpicVM" or staged.get("name") != validate_vm_name(name):
+                raise ConsoleOrchestrationError("The staged console is not owned by EpicVM.", status=403, code="ownership_required")
             if not self.tcp_probe(str(staged["guestIp"]), 3389, 2.0):
                 raise ConsoleOrchestrationError("Guest RDP is not reachable from kvm2.", status=409, code="guest_tcp_unavailable")
         except ConsoleOrchestrationError:
             raise
         except (OSError, KeyError, TypeError, ValueError) as exc:
             raise ConsoleOrchestrationError("The staged console plan is invalid.", status=503, code="console_plan_invalid") from exc
-        self.command_runner(["docker", "compose", "up", "-d"], cwd=str(target), check=True, capture_output=True, text=True)
+        try:
+            self.command_runner(["docker", "compose", "-p", self._project_name(name), "up", "-d", "--wait", "--wait-timeout", "90"], cwd=str(target), check=True, capture_output=True, text=True)
+        except (OSError, subprocess.SubprocessError) as exc:
+            self.stop_staged(name)
+            raise ConsoleOrchestrationError("The console stack failed its startup gate.", status=502, code="console_start_failed") from exc
+        if not self._runtime_isolated(name):
+            self.stop_staged(name)
+            raise ConsoleOrchestrationError("The console stack exposed an internal service.", status=502, code="console_isolation_failed")
+        auth_rejected = False
+        for _ in range(10):
+            if self.auth_status_probe(str(staged["routePrefix"])):
+                auth_rejected = True
+                break
+            time.sleep(1)
+        if not auth_rejected:
+            self.stop_staged(name)
+            raise ConsoleOrchestrationError("The public console route did not reject unauthenticated access.", status=502, code="console_auth_failed")
+        return {"ok": True, "routePrefix": str(staged["routePrefix"]), "guestTcpVerified": True}
+
+    def _runtime_isolated(self, name: str) -> bool:
+        project = self._project_name(name)
+        try:
+            listed = self.command_runner(
+                ["docker", "ps", "--filter", f"label=com.docker.compose.project={project}", "-q"],
+                check=True, capture_output=True, text=True,
+            )
+            ids = str(getattr(listed, "stdout", "") or "").split()
+            if len(ids) != 3:
+                return False
+            inspected = self.command_runner(["docker", "inspect", *ids], check=True, capture_output=True, text=True)
+            records = json.loads(str(getattr(inspected, "stdout", "[]") or "[]"))
+            services = set()
+            for record in records:
+                labels = (((record or {}).get("Config") or {}).get("Labels") or {})
+                services.add(str(labels.get("com.docker.compose.service") or ""))
+                bindings = (((record or {}).get("HostConfig") or {}).get("PortBindings") or {})
+                if bindings:
+                    return False
+            return services == {"postgres", "guacd", "guacamole"}
+        except (OSError, subprocess.SubprocessError, TypeError, ValueError, json.JSONDecodeError):
+            return False
+
+    def stop_staged(self, name: str) -> None:
+        target = self._instance_root(name)
+        if not target.is_dir() or not (target / "docker-compose.yml").is_file():
+            return
+        try:
+            self.command_runner(["docker", "compose", "-p", self._project_name(name), "down", "--remove-orphans"], cwd=str(target), check=False, capture_output=True, text=True)
+        except OSError:
+            return
+
+    def quarantine_staged(self, name: str) -> Path | None:
+        safe = validate_vm_name(name)
+        target = self._instance_root(safe)
+        if not target.is_dir():
+            return None
+        self.stop_staged(safe)
+        quarantine = target.parent / "quarantine" / f"{safe}-{int(time.time())}"
+        quarantine.parent.mkdir(mode=0o700, exist_ok=True)
+        target.rename(quarantine)
+        return quarantine
 
     def teardown(self, *, name: str, confirm_name: str, device_id: str | None = None, revoke: Callable[[str], Any] | None = None) -> dict[str, Any]:
         safe = validate_vm_name(name)
@@ -333,8 +522,14 @@ COMMIT;
         target = self._instance_root(safe)
         if not target.is_dir() or not (target / "docker-compose.yml").is_file():
             raise ConsoleOrchestrationError("The named console instance is not owned by EpicVM.", status=403, code="ownership_required")
+        try:
+            staged = json.loads((target / "plan.json").read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError) as exc:
+            raise ConsoleOrchestrationError("The named console instance is not owned by EpicVM.", status=403, code="ownership_required") from exc
+        if staged.get("owner") != "EpicVM" or staged.get("name") != safe:
+            raise ConsoleOrchestrationError("The named console instance is not owned by EpicVM.", status=403, code="ownership_required")
         # Route is disabled first by taking down Guacamole before quarantine.
-        self.command_runner(["docker", "compose", "down", "--remove-orphans"], cwd=str(target), check=True, capture_output=True, text=True)
+        self.command_runner(["docker", "compose", "-p", self._project_name(safe), "down", "--remove-orphans"], cwd=str(target), check=True, capture_output=True, text=True)
         if device_id and revoke is not None:
             revoke(device_id)
         quarantine = target.parent / "quarantine" / f"{safe}-{int(time.time())}"

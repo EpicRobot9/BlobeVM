@@ -1356,6 +1356,16 @@ deploy_dashboard_direct() {
     echo "Unable to determine docker CLI path for dashboard deployment." >&2
     return 1
   fi
+  local compose_bin="${HOST_DOCKER_COMPOSE_BIN:-}"
+  if [[ -z "$compose_bin" || ! -x "$compose_bin" ]]; then
+    for candidate in /usr/libexec/docker/cli-plugins/docker-compose /usr/lib/docker/cli-plugins/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose; do
+      if [[ -x "$candidate" ]]; then compose_bin="$candidate"; break; fi
+    done
+  fi
+  if [[ -z "$compose_bin" || ! -x "$compose_bin" ]]; then
+    echo "Unable to determine Docker Compose plugin path for console orchestration." >&2
+    return 1
+  fi
   # Always remove and repull dashboard container/image to ensure freshness
   if docker ps -a --format '{{.Names}}' | grep -qx "blobedash"; then
     echo "[dashboard] Removing old dashboard container..."
@@ -1369,8 +1379,10 @@ deploy_dashboard_direct() {
   docker run -d --name blobedash --restart unless-stopped \
     -p "${DASHBOARD_PORT}:5000" \
     -v /opt/blobe-vm:/opt/blobe-vm \
+    -v /opt/epicvm:/opt/epicvm \
     -v /usr/local/bin/blobe-vm-manager:/usr/local/bin/blobe-vm-manager:ro \
     -v "${docker_bin}:/usr/bin/docker:ro" \
+    -v "${compose_bin}:/usr/libexec/docker/cli-plugins/docker-compose:ro" \
     -v /var/run/docker.sock:/var/run/docker.sock \
     -v /opt/blobe-vm/dashboard:/app:ro \
     -e BLOBEDASH_USER="${BLOBEDASH_USER:-}" \
@@ -1379,6 +1391,15 @@ deploy_dashboard_direct() {
     -e BLOBEVM_USER_SECRET="${BLOBEVM_USER_SECRET:-}" \
     -e BLOBEVM_ALLOW_INSECURE_DASHBOARD="${BLOBEVM_ALLOW_INSECURE_DASHBOARD:-0}" \
     -e HOST_DOCKER_BIN="${docker_bin}" \
+    -e EPICVM_CONSOLE_ROOT="${EPICVM_CONSOLE_ROOT:-/opt/epicvm/instances}" \
+    -e EPICVM_TRAEFIK_NETWORK="${EPICVM_TRAEFIK_NETWORK:-}" \
+    -e EPICVM_PUBLIC_HOST="${EPICVM_PUBLIC_HOST:-}" \
+    -e EPICVM_TRAEFIK_CERTRESOLVER="${EPICVM_TRAEFIK_CERTRESOLVER:-}" \
+    -e EPICVM_TRAEFIK_AUTH_MIDDLEWARE="${EPICVM_TRAEFIK_AUTH_MIDDLEWARE:-}" \
+    -e EPICVM_TRAEFIK_ROUTER_PRIORITY="${EPICVM_TRAEFIK_ROUTER_PRIORITY:-}" \
+    -e EPICVM_GUACAMOLE_IMAGE="${EPICVM_GUACAMOLE_IMAGE:-}" \
+    -e EPICVM_GUACD_IMAGE="${EPICVM_GUACD_IMAGE:-}" \
+    -e EPICVM_POSTGRES_IMAGE="${EPICVM_POSTGRES_IMAGE:-}" \
   python:3.11-slim \
   bash -c "apt-get update && apt-get install -y curl jq && pip install --no-cache-dir flask && python /app/app.py" \
     >/dev/null
@@ -1445,6 +1466,7 @@ install_manager() {
     fi
   fi
   mkdir -p /opt/blobe-vm/instances
+  install -d -m 700 /opt/epicvm /opt/epicvm/instances
   # Ensure dashboard app is available under /opt for both modes
   mkdir -p /opt/blobe-vm/dashboard
   if [[ -f "$REPO_DIR/dashboard/app.py" ]]; then
@@ -1465,7 +1487,7 @@ install_manager() {
     cp -f "$REPO_DIR/dashboard/app.py" /opt/blobe-vm/dashboard/app.py
     # Keep the provider/RemoteVM imports beside the deployed app. Existing
     # deployments often copy only app.py into /opt/blobe-vm/dashboard.
-    for dashboard_module in vm_hosts.py remote_hosts.py remote_agent_client.py; do
+    for dashboard_module in vm_hosts.py remote_hosts.py remote_agent_client.py guacamole_orchestrator.py; do
       if [[ -f "$REPO_DIR/dashboard/$dashboard_module" ]]; then
         install -Dm644 "$REPO_DIR/dashboard/$dashboard_module" "/opt/blobe-vm/dashboard/$dashboard_module"
       fi
@@ -1508,6 +1530,16 @@ install_manager() {
     echo "DASHBOARD_PORT=$(sh_q "${DASHBOARD_PORT:-}")";
     echo "DIRECT_PORT_START=$(sh_q "${BLOBEVM_DIRECT_PORT_START:-20000}")";
     echo "HOST_DOCKER_BIN=$(sh_q "${HOST_DOCKER_BIN}")";
+    echo "HOST_DOCKER_COMPOSE_BIN=$(sh_q "${HOST_DOCKER_COMPOSE_BIN:-}")";
+    echo "EPICVM_CONSOLE_ROOT=$(sh_q "${EPICVM_CONSOLE_ROOT:-/opt/epicvm/instances}")";
+    echo "EPICVM_TRAEFIK_NETWORK=$(sh_q "${EPICVM_TRAEFIK_NETWORK:-}")";
+    echo "EPICVM_PUBLIC_HOST=$(sh_q "${EPICVM_PUBLIC_HOST:-}")";
+    echo "EPICVM_TRAEFIK_CERTRESOLVER=$(sh_q "${EPICVM_TRAEFIK_CERTRESOLVER:-}")";
+    echo "EPICVM_TRAEFIK_AUTH_MIDDLEWARE=$(sh_q "${EPICVM_TRAEFIK_AUTH_MIDDLEWARE:-}")";
+    echo "EPICVM_TRAEFIK_ROUTER_PRIORITY=$(sh_q "${EPICVM_TRAEFIK_ROUTER_PRIORITY:-}")";
+    echo "EPICVM_GUACAMOLE_IMAGE=$(sh_q "${EPICVM_GUACAMOLE_IMAGE:-}")";
+    echo "EPICVM_GUACD_IMAGE=$(sh_q "${EPICVM_GUACD_IMAGE:-}")";
+    echo "EPICVM_POSTGRES_IMAGE=$(sh_q "${EPICVM_POSTGRES_IMAGE:-}")";
   } > /opt/blobe-vm/.env
 }
 
@@ -1537,12 +1569,14 @@ preflight_dashboard_runtime() {
   fi
   # 4) Instances dir exists
   mkdir -p /opt/blobe-vm/instances
+  install -d -m 700 /opt/epicvm /opt/epicvm/instances
 
   # 5) In-container probe: ensure docker ps works when mounting CLI and socket
   local probe="blobedash-preflight-$$"
   docker rm -f "$probe" >/dev/null 2>&1 || true
   if ! docker run --rm --name "$probe" \
       -v "/opt/blobe-vm:/opt/blobe-vm" \
+      -v "/opt/epicvm:/opt/epicvm" \
       -v "/usr/local/bin/blobe-vm-manager:/usr/local/bin/blobe-vm-manager:ro" \
       -v "$docker_bin:/usr/bin/docker:ro" \
       -v "/var/run/docker.sock:/var/run/docker.sock" \
