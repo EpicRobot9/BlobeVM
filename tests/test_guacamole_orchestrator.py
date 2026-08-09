@@ -38,6 +38,8 @@ def test_plan_is_digest_pinned_and_keeps_rdp_credentials_tokenized(tmp_path):
     assert 'internal: true' in plan.compose
     assert 'POSTGRES_HOST_AUTH_METHOD' in plan.compose
     assert 'WEBAPP_CONTEXT: "ROOT"' in plan.compose
+    assert 'nc -z 127.0.0.1 4822' in plan.compose
+    assert 'interval: 5s' in plan.compose
     assert 'curl -fsS http://127.0.0.1:8080/' in plan.compose
     assert 'ports:' not in plan.compose
     assert plan.connection['username'] == '${GUAC_USERNAME}'

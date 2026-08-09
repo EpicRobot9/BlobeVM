@@ -279,6 +279,11 @@ class GuacamoleOrchestrator:
     restart: unless-stopped
     networks:
       - internal
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 4822 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
   guacamole:
     image: {_yaml_quote(guac_image)}
     restart: unless-stopped
