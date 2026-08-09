@@ -252,19 +252,38 @@ class RemoteAgentHost:
         return self.host_id
 
     def provision(self, name: str, profile: str = "standard", *, idempotency_key: str | None = None) -> dict[str, Any]:
-        return self.client.provision(name, profile, idempotency_key=idempotency_key)
+        try:
+            return self.client.provision(name, profile, idempotency_key=idempotency_key)
+        except RemoteAgentError as exc:
+            raise self._host_error(exc) from exc
 
     def provisioning_status(self, job_id: str) -> dict[str, Any]:
-        return self.client.provisioning_status(job_id)
+        try:
+            return self.client.provisioning_status(job_id)
+        except RemoteAgentError as exc:
+            raise self._host_error(exc) from exc
 
     def claim(self, job_id: str, username: str, password: str, claim_token: str) -> dict[str, Any]:
-        return self.client.claim(job_id, username, password, claim_token)
+        try:
+            return self.client.claim(job_id, username, password, claim_token)
+        except RemoteAgentError as exc:
+            # Do not reflect transport/error text from a credential-bearing
+            # request; retain the normalized status/code for the API layer.
+            status = int(exc.status or 503)
+            code = {400: "invalid_request", 401: "authentication_failed", 403: "forbidden", 404: "not_found", 409: "conflict", 422: "claim_failed"}.get(status, "host_unavailable")
+            raise VmHostUnavailable("Guest claim was rejected.", status=status, code=code) from exc
 
     def deprovision(self, name: str, *, confirm_name: str, idempotency_key: str | None = None) -> dict[str, Any]:
-        return self.client.deprovision(name, confirm_name=confirm_name, idempotency_key=idempotency_key)
+        try:
+            return self.client.deprovision(name, confirm_name=confirm_name, idempotency_key=idempotency_key)
+        except RemoteAgentError as exc:
+            raise self._host_error(exc) from exc
 
     def deprovisioning_status(self, job_id: str) -> dict[str, Any]:
-        return self.client.deprovisioning_status(job_id)
+        try:
+            return self.client.deprovisioning_status(job_id)
+        except RemoteAgentError as exc:
+            raise self._host_error(exc) from exc
 
     @property
     def online(self) -> bool:

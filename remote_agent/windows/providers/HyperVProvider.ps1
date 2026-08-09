@@ -10,6 +10,13 @@
 
 Set-StrictMode -Version Latest
 
+$guestProviderPath = Join-Path $PSScriptRoot 'GuestProvider.ps1'
+if (Test-Path -LiteralPath $guestProviderPath) { . $guestProviderPath }
+$tailscaleProviderPath = Join-Path $PSScriptRoot 'TailscaleProvider.ps1'
+if (Test-Path -LiteralPath $tailscaleProviderPath) { . $tailscaleProviderPath }
+$consoleProviderPath = Join-Path $PSScriptRoot 'ConsoleProvider.ps1'
+if (Test-Path -LiteralPath $consoleProviderPath) { . $consoleProviderPath }
+
 $script:EpicVMHyperVOwnershipMarker = 'EpicVM-Managed: true'
 
 function Get-EpicVMHyperVValue {
@@ -289,6 +296,10 @@ function Get-EpicVMHyperVCreateOptions {
     }
 
     $switchName = [string](Get-EpicVMHyperVValue -Object $Request -Name 'SwitchName' -Default (Get-EpicVMHyperVOption -Config $config -Name 'SwitchName' -Default ''))
+    $profile = [string](Get-EpicVMHyperVValue -Object $Request -Name 'Profile' -Default 'standard').ToLowerInvariant()
+    $gpu = [bool](Get-EpicVMHyperVValue -Object $Request -Name 'Gpu' -Default ($profile -eq 'gaming'))
+    if ($profile -notin @('standard','gaming')) { throw (New-EpicVMHyperVError -Code 'InvalidInput' -Message 'The VM profile is invalid.') }
+    if ($profile -eq 'gaming' -and -not $gpu) { throw (New-EpicVMHyperVError -Code 'InvalidInput' -Message 'Gaming VMs require GPU-P.') }
     $vmRoot = [string](Get-EpicVMHyperVOption -Config $config -Name 'VmRoot' -Default 'C:\ProgramData\EpicVM\vms')
     if ([string]::IsNullOrWhiteSpace($vmRoot)) {
         throw (New-EpicVMHyperVError -Code 'InvalidInput' -Message 'The Hyper-V VM root is not configured.')
@@ -302,6 +313,10 @@ function Get-EpicVMHyperVCreateOptions {
         generation = $generation
         switchName = $switchName
         vmRoot = $vmRoot
+        profile = $profile
+        gpu = $gpu
+        gpuPartitionPercent = 50
+        templateRequired = [bool](Get-EpicVMHyperVValue -Object $Request -Name 'TemplateRequired' -Default $false)
     }
 }
 
@@ -346,8 +361,8 @@ function Get-EpicVMHyperVCapabilities {
         stop = $available
         restart = $available
         delete = $available
-        console = $false
-        features = @('capabilities', 'list', 'create', 'lifecycle', 'delete-owned')
+        console = ($null -ne (Get-EpicVMHyperVValue -Object $Provider -Name 'ConsoleOrchestratorInvoker' -Default $null))
+        features = @('capabilities', 'list', 'create', 'lifecycle', 'delete-owned', 'full-copy-template', 'powershell-direct', 'tailscale-enrollment')
         resources = [ordered]@{
             logicalProcessorCount = $logicalProcessors
             memoryCapacityBytes = $memoryCapacity
@@ -432,6 +447,18 @@ function New-EpicVMHyperVVM {
             # Full independent copy.  Differencing disks are intentionally not
             # used because template identity and recovery depend on isolation.
             Copy-Item -LiteralPath $templateDiskPath -Destination $diskPath -Force -ErrorAction Stop
+            $templateVhd = Invoke-EpicVMHyperVCmdlet -Provider $Provider -CommandName 'Get-VHD' -Parameters @{ Path=$diskPath; ErrorAction='Stop' }
+            if (-not [string]::IsNullOrWhiteSpace([string](Get-EpicVMHyperVValue -Object $templateVhd -Name 'ParentPath' -Default '')) -or
+                [string](Get-EpicVMHyperVValue -Object $templateVhd -Name 'VhdType' -Default '') -ine 'Dynamic') {
+                throw (New-EpicVMHyperVError -Code 'InvalidInput' -Message 'The template disk must be a consolidated dynamic VHDX.')
+            }
+            $templateSize = [long](Get-EpicVMHyperVValue -Object $templateVhd -Name 'Size' -Default 0)
+            if ($templateSize -gt [long]$options.diskSizeBytes) {
+                throw (New-EpicVMHyperVError -Code 'InvalidInput' -Message 'The validated template is larger than the requested profile disk.')
+            }
+            if ($templateSize -lt [long]$options.diskSizeBytes) {
+                Invoke-EpicVMHyperVCmdlet -Provider $Provider -CommandName 'Resize-VHD' -Parameters @{ Path=$diskPath; SizeBytes=[long]$options.diskSizeBytes; ErrorAction='Stop' } | Out-Null
+            }
         }
         else {
             Invoke-EpicVMHyperVCmdlet -Provider $Provider -CommandName 'New-VHD' -Parameters @{
@@ -467,6 +494,48 @@ function New-EpicVMHyperVVM {
             Count = [long]$options.cpuCount
             ErrorAction = 'Stop'
         } | Out-Null
+
+        # Every provisioned VM receives an explicit locally-administered MAC;
+        # Hyper-V's automatic allocation is not an identity contract.
+        $macBytes = [byte[]]::new(6)
+        [Security.Cryptography.RandomNumberGenerator]::Fill($macBytes)
+        $macBytes[0] = ($macBytes[0] -bor 0x02) -band 0xfe
+        $mac = ($macBytes | ForEach-Object { $_.ToString('X2') }) -join '-'
+        Invoke-EpicVMHyperVCmdlet -Provider $Provider -CommandName 'Set-VMNetworkAdapter' -Parameters @{
+            VMName = $name
+            StaticMacAddress = $mac
+            ErrorAction = 'Stop'
+        } | Out-Null
+
+        if ($options.templateRequired) {
+            $keyProtector = Get-Command -Name 'Set-VMKeyProtector' -ErrorAction SilentlyContinue
+            $enableTpm = Get-Command -Name 'Enable-VMTPM' -ErrorAction SilentlyContinue
+            $secureBoot = Get-Command -Name 'Set-VMFirmware' -ErrorAction SilentlyContinue
+            if ($null -eq (Get-EpicVMHyperVValue -Object $Provider -Name 'CommandInvoker' -Default $null) -and ($null -eq $keyProtector -or $null -eq $enableTpm -or $null -eq $secureBoot)) {
+                throw (New-EpicVMHyperVError -Code 'SecurityUnavailable' -Message 'Unique vTPM/key-protector support is unavailable.')
+            }
+            Invoke-EpicVMHyperVCmdlet -Provider $Provider -CommandName 'Set-VMFirmware' -Parameters @{ VMName=$name; EnableSecureBoot='On'; ErrorAction='Stop' } | Out-Null
+            Invoke-EpicVMHyperVCmdlet -Provider $Provider -CommandName 'Set-VMKeyProtector' -Parameters @{ VMName=$name; NewLocalKeyProtector=$true; ErrorAction='Stop' } | Out-Null
+            Invoke-EpicVMHyperVCmdlet -Provider $Provider -CommandName 'Enable-VMTPM' -Parameters @{ VMName=$name; ErrorAction='Stop' } | Out-Null
+        }
+
+        if ($options.gpu) {
+            foreach ($commandName in @('Get-VMHostPartitionableGpu','Add-VMGpuPartitionAdapter','Set-VMGpuPartitionAdapter')) {
+                if ($null -eq (Get-EpicVMHyperVValue -Object $Provider -Name 'CommandInvoker' -Default $null) -and $null -eq (Get-Command -Name $commandName -ErrorAction SilentlyContinue)) {
+                    throw (New-EpicVMHyperVError -Code 'GpuUnavailable' -Message 'GPU-P support is unavailable for the Gaming profile.')
+                }
+            }
+            $partitionable = @(Invoke-EpicVMHyperVCmdlet -Provider $Provider -CommandName 'Get-VMHostPartitionableGpu' -Parameters @{ ErrorAction='Stop' }) | Select-Object -First 1
+            if ($null -eq $partitionable) { throw (New-EpicVMHyperVError -Code 'GpuUnavailable' -Message 'No partitionable GPU is available.') }
+            Invoke-EpicVMHyperVCmdlet -Provider $Provider -CommandName 'Add-VMGpuPartitionAdapter' -Parameters @{ VMName=$name; InstancePath=[string](Get-EpicVMHyperVValue -Object $partitionable -Name 'Name' -Default ''); ErrorAction='Stop' } | Out-Null
+            $percent=[double]$options.gpuPartitionPercent/100
+            $vram=[long](Get-EpicVMHyperVValue -Object $partitionable -Name 'PartitionVRAM' -Default 0)
+            $encode=[long](Get-EpicVMHyperVValue -Object $partitionable -Name 'PartitionEncode' -Default 0)
+            $decode=[long](Get-EpicVMHyperVValue -Object $partitionable -Name 'PartitionDecode' -Default 0)
+            $compute=[long](Get-EpicVMHyperVValue -Object $partitionable -Name 'PartitionCompute' -Default 0)
+            $gpuParameters=@{ VMName=$name; MinPartitionVRAM=[long]($vram*$percent); MaxPartitionVRAM=[long]($vram*$percent); OptimalPartitionVRAM=[long]($vram*$percent); MinPartitionEncode=[long]($encode*$percent); MaxPartitionEncode=[long]($encode*$percent); OptimalPartitionEncode=[long]($encode*$percent); MinPartitionDecode=[long]($decode*$percent); MaxPartitionDecode=[long]($decode*$percent); OptimalPartitionDecode=[long]($decode*$percent); MinPartitionCompute=[long]($compute*$percent); MaxPartitionCompute=[long]($compute*$percent); OptimalPartitionCompute=[long]($compute*$percent); ErrorAction='Stop' }
+            Invoke-EpicVMHyperVCmdlet -Provider $Provider -CommandName 'Set-VMGpuPartitionAdapter' -Parameters $gpuParameters | Out-Null
+        }
 
         return ConvertTo-EpicVMHyperVVMInfo -VM (Get-EpicVMHyperVVM -Provider $Provider -Name $name)
     }
@@ -566,11 +635,35 @@ function Remove-EpicVMHyperVVM {
     }
 }
 
+function Move-EpicVMHyperVQuarantine {
+    param([Parameter(Mandatory)][object]$Provider,[Parameter(Mandatory)][string]$Name)
+    $root=[string](Get-EpicVMHyperVOption -Config (Get-EpicVMHyperVValue -Object $Provider -Name 'Config') -Name 'VmRoot' -Default '')
+    $source=Join-Path $root $Name
+    if(-not(Test-Path -LiteralPath $source)){return [ordered]@{ok=$true;quarantined=$false}}
+    try {
+        $rootFull=[IO.Path]::GetFullPath($root).TrimEnd('\')
+        $sourceFull=[IO.Path]::GetFullPath($source)
+        if(-not($sourceFull.StartsWith($rootFull + '\',[StringComparison]::OrdinalIgnoreCase))){throw 'VM path is outside the managed root.'}
+        $quarantineRoot=Join-Path $root 'quarantine'
+        $destination=Join-Path $quarantineRoot ($Name + '-' + [DateTimeOffset]::UtcNow.ToUnixTimeSeconds())
+        New-Item -ItemType Directory -Path $quarantineRoot -Force|Out-Null
+        Move-Item -LiteralPath $source -Destination $destination -Force -ErrorAction Stop
+        return [ordered]@{ok=$true;quarantined=$true;path=$destination;quarantineUntil=[DateTime]::UtcNow.AddDays(7).ToString('o')}
+    }catch{throw (New-EpicVMHyperVError -Code 'QuarantineFailed' -Message 'The named VM resources could not be quarantined.')}
+}
+
 function New-EpicVMHyperVProvider {
     [CmdletBinding()]
     param(
         [AllowNull()] [object] $Config = @{},
-        [AllowNull()] [scriptblock] $CommandInvoker = $null
+        [AllowNull()] [scriptblock] $CommandInvoker = $null,
+        [AllowNull()] [scriptblock] $PowerShellDirectInvoker = $null,
+        [AllowNull()] [scriptblock] $BootstrapCredentialLoader = $null,
+        [AllowNull()] [scriptblock] $TailscaleHttpInvoker = $null,
+        [AllowNull()] [scriptblock] $TailscaleOAuthInvoker = $null,
+        [AllowNull()] [scriptblock] $ConsoleOrchestratorInvoker = $null,
+        [AllowNull()] [scriptblock] $ConsoleTeardownInvoker = $null,
+        [AllowNull()] [scriptblock] $ConsoleVerifyInvoker = $null
     )
 
     $missing = @()
@@ -588,6 +681,15 @@ function New-EpicVMHyperVProvider {
         Available = ($null -ne $CommandInvoker -or $missing.Count -eq 0)
         MissingCmdlets = $missing
         CommandInvoker = $CommandInvoker
+        PowerShellDirectInvoker = $PowerShellDirectInvoker
+        BootstrapCredentialLoader = $BootstrapCredentialLoader
+        TailscaleHttpInvoker = $TailscaleHttpInvoker
+        TailscaleOAuthInvoker = $TailscaleOAuthInvoker
+        ConsoleOrchestratorInvoker = $ConsoleOrchestratorInvoker
+        ConsoleTeardownInvoker = $ConsoleTeardownInvoker
+        ConsoleVerifyInvoker = $ConsoleVerifyInvoker
+        LastGuestCredential = $null
+        LastTailscaleEnrollment = $null
         GetCapabilities = $null
         GetVMs = $null
         CreateVM = $null
@@ -611,6 +713,32 @@ function New-EpicVMHyperVProvider {
     $provider.StopVM = ({ param($Name) & $stopVM -Provider $provider -Name $Name -Action Stop }.GetNewClosure())
     $provider.RestartVM = ({ param($Name) & $restartVM -Provider $provider -Name $Name -Action Restart }.GetNewClosure())
     $provider.DeleteVM = ({ param($Name) & $deleteVM -Provider $provider -Name $Name }.GetNewClosure())
+    $provider.ConfigureGuest = ({ param($Name,$Username,$Password)
+            $result = Invoke-EpicVMGuestConfiguration -Provider $provider -Config $provider.Config -VmName $Name -DesiredUser $Username -DesiredPassword $Password
+            $provider.LastGuestCredential = [PSCredential]::new($Username,(ConvertTo-SecureString $Password -AsPlainText -Force))
+            return $result
+        }.GetNewClosure())
+    $provider.EnrollTailscale = ({ param($Name,$Username,$Password)
+            $result = Invoke-EpicVMTailscaleEnrollment -Provider $provider -Config $provider.Config -VmName $Name -Username $Username -Password $Password
+            $provider.LastTailscaleEnrollment = $result
+            return $result
+        }.GetNewClosure())
+    $provider.ConfigureConsole = ({ param($Name,$Username,$Password,$GuestIp,$DeviceId)
+            $ip = if ($GuestIp) { $GuestIp } else { [string](Get-EpicVMHyperVValue -Object $provider.LastTailscaleEnrollment -Name 'ip' -Default '') }
+            $device = if ($DeviceId) { $DeviceId } else { [string](Get-EpicVMHyperVValue -Object $provider.LastTailscaleEnrollment -Name 'deviceId' -Default '') }
+            return Invoke-EpicVMConsoleConfiguration -Provider $provider -VmName $Name -Username $Username -Password $Password -GuestIp $ip -DeviceId $device
+        }.GetNewClosure())
+    $provider.VerifyGuest = ({ param($Name)
+            if ($null -eq $provider.LastGuestCredential) { return $false }
+            if ($null -eq $provider.LastTailscaleEnrollment -or -not [bool](Get-EpicVMHyperVValue -Object $provider.LastTailscaleEnrollment -Name 'ok' -Default $false)) { return $false }
+            if (-not (Test-EpicVMGuestConfiguration -Provider $provider -VmName $Name -Credential $provider.LastGuestCredential)) { return $false }
+            $verify = $provider.ConsoleVerifyInvoker
+            if ($null -eq $verify) { return $false }
+            return [bool](& $verify $Name ([string](Get-EpicVMHyperVValue -Object $provider.LastTailscaleEnrollment -Name 'ip' -Default '')))
+        }.GetNewClosure())
+    $provider.RevokeTailscale = ({ param($DeviceId) Revoke-EpicVMTailscaleDevice -Provider $provider -DeviceId $DeviceId }.GetNewClosure())
+    $provider.TeardownConsole = ({ param($Name,$ConfirmName,$DeviceId) Remove-EpicVMConsoleConfiguration -Provider $provider -VmName $Name -ConfirmName $ConfirmName -DeviceId $DeviceId }.GetNewClosure())
+    $provider.QuarantineVM = ({ param($Name) Move-EpicVMHyperVQuarantine -Provider $provider -Name $Name }.GetNewClosure())
 
     return $provider
 }

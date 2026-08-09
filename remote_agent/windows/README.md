@@ -73,3 +73,44 @@ Deleting a VM unregisters it but preserves its VHDX for recovery.
 The Linux dashboard should register the host with its Tailscale URL, for
 example `http://win-gaming.ts.net:8765`, and the token. Public URLs are rejected
 by the server-side registry unless the explicit development override is set.
+
+## EpicVM one-click provisioning (source-only until staged)
+
+Provisioning requires the immutable manifest at
+`E:\EpicVM\templates\win11-25h2\manifest.json`. Build it only during a
+planned maintenance window from an elevated PowerShell 7 session; the builder
+is opt-in and has an exact `testre` source-name gate:
+
+```powershell
+$GuestCredential = Get-Credential -Message 'Working testre administrator'
+$BootstrapCredential = Get-Credential -Message 'EpicVM bootstrap administrator'
+.\TemplateBuilder.ps1 -Run -GuestCredential $GuestCredential -BootstrapCredential $BootstrapCredential
+```
+
+The command above is documentation only in this source branch. It does not run
+during installation, and no credential is accepted on the command line. Store
+the host-side OAuth secret interactively:
+
+```powershell
+.\Set-TailscaleOAuthSecret.ps1
+```
+
+The one required Tailscale control-plane action is to create a narrowly scoped
+service OAuth client with device read/create permission, preauthorize only
+`tag:epicvm-guest`, and add the equivalent ACL rule below. The secret is entered
+only at the secure prompt, DPAPI machine-encrypted on the Windows host, and
+never copied to kvm2.
+
+```json
+{
+  "tagOwners": { "tag:epicvm-guest": ["autogroup:admin"] },
+  "acls": [
+    { "action": "accept", "src": ["tag:epicvm-host", "tag:epicvm-kvm2"], "dst": ["tag:epicvm-guest:3389"] }
+  ]
+}
+```
+
+The kvm2 console plan is source-only here. It requires digest-pinned
+Guacamole, guacd, and PostgreSQL images, keeps database/guacd internal, puts
+only Guacamole on the existing proxy network with dashboard ForwardAuth, and
+refuses to start until kvm2 can reach the guest on TCP 3389.

@@ -26,6 +26,10 @@ $provisioningPath = Join-Path $PSScriptRoot 'Provisioning.ps1'
 if (Test-Path -LiteralPath $provisioningPath) {
     . $provisioningPath
 }
+foreach ($providerExtension in @('GuestProvider.ps1','TailscaleProvider.ps1','ConsoleProvider.ps1')) {
+    $extensionPath = Join-Path $PSScriptRoot ('providers/' + $providerExtension)
+    if (Test-Path -LiteralPath $extensionPath) { . $extensionPath }
+}
 
 function Get-EpicVMDefaultConfig {
     return [pscustomobject]@{
@@ -48,6 +52,13 @@ function Get-EpicVMDefaultConfig {
         TemplateManifestPath = 'E:\EpicVM\templates\win11-25h2\manifest.json'
         ProvisioningStatePath = 'E:\EpicVM\provisioning-jobs.json'
         GamingVMNames = @('testre')
+        BootstrapUser = 'EpicVMBootstrap'
+        BootstrapCredentialPath = 'C:\ProgramData\EpicVM\agent\bootstrap.dpapi'
+        TailscaleOAuthClientId = ''
+        TailscaleOAuthSecretPath = 'C:\ProgramData\EpicVM\agent\tailscale-oauth.dpapi'
+        TailscaleTailnet = ''
+        TailscaleGuestTag = 'tag:epicvm-guest'
+        TailscaleExecutable = 'C:\Program Files\Tailscale\tailscale.exe'
     }
 }
 
@@ -163,6 +174,9 @@ function New-EpicVMAgentState {
     }
     if (Get-Command -Name New-EpicVMProvisioningStore -ErrorAction SilentlyContinue) {
         $agentState | Add-Member -MemberType NoteProperty -Name Provisioning -Value (New-EpicVMProvisioningStore -Config $Config)
+        if (Get-Command -Name Invoke-EpicVMProvisioningRecovery -ErrorAction SilentlyContinue) {
+            Invoke-EpicVMProvisioningRecovery -State $agentState
+        }
     }
     return $agentState
 }
@@ -181,6 +195,7 @@ function ConvertTo-EpicVMJsonResponse {
         StatusCode = $StatusCode
         Body = $Body
         Json = ($Body | ConvertTo-Json -Depth 16 -Compress)
+        Headers = @{ 'Cache-Control' = 'no-store'; 'Pragma' = 'no-cache' }
     }
 }
 
@@ -232,6 +247,24 @@ function Get-EpicVMProviderCapabilities {
     }
 }
 
+function Add-EpicVMProvisioningInventoryState {
+    param([Parameter(Mandatory)] [object] $State, [Parameter(Mandatory)] [object[]] $Vms)
+    foreach ($vm in $Vms) {
+        $name = [string](Get-EpicVMProperty -Object $vm -Name 'name' -Default '')
+        $job = @($State.Provisioning.Jobs.Values | Where-Object { [string]$_.name -ceq $name } | Sort-Object updatedAt -Descending | Select-Object -First 1)
+        if ($job.Count -eq 0) { continue }
+        if ($vm -is [System.Collections.IDictionary]) {
+            $vm['provisioningState'] = [string]$job[0].state
+            $vm['consoleReady'] = ([string]$job[0].state -ceq 'ready')
+        }
+        else {
+            $vm | Add-Member -MemberType NoteProperty -Name provisioningState -Value ([string]$job[0].state) -Force
+            $vm | Add-Member -MemberType NoteProperty -Name consoleReady -Value ([string]$job[0].state -ceq 'ready') -Force
+        }
+    }
+    return $Vms
+}
+
 function Invoke-EpicVMProviderAction {
     param(
         [Parameter(Mandatory)] [object] $Provider,
@@ -276,13 +309,23 @@ function Invoke-EpicVMApiRequest {
         }
         if ($Method -eq 'GET' -and $segments.Count -eq 2 -and $segments[0] -eq 'v1' -and $segments[1] -eq 'vms') {
             $vms = @(& $State.Provider.GetVMs)
+            if ($null -ne $State.Provisioning) { $vms = @(Add-EpicVMProvisioningInventoryState -State $State -Vms $vms) }
             return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok = $true; vms = $vms })
         }
         if ($null -ne $State.Provisioning -and $Method -eq 'POST' -and $normalizedPath -eq '/v1/provisioning-jobs') {
             $request = Get-EpicVMRequestBody -Body $Body
-            $job = New-EpicVMProvisioningJob -State $State -Request $request
+            try { $job = New-EpicVMProvisioningJob -State $State -Request $request }
+            catch {
+                $code = [string](Get-EpicVMProperty -Object $_.Exception -Name 'ErrorCode' -Default 'invalid_request')
+                $status = [int](Get-EpicVMProperty -Object $_.Exception -Name 'HttpStatus' -Default 422)
+                return ConvertTo-EpicVMJsonResponse -StatusCode $status -Body (New-EpicVMApiError -Code $code -Message ([string]$_.Exception.Message))
+            }
             try { $claim = Start-EpicVMProvisioningJob -State $State -Job $job }
-            catch { return ConvertTo-EpicVMJsonResponse -StatusCode 422 -Body ([ordered]@{ ok=$false; job=(ConvertTo-EpicVMRedactedJob -Job $job) }) }
+            catch {
+                $code = [string](Get-EpicVMProperty -Object $_.Exception -Name 'ErrorCode' -Default 'provisioning_failed')
+                $status = [int](Get-EpicVMProperty -Object $_.Exception -Name 'HttpStatus' -Default 422)
+                return ConvertTo-EpicVMJsonResponse -StatusCode $status -Body ([ordered]@{ ok=$false; error=[ordered]@{code=$code;message='Provisioning failed.'}; job=(ConvertTo-EpicVMRedactedJob -Job $job) })
+            }
             return ConvertTo-EpicVMJsonResponse -StatusCode 202 -Body ([ordered]@{ ok=$true; job=(ConvertTo-EpicVMRedactedJob -Job $job); claimToken=$claim })
         }
         if ($null -ne $State.Provisioning -and $segments.Count -ge 3 -and $segments[0] -eq 'v1' -and $segments[1] -eq 'provisioning-jobs') {
@@ -291,13 +334,18 @@ function Invoke-EpicVMApiRequest {
             if ($Method -eq 'GET') { return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok=$true; job=(ConvertTo-EpicVMRedactedJob -Job $job) }) }
             if ($Method -eq 'POST' -and $segments.Count -eq 4 -and $segments[3] -eq 'claim') {
                 try { Invoke-EpicVMProvisioningClaim -State $State -Job $job -Request (Get-EpicVMRequestBody -Body $Body) }
-                catch { $job.state='failed'; $job.errorCode='claim_failed'; $job.errorMessage='Guest claim could not be completed.'; Save-EpicVMProvisioningStore -Store $State.Provisioning; return ConvertTo-EpicVMJsonResponse -StatusCode 422 -Body ([ordered]@{ ok=$false; job=(ConvertTo-EpicVMRedactedJob -Job $job) }) }
+                catch {
+                    $code = [string](Get-EpicVMProperty -Object $_.Exception -Name 'ErrorCode' -Default 'claim_failed')
+                    $status = [int](Get-EpicVMProperty -Object $_.Exception -Name 'HttpStatus' -Default 422)
+                    if ($job.state -ne 'failed' -and $code -notin @('invalid_claim','invalid_credentials','claim_not_allowed')) { $job.state='failed'; $job.errorCode=$code; $job.errorMessage='Guest claim or readiness verification failed.'; Save-EpicVMProvisioningStore -Store $State.Provisioning }
+                    return ConvertTo-EpicVMJsonResponse -StatusCode $status -Body ([ordered]@{ ok=$false; error=[ordered]@{code=$code;message=if($code -in @('invalid_claim','invalid_credentials','claim_not_allowed')){[string]$_.Exception.Message}else{'Guest claim failed.'}}; job=(ConvertTo-EpicVMRedactedJob -Job $job) })
+                }
                 return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok=$true; job=(ConvertTo-EpicVMRedactedJob -Job $job) })
             }
         }
         if ($null -ne $State.Provisioning -and $Method -eq 'POST' -and $normalizedPath -eq '/v1/deprovisioning-jobs') {
             try { $job=New-EpicVMDeprovisioningJob -State $State -Request (Get-EpicVMRequestBody -Body $Body) }
-            catch { return ConvertTo-EpicVMJsonResponse -StatusCode 422 -Body (New-EpicVMApiError -Code 'teardown_rejected' -Message 'The exact managed VM name and confirmation are required.') }
+            catch { $code=[string](Get-EpicVMProperty -Object $_.Exception -Name 'ErrorCode' -Default 'teardown_rejected');$status=[int](Get-EpicVMProperty -Object $_.Exception -Name 'HttpStatus' -Default 422);return ConvertTo-EpicVMJsonResponse -StatusCode $status -Body (New-EpicVMApiError -Code $code -Message ([string]$_.Exception.Message)) }
             return ConvertTo-EpicVMJsonResponse -StatusCode 202 -Body ([ordered]@{ ok=$true; job=(ConvertTo-EpicVMRedactedJob -Job $job) })
         }
         if ($null -ne $State.Provisioning -and $segments.Count -eq 3 -and $segments[0] -eq 'v1' -and $segments[1] -eq 'deprovisioning-jobs' -and $Method -eq 'GET') {
@@ -350,7 +398,7 @@ function Invoke-EpicVMApiRequest {
         $errorCode = [string](Get-EpicVMProperty -Object $_.Exception -Name 'ErrorCode' -Default 'provider_error')
         $message = [string]$_.Exception.Message
         if ($message -match 'token|authorization|secret|password') { $message = 'The provider request failed.' }
-        $status = if ($errorCode -eq 'NotFound') { 404 } elseif ($errorCode -eq 'InvalidInput') { 400 } elseif ($errorCode -eq 'Conflict') { 409 } elseif ($errorCode -eq 'UnmanagedVM') { 403 } else { 502 }
+        $status = [int](Get-EpicVMProperty -Object $_.Exception -Name 'HttpStatus' -Default (if ($errorCode -eq 'NotFound') { 404 } elseif ($errorCode -eq 'InvalidInput') { 400 } elseif ($errorCode -eq 'Conflict') { 409 } elseif ($errorCode -eq 'UnmanagedVM') { 403 } else { 502 }))
         return ConvertTo-EpicVMJsonResponse -StatusCode $status -Body (New-EpicVMApiError -Code $errorCode.ToLowerInvariant() -Message $message)
     }
 }
@@ -462,6 +510,7 @@ function Start-EpicVMAgent {
                 $context.Response.StatusCode = $response.StatusCode
                 $context.Response.Headers['X-Request-Id'] = $requestId
                 $context.Response.ContentType = 'application/json; charset=utf-8'
+                foreach ($headerName in $response.Headers.Keys) { $context.Response.Headers[$headerName] = [string]$response.Headers[$headerName] }
                 $context.Response.ContentLength64 = $bytes.Length
                 $context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
             }

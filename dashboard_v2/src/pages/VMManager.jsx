@@ -7,6 +7,7 @@ import { useToasts } from '../components/ToastProvider'
 import { instanceNamesKey, pollDelayMs } from '../lib/polling'
 import { canCacheVmSettingsResponse, clearRemovedVmState, createLoadInFlightRunner, createLogSelectionTracker } from '../lib/vmManagerRaces'
 import { canUseRemotePlacement, createPlacementPayload, getEligibleRemoteHosts, getPlacementValidationReason, hostOptionLabel, normalizeHostInventory, remotePlacementDisabledReason } from '../lib/hostPlacement'
+import { canClaimProvisioningJob, canOpenInventoryVm, canOpenProvisionedVm, deprovisioningPayload, provisioningClaimPayload, provisioningProgress } from '../lib/provisioningUi'
 
 function toneFor(status){
   const s = (status || '').toLowerCase()
@@ -46,10 +47,11 @@ function StatMeter({ label, value, tone='cpu' }){
   )
 }
 
-function VmCard({ vm, host, onAction, onDetails, onProfileChange, onManage, profileBusy, busyAction, refreshing }){
+function VmCard({ vm, host, onAction, onDetails, onProfileChange, onManage, onTeardown, profileBusy, busyAction, refreshing }){
   const tone = toneFor(vm.status)
   const profile = vm._profile || vm._optimizer?.profile || 'desktop'
   const isRemote = vm.placement === 'remote'
+  const consoleReady = canOpenInventoryVm(vm)
   const placementLabel = isRemote ? 'RemoteVM' : 'Local VM'
   const hostName = vm.host_name || host?.display_name || (isRemote ? vm.host_id || 'Remote host' : 'EpicVM Server')
   const hostUnavailable = isRemote && host?.online !== true
@@ -102,8 +104,9 @@ function VmCard({ vm, host, onAction, onDetails, onProfileChange, onManage, prof
         <Button disabled={busyAction || hostUnavailable} onClick={()=>onAction('start', vm.name)}>Start</Button>
         <Button disabled={busyAction || hostUnavailable} onClick={()=>onAction('stop', vm.name)}>Stop</Button>
         <Button disabled={busyAction || hostUnavailable} onClick={()=>onAction('restart', vm.name)}>Restart</Button>
-        <Button disabled={busyAction} onClick={()=>onDetails(vm.name)}>Console</Button>
+        <Button disabled={busyAction || !consoleReady} title={consoleReady ? 'Open console' : 'Console is available only after provisioning verification'} onClick={()=>onDetails(vm.name)}>Console</Button>
         <Button disabled={busyAction || hostUnavailable} onClick={()=>onManage(vm.name)}>Manage</Button>
+        {isRemote ? <Button disabled={busyAction || hostUnavailable} onClick={()=>onTeardown(vm.name, vm.host_id)}>Tear down</Button> : null}
       </div>
     </div>
   )
@@ -128,6 +131,12 @@ export default function VMManager(){
   const [invalidatedHostId, setInvalidatedHostId] = useState('')
   const [profileBusy, setProfileBusy] = useState('')
   const [createName, setCreateName] = useState('')
+  const [provisioningProfile, setProvisioningProfile] = useState('standard')
+  const [provisioningJob, setProvisioningJob] = useState(null)
+  const [provisioningHostId, setProvisioningHostId] = useState('')
+  const [provisioningClaimToken, setProvisioningClaimToken] = useState('')
+  const [claimDraft, setClaimDraft] = useState({ username:'', password:'', confirm:'' })
+  const [provisioningBusy, setProvisioningBusy] = useState(false)
   const [createBusy, setCreateBusy] = useState(false)
   const [manageVm, setManageVm] = useState(null)
   const [manageVmHostId, setManageVmHostId] = useState('local')
@@ -431,6 +440,19 @@ export default function VMManager(){
     const payload = createPlacementPayload({ name, placement, hostId: selectedHostId })
     setCreateBusy(true)
     try{
+      if(placement === 'remote'){
+        const res = await apiFetch('/provisioning-jobs', { method:'POST', headers:{'Content-Type':'application/json','Idempotency-Key':crypto.randomUUID()}, body: JSON.stringify({ host_id:selectedHostId, name, profile:provisioningProfile }) })
+        const j = await res.json().catch(()=>({ ok:res.ok }))
+        if(!res.ok || j.ok === false) throw new Error(j.error?.message || j.error || `Failed to start provisioning for ${name}`)
+        setProvisioningJob(j.job || null)
+        setProvisioningHostId(selectedHostId)
+        setProvisioningClaimToken(String(j.claimToken || ''))
+        setClaimDraft({ username:'', password:'', confirm:'' })
+        addToast({ title:'Provisioning started', message:`${name} is moving through the EpicVM setup gates`, type:'success', timeout:6000 })
+        setCreateName('')
+        setCreateBusy(false)
+        return
+      }
       const body = new URLSearchParams(payload)
       const res = await apiFetch('/create', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body })
       const j = await res.json().catch(()=>({ ok:res.ok }))
@@ -442,6 +464,58 @@ export default function VMManager(){
       addToast({ title:'Create failed', message:String(err), type:'error', timeout:8000 })
     }
     setCreateBusy(false)
+  }
+
+  async function refreshProvisioningJob(job = provisioningJob){
+    if(!job?.id || !provisioningHostId) return null
+    const res = await apiFetch(`/provisioning-jobs/${encodeURIComponent(job.id)}?host_id=${encodeURIComponent(provisioningHostId)}`)
+    const body = await res.json().catch(()=>({ ok:res.ok }))
+    if(!res.ok || body.ok === false) throw new Error(body.error?.message || body.error || 'Unable to read provisioning progress')
+    const next = body.job || null
+    setProvisioningJob(next)
+    return next
+  }
+
+  useEffect(()=>{
+    if(!provisioningJob?.id || !provisioningHostId || ['ready','failed'].includes(String(provisioningJob.state || ''))) return undefined
+    let stopped = false
+    const tick = async()=>{
+      try{ if(!stopped) await refreshProvisioningJob() }catch(err){ if(!stopped) addToast({title:'Provisioning status unavailable', message:String(err), type:'error', timeout:7000}) }
+    }
+    const timer = setInterval(tick, 2500)
+    return ()=>{ stopped=true; clearInterval(timer) }
+  }, [provisioningJob?.id, provisioningJob?.state, provisioningHostId])
+
+  async function claimProvisioningJob(e){
+    e?.preventDefault?.()
+    if(!provisioningJob || !canClaimProvisioningJob(provisioningJob) || !provisioningClaimToken) return
+    if(claimDraft.password !== claimDraft.confirm) { addToast({title:'Claim rejected', message:'Passwords do not match.', type:'error', timeout:6000}); return }
+    setProvisioningBusy(true)
+    try{
+      const res = await apiFetch(`/provisioning-jobs/${encodeURIComponent(provisioningJob.id)}/claim`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(provisioningClaimPayload({hostId:provisioningHostId, username:claimDraft.username, password:claimDraft.password, claimToken:provisioningClaimToken})) })
+      const body = await res.json().catch(()=>({ ok:res.ok }))
+      if(!res.ok || body.ok === false) throw new Error(body.error?.message || body.error || 'Guest claim failed')
+      setProvisioningClaimToken('')
+      setClaimDraft({ username:'', password:'', confirm:'' })
+      setProvisioningJob(body.job || provisioningJob)
+      addToast({title:'Guest claimed', message:'Continuing Tailscale, console, and readiness verification.', type:'success', timeout:7000})
+    }catch(err){ addToast({title:'Claim failed', message:String(err), type:'error', timeout:8000}) }
+    finally{ setProvisioningBusy(false) }
+  }
+
+  async function startTeardown(name, hostId){
+    const confirmed = window.prompt(`Tear down ${name}? This stops the VM, revokes its device, removes its console route, and quarantines resources for seven days. Type ${name} to confirm.`)
+    if(confirmed !== name) return
+    setBusyAction(`teardown:${name}`)
+    try{
+      const res = await apiFetch('/deprovisioning-jobs', { method:'POST', headers:{'Content-Type':'application/json','Idempotency-Key':crypto.randomUUID()}, body: JSON.stringify(deprovisioningPayload({hostId, name})) })
+      const body = await res.json().catch(()=>({ok:res.ok}))
+      if(!res.ok || body.ok === false) throw new Error(body.error?.message || body.error || 'Teardown failed')
+      addToast({title:name, message:'Teardown started; route and device revocation are being processed.', type:'success', timeout:7000})
+      if(manageVm === name) setManageVm(null)
+      setTimeout(()=>load({silent:true}), 900)
+    }catch(err){ addToast({title:'Teardown failed', message:String(err), type:'error', timeout:8000}) }
+    finally{ setBusyAction('') }
   }
 
   async function setProfile(name, profile){
@@ -564,6 +638,7 @@ export default function VMManager(){
     setBusyAction(`delete:${name}`)
     try{
       const query = hostId && hostId !== 'local' ? `?host_id=${encodeURIComponent(hostId)}` : ''
+      if(hostId && hostId !== 'local') return startTeardown(name, hostId)
       const res = await apiFetch(`/delete/${encodeURIComponent(name)}${query}`, { method:'POST' })
       const j = await res.json().catch(()=>({ ok:res.ok }))
       if(!res.ok || j.ok === false) throw new Error(j.error || `Failed to delete ${name}`)
@@ -748,6 +823,15 @@ export default function VMManager(){
                 </select>
               </label>
             ) : null}
+            {placement === 'remote' ? (
+              <label className="vm-placement-field">
+                <span>Provisioning profile</span>
+                <select value={provisioningProfile} onChange={e=>setProvisioningProfile(e.target.value)} disabled={createBusy}>
+                  <option value="standard">Standard · 4 vCPU · 8 GB · 96 GB</option>
+                  <option value="gaming">Gaming · 6 vCPU · 12 GB · 128 GB · GPU-P 50%</option>
+                </select>
+              </label>
+            ) : null}
             <Button type="submit" disabled={createBusy || !!placementReason}>{createBusy ? 'Creating…' : 'Create VM'}</Button>
           </div>
           <div className="vm-placement-summary">
@@ -756,6 +840,27 @@ export default function VMManager(){
           </div>
           {!remotePlacementAvailable ? <div className="vm-placement-notice">Remote VM unavailable: No remote hosts connected.</div> : null}
           {placementReason ? <div id="vm-placement-reason" className="vm-placement-error" role="alert">{placementReason}</div> : null}
+          {provisioningJob ? (
+            <div className="vm-placement-notice" style={{marginTop:12}}>
+              <div style={{display:'flex',justifyContent:'space-between',gap:12,flexWrap:'wrap'}}>
+                <strong>Provisioning: {provisioningJob.name}</strong>
+                <span>{provisioningJob.state}</span>
+              </div>
+              <div style={{height:8,background:'rgba(255,255,255,.1)',borderRadius:999,marginTop:10,overflow:'hidden'}}><div style={{height:'100%',width:`${provisioningProgress(provisioningJob)}%`,background:'#22c55e',transition:'width .25s'}} /></div>
+              {canClaimProvisioningJob(provisioningJob) && provisioningClaimToken ? (
+                <form onSubmit={claimProvisioningJob} style={{display:'grid',gap:8,marginTop:12}}>
+                  <strong>One-time guest claim</strong>
+                  <span style={{color:'var(--muted)',fontSize:13}}>Use an administrator username and password for this guest. The claim is single-use and is not shown again.</span>
+                  <input value={claimDraft.username} onChange={e=>setClaimDraft(s=>({...s,username:e.target.value}))} placeholder="Guest admin username" autoComplete="username" required />
+                  <input value={claimDraft.password} onChange={e=>setClaimDraft(s=>({...s,password:e.target.value}))} placeholder="Guest admin password" type="password" autoComplete="new-password" minLength={12} required />
+                  <input value={claimDraft.confirm} onChange={e=>setClaimDraft(s=>({...s,confirm:e.target.value}))} placeholder="Repeat password" type="password" autoComplete="new-password" minLength={12} required />
+                  <Button type="submit" disabled={provisioningBusy}>{provisioningBusy ? 'Claiming…' : 'Claim guest securely'}</Button>
+                </form>
+              ) : null}
+              {canOpenProvisionedVm(provisioningJob) ? <div style={{color:'#86efac',marginTop:10}}>Ready. The VM will appear in the fleet after the next refresh.</div> : null}
+              {provisioningJob.state === 'failed' ? <div role="alert" style={{color:'#fca5a5',marginTop:10}}>Provisioning stopped safely. No console route was exposed.</div> : null}
+            </div>
+          ) : null}
         </form>
 
         <div style={{marginTop:18}}>
@@ -769,7 +874,7 @@ export default function VMManager(){
             <div className="vm-card-grid">
               {instances.map(vm => {
                 const hostId = vm.host_id || 'local'
-                return <VmCard key={`${hostId}:${vm.name}`} vm={vm} host={hostsById[hostId]} onAction={(cmd, name, opts={})=>action(cmd, name, { ...opts, hostId })} onDetails={(name)=>openDetails(name, hostId, vm.url)} onManage={(name)=>openManage(name, hostId)} onProfileChange={setProfile} profileBusy={profileBusy === vm.name} busyAction={!!busyAction} refreshing={refreshing} />
+                return <VmCard key={`${hostId}:${vm.name}`} vm={vm} host={hostsById[hostId]} onAction={(cmd, name, opts={})=>action(cmd, name, { ...opts, hostId })} onDetails={(name)=>openDetails(name, hostId, vm.url)} onManage={(name)=>openManage(name, hostId)} onTeardown={startTeardown} onProfileChange={setProfile} profileBusy={profileBusy === vm.name} busyAction={!!busyAction} refreshing={refreshing} />
               })}
             </div>
           )}

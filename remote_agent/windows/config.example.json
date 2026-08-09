@@ -16,5 +16,12 @@
   "Generation": 2,
   "TemplateManifestPath": "E:\\EpicVM\\templates\\win11-25h2\\manifest.json",
   "ProvisioningStatePath": "E:\\EpicVM\\provisioning-jobs.json",
-  "GamingVMNames": ["testre"]
+  "GamingVMNames": ["testre"],
+  "BootstrapUser": "EpicVMBootstrap",
+  "BootstrapCredentialPath": "C:\\ProgramData\\EpicVM\\agent\\bootstrap.dpapi",
+  "TailscaleOAuthClientId": "",
+  "TailscaleOAuthSecretPath": "C:\\ProgramData\\EpicVM\\agent\\tailscale-oauth.dpapi",
+  "TailscaleTailnet": "",
+  "TailscaleGuestTag": "tag:epicvm-guest",
+  "TailscaleExecutable": "C:\\Program Files\\Tailscale\\tailscale.exe"
 }

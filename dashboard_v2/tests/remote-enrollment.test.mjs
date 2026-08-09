@@ -10,5 +10,8 @@ test('VM manager exposes authenticated RemoteVM token-file enrollment', () => {
   assert.match(source, /token_file/)
   assert.match(source, /RemoteVM host/)
   assert.equal(source.includes('pattern="[a-z0-9][a-z0-9._\\-]{0,62}"'), true)
-  assert.doesNotMatch(source, /set[A-Za-z]*Token\(/)
+  // The one-time provisioning claim may live in React memory while the form
+  // is open, but it must never be persisted in browser storage.
+  assert.doesNotMatch(source, /localStorage\.[^\n]*token/i)
+  assert.doesNotMatch(source, /sessionStorage\.[^\n]*token/i)
 })
