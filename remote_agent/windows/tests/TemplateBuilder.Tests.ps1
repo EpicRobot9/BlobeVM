@@ -64,4 +64,13 @@ Describe 'EpicVM template builder' {
         $builder | Should -Match 'remote session might have ended'
         $builder | Should -Match 'builder_shutdown_timeout'
     }
+
+    It 'bounds guest sanitation and surfaces Sysprep failures immediately' {
+        $builder = Get-Content -LiteralPath (Join-Path $windowsRoot 'TemplateBuilder.ps1') -Raw
+        $builder | Should -Match 'New-PSSessionOption -OperationTimeout 1200000'
+        $builder | Should -Match 'sysprep_failed exit='
+        $builder | Should -Match 'setuperr\.log'
+        $builder | Should -Match 'Remove-AppxPackage -Package \$_.PackageFullName -User \$userSid'
+        $builder | Should -Not -Match 'Get-WinEvent -ListLog \*'
+    }
 }

@@ -54,7 +54,14 @@ function Invoke-EpicVMTemplateGuestScript {
         [AllowNull()][object[]]$ArgumentList=@()
     )
     if ($null -ne $script:GuestInvoker) { return & $script:GuestInvoker $VmName $Credential $Script $ArgumentList }
-    return Invoke-Command -VMName $VmName -Credential $Credential -ScriptBlock $Script -ArgumentList $ArgumentList -ErrorAction Stop
+    $session=$null
+    try {
+        $sessionOption=New-PSSessionOption -OperationTimeout 1200000
+        $session=New-PSSession -VMName $VmName -Credential $Credential -SessionOption $sessionOption -ErrorAction Stop
+        return Invoke-Command -Session $session -ScriptBlock $Script -ArgumentList $ArgumentList -ErrorAction Stop
+    } finally {
+        if($null -ne $session){Remove-PSSession -Session $session -ErrorAction SilentlyContinue}
+    }
 }
 
 function Test-EpicVMPathUnderRoot {
@@ -149,7 +156,17 @@ function Get-EpicVMTemplateGuestSanitizer {
         Set-Acl -LiteralPath $BootstrapPath -AclObject $acl
 
         Get-NetAdapter -ErrorAction SilentlyContinue | Disable-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue
-        Get-LocalUser | Where-Object { $_.Name -notin @($BootstrapName,'Administrator','DefaultAccount','Guest','WDAGUtilityAccount') } | ForEach-Object {
+        $usersToRemove=@(Get-LocalUser | Where-Object { $_.Name -notin @($BootstrapName,'Administrator','DefaultAccount','Guest','WDAGUtilityAccount') })
+        # Updated Store packages tied to a soon-to-be-deleted user make
+        # Sysprep fail with 0x80073cf2. Remove only those users' registrations
+        # on this isolated copy; provisioned apps remain available to clones.
+        foreach($localUser in $usersToRemove){
+            $userSid=[string]$localUser.SID.Value
+            Get-AppxPackage -User $userSid -ErrorAction SilentlyContinue | ForEach-Object {
+                Remove-AppxPackage -Package $_.PackageFullName -User $userSid -Confirm:$false -ErrorAction SilentlyContinue
+            }
+        }
+        $usersToRemove | ForEach-Object {
             Remove-LocalUser -Name $_.Name -ErrorAction SilentlyContinue
         }
         Get-CimInstance Win32_UserProfile | Where-Object { -not $_.Special -and $_.LocalPath -notmatch ('\\' + [regex]::Escape($BootstrapName) + '$') } | ForEach-Object {
@@ -160,9 +177,18 @@ function Get-EpicVMTemplateGuestSanitizer {
         }
         Remove-Item 'C:\ProgramData\Tailscale','C:\Users\*\AppData\Local\Tailscale','C:\Users\*\AppData\Roaming\Tailscale' -Recurse -Force -ErrorAction SilentlyContinue
         Get-Service -Name Tailscale -ErrorAction SilentlyContinue | Stop-Service -Force -ErrorAction SilentlyContinue
-        Get-WinEvent -ListLog * -ErrorAction SilentlyContinue | Where-Object { $_.IsEnabled } | ForEach-Object { Clear-WinEvent -LogName $_.LogName -ErrorAction SilentlyContinue }
+        @('Application','System','Setup','Security') | ForEach-Object { Clear-WinEvent -LogName $_ -ErrorAction SilentlyContinue }
         Remove-Item 'C:\Windows\Panther\*','C:\Windows\Temp\*','C:\Windows\Logs\*' -Recurse -Force -ErrorAction SilentlyContinue
         & "$env:SystemRoot\System32\Sysprep\Sysprep.exe" /generalize /oobe /shutdown /mode:vm
+        $sysprepExitCode=$LASTEXITCODE
+        if($sysprepExitCode -ne 0){
+            $sysprepErrorPath=Join-Path $env:SystemRoot 'System32\Sysprep\Panther\setuperr.log'
+            $sysprepDetails=if(Test-Path -LiteralPath $sysprepErrorPath){
+                ((Get-Content -LiteralPath $sysprepErrorPath -Tail 12 -ErrorAction SilentlyContinue) -join ' ') -replace '[\r\n\x00-\x1f]+',' '
+            }else{'setuperr.log was not created'}
+            if($sysprepDetails.Length -gt 2048){$sysprepDetails=$sysprepDetails.Substring($sysprepDetails.Length-2048)}
+            throw "sysprep_failed exit=$sysprepExitCode details=$sysprepDetails"
+        }
     }
 }
 
