@@ -31,14 +31,23 @@ Describe 'EpicVM template builder' {
         (Get-EpicVMTemplateGuestSanitizer).ToString() | Should -Match 'New-Item -ItemType Directory'
     }
 
-    It 'restarts the source immediately after the independent builder copy' {
+    It 'flattens the active exported disk chain before restarting the source' {
         $builder = Get-Content -LiteralPath (Join-Path $windowsRoot 'TemplateBuilder.ps1') -Raw
-        $copyIndex = $builder.IndexOf('Destination $builderDisk')
-        $restartIndex = $builder.IndexOf('Name=$SourceName; ErrorAction=''Stop''', $copyIndex)
-        $switchIndex = $builder.IndexOf("Get-VMSwitch", $copyIndex)
-        $copyIndex | Should -BeGreaterThan -1
-        $restartIndex | Should -BeGreaterThan $copyIndex
+        $convertIndex = $builder.IndexOf("Name 'Convert-VHD'")
+        $restartIndex = $builder.IndexOf('Name=$SourceName; ErrorAction=''Stop''', $convertIndex)
+        $switchIndex = $builder.IndexOf("Get-VMSwitch", $convertIndex)
+        $convertIndex | Should -BeGreaterThan -1
+        $restartIndex | Should -BeGreaterThan $convertIndex
         $restartIndex | Should -BeLessThan $switchIndex
+        $builder | Should -Match 'SourceLeafName'
+        $builder | Should -Match 'source_flatten_failed'
+    }
+
+    It 'disables builder checkpoints and requires the exact Off state' {
+        $builder = Get-Content -LiteralPath (Join-Path $windowsRoot 'TemplateBuilder.ps1') -Raw
+        $builder | Should -Match 'AutomaticCheckpointsEnabled=\$false'
+        $builder | Should -Match "CheckpointType='Disabled'"
+        $builder | Should -Match "builderState -ieq 'Off'"
     }
 
     It 'accepts only the expected Sysprep shutdown transport signature' {

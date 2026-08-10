@@ -92,13 +92,17 @@ function Protect-EpicVMTemplateBootstrapSecret {
 }
 
 function Get-EpicVMSourceDisk {
-    param([Parameter(Mandatory)][string]$ExportPath)
-    $disks = @(Get-ChildItem -LiteralPath $ExportPath -Recurse -File -Filter '*.vhdx' -ErrorAction Stop | Where-Object { $_.Extension -ieq '.vhdx' })
-    if ($disks.Count -ne 1) { throw (New-EpicVMTemplateError -Code 'source_layout_invalid' -Message 'The exported source must contain exactly one VHDX.') }
-    if (Get-Command Get-VHD -ErrorAction SilentlyContinue) {
-        $vhd = Invoke-EpicVMTemplateCommand -Name 'Get-VHD' -Parameters @{ Path=$disks[0].FullName; ErrorAction='Stop' }
-        if (-not [string]::IsNullOrWhiteSpace([string]$vhd.ParentPath)) { throw (New-EpicVMTemplateError -Code 'differencing_disk_rejected' -Message 'Differencing disks are not valid EpicVM templates.') }
-    }
+    param(
+        [Parameter(Mandatory)][string]$ExportPath,
+        [Parameter(Mandatory)][string]$SourceLeafName
+    )
+    # Export-VM preserves the active checkpoint chain. Select the exact leaf
+    # attached to the source instead of silently falling back to an older base
+    # VHDX, then Convert-VHD will flatten that chain into the independent disk.
+    $disks = @(Get-ChildItem -LiteralPath $ExportPath -Recurse -File -ErrorAction Stop | Where-Object {
+        $_.Name -ieq $SourceLeafName -and $_.Extension -in @('.vhdx','.avhdx')
+    })
+    if ($disks.Count -ne 1) { throw (New-EpicVMTemplateError -Code 'source_layout_invalid' -Message 'The exported source must contain exactly one matching active disk leaf.') }
     return $disks[0].FullName
 }
 
@@ -164,6 +168,11 @@ function Invoke-EpicVMTemplateBuild {
     if ($null -eq $source -or [string]$source.Name -cne $SourceName) { throw (New-EpicVMTemplateError -Code 'source_not_found' -Message 'The exact source VM was not found.') }
     $sourcePath=[string]$source.Path
     if (-not (Test-EpicVMPathUnderRoot -Path $sourcePath -Root $VmRoot)) { throw (New-EpicVMTemplateError -Code 'source_root_gate' -Message 'The source VM is outside the managed VM root.') }
+    $sourceDisks=@(Invoke-EpicVMTemplateCommand -Name 'Get-VMHardDiskDrive' -Parameters @{ VM=$source; ErrorAction='Stop' })
+    if($sourceDisks.Count -ne 1){throw (New-EpicVMTemplateError -Code 'source_layout_invalid' -Message 'The source VM must have exactly one attached disk.')}
+    $sourceDiskPath=[IO.Path]::GetFullPath([string]$sourceDisks[0].Path)
+    if(-not (Test-EpicVMPathUnderRoot -Path $sourceDiskPath -Root $VmRoot)){throw (New-EpicVMTemplateError -Code 'source_disk_root_gate' -Message 'The source disk is outside the managed VM root.')}
+    $sourceDiskLeafName=Split-Path -Leaf $sourceDiskPath
     $builderRoot=Join-Path $WorkRoot ("builder-" + [guid]::NewGuid().ToString('N'))
     $exportRoot=Join-Path $builderRoot 'export'
     $builderDisk=Join-Path $builderRoot 'builder.vhdx'
@@ -176,8 +185,10 @@ function Invoke-EpicVMTemplateBuild {
         New-Item -ItemType Directory -Path $OutputRoot,$exportRoot,$stageRoot -Force | Out-Null
         if ($sourceWasRunning) { Invoke-EpicVMTemplateCommand -Name 'Stop-VM' -Parameters @{ Name=$SourceName; ErrorAction='Stop' } | Out-Null; $sourceStopped=$true }
         Invoke-EpicVMTemplateCommand -Name 'Export-VM' -Parameters @{ Name=$SourceName; Path=$exportRoot; ErrorAction='Stop' } | Out-Null
-        $exportedDisk=Get-EpicVMSourceDisk -ExportPath $exportRoot
-        Copy-Item -LiteralPath $exportedDisk -Destination $builderDisk -Force -ErrorAction Stop
+        $exportedDisk=Get-EpicVMSourceDisk -ExportPath $exportRoot -SourceLeafName $sourceDiskLeafName
+        Invoke-EpicVMTemplateCommand -Name 'Convert-VHD' -Parameters @{ Path=$exportedDisk; DestinationPath=$builderDisk; VHDType='Dynamic'; ErrorAction='Stop' } | Out-Null
+        $flattenedDisk=Invoke-EpicVMTemplateCommand -Name 'Get-VHD' -Parameters @{ Path=$builderDisk; ErrorAction='Stop' }
+        if(-not [string]::IsNullOrWhiteSpace([string]$flattenedDisk.ParentPath)){throw (New-EpicVMTemplateError -Code 'source_flatten_failed' -Message 'The independent builder disk still has a parent after conversion.')}
         # The independent builder disk now exists.  Bring the source back
         # immediately; all sanitation and Sysprep work continues on the copy.
         if($sourceStopped -and $sourceWasRunning){
@@ -190,7 +201,7 @@ function Invoke-EpicVMTemplateBuild {
         elseif ([string]$switch.SwitchType -ine 'Private') { throw (New-EpicVMTemplateError -Code 'network_isolation_gate' -Message 'The template switch is not Private.') }
         Invoke-EpicVMTemplateCommand -Name 'New-VM' -Parameters @{ Name=$BuilderName; MemoryStartupBytes=8589934592; Generation=2; VHDPath=$builderDisk; Path=$builderRoot; SwitchName=$PrivateSwitch; ErrorAction='Stop' } | Out-Null
         $builderCreated=$true
-        Invoke-EpicVMTemplateCommand -Name 'Set-VM' -Parameters @{ Name=$BuilderName; Notes='EpicVM-TemplateBuilder: true'; AutomaticStopAction='ShutDown'; ErrorAction='Stop' } | Out-Null
+        Invoke-EpicVMTemplateCommand -Name 'Set-VM' -Parameters @{ Name=$BuilderName; Notes='EpicVM-TemplateBuilder: true'; AutomaticStopAction='ShutDown'; AutomaticCheckpointsEnabled=$false; CheckpointType='Disabled'; ErrorAction='Stop' } | Out-Null
         Invoke-EpicVMTemplateCommand -Name 'Start-VM' -Parameters @{ Name=$BuilderName; ErrorAction='Stop' } | Out-Null
         $sanitizer=Get-EpicVMTemplateGuestSanitizer
         $bootstrapBstr=[IntPtr]::Zero
@@ -215,11 +226,12 @@ function Invoke-EpicVMTemplateBuild {
         # machine DPAPI; the value is never placed in the manifest or logs.
         Protect-EpicVMTemplateBootstrapSecret -Credential $BootstrapSecret -Path $BootstrapPath
         $shutdownDeadline=[DateTime]::UtcNow.AddSeconds([Math]::Max(60,$BuilderShutdownTimeoutSeconds))
-        do {
-            Start-Sleep -Milliseconds 250
+        while($true) {
             $builderState=(Invoke-EpicVMTemplateCommand -Name 'Get-VM' -Parameters @{ Name=$BuilderName; ErrorAction='Stop' }).State
+            if([string]$builderState -ieq 'Off'){break}
             if([DateTime]::UtcNow -gt $shutdownDeadline){throw (New-EpicVMTemplateError -Code 'builder_shutdown_timeout' -Message 'The template builder did not shut down after Sysprep.')}
-        } while ([string]$builderState -ieq 'Running')
+            Start-Sleep -Milliseconds 250
+        }
         Copy-Item -LiteralPath $builderDisk -Destination (Join-Path $stageRoot 'win11-25h2.vhdx') -Force -ErrorAction Stop
         $imagePath=Join-Path $stageRoot 'win11-25h2.vhdx'
         $hash=(Get-FileHash -LiteralPath $imagePath -Algorithm SHA256).Hash.ToLowerInvariant()
