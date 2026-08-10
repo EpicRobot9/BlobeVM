@@ -70,6 +70,8 @@ Describe 'EpicVM template builder' {
         $builder | Should -Match 'Invoke-Command -VMName \$VmName.*-AsJob'
         $builder | Should -Match 'Wait-Job -Job \$guestJob -Timeout 1200'
         $builder | Should -Match 'guest_sanitation_timeout'
+        $builder | Should -Match 'Start-Process -FilePath .*Sysprep\.exe.*-Wait -PassThru'
+        $builder | Should -Match 'BuilderShutdownTimeoutSeconds = 300'
         $builder | Should -Match 'sysprep_failed exit='
         $builder | Should -Match 'setuperr\.log'
         $builder | Should -Match 'Remove-AppxPackage -Package \$_.PackageFullName -User \$userSid'

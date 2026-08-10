@@ -21,7 +21,7 @@ param(
     [string] $BuilderVmName = 'EpicVM-TemplateBuilder',
     [string] $BootstrapUser = 'EpicVMBootstrap',
     [string] $BootstrapCredentialPath = 'C:\ProgramData\EpicVM\agent\bootstrap.dpapi',
-    [int] $BuilderShutdownTimeoutSeconds = 1800,
+    [int] $BuilderShutdownTimeoutSeconds = 300,
     [PSCredential] $GuestCredential,
     [PSCredential] $BootstrapCredential,
     [scriptblock] $CommandInvoker = $null,
@@ -183,8 +183,8 @@ function Get-EpicVMTemplateGuestSanitizer {
         Get-Service -Name Tailscale -ErrorAction SilentlyContinue | Stop-Service -Force -ErrorAction SilentlyContinue
         @('Application','System','Setup','Security') | ForEach-Object { Clear-WinEvent -LogName $_ -ErrorAction SilentlyContinue }
         Remove-Item 'C:\Windows\Panther\*','C:\Windows\Temp\*','C:\Windows\Logs\*' -Recurse -Force -ErrorAction SilentlyContinue
-        & "$env:SystemRoot\System32\Sysprep\Sysprep.exe" /generalize /oobe /shutdown /mode:vm
-        $sysprepExitCode=$LASTEXITCODE
+        $sysprepProcess=Start-Process -FilePath "$env:SystemRoot\System32\Sysprep\Sysprep.exe" -ArgumentList @('/generalize','/oobe','/shutdown','/mode:vm') -Wait -PassThru -WindowStyle Hidden
+        $sysprepExitCode=$sysprepProcess.ExitCode
         if($sysprepExitCode -ne 0){
             $sysprepErrorPath=Join-Path $env:SystemRoot 'System32\Sysprep\Panther\setuperr.log'
             $sysprepDetails=if(Test-Path -LiteralPath $sysprepErrorPath){
