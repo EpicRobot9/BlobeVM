@@ -78,13 +78,31 @@ function Protect-EpicVMTemplateBootstrapSecret {
         } finally { [Array]::Clear($bytes,0,$bytes.Length) }
         $parent = Split-Path -Parent $Path
         if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
-        [IO.File]::WriteAllBytes($Path,$protected)
-        $acl = Get-Acl -LiteralPath $Path
-        $acl.SetAccessRuleProtection($true,$false)
-        @($acl.Access) | ForEach-Object { $acl.RemoveAccessRule($_) | Out-Null }
-        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new('SYSTEM','Read','Allow'))
-        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new('Administrators','Read','Allow'))
-        Set-Acl -LiteralPath $Path -AclObject $acl
+        # The installed blob is deliberately read-only to Administrators. A
+        # retry therefore cannot rewrite it in place. Build and ACL a sibling
+        # file first, then replace the old blob atomically through the secured
+        # parent directory without ever persisting plaintext.
+        if(Test-Path -LiteralPath $Path){
+            # Migrate blobs produced by the older read-only ACL. No secret is
+            # passed to either tool; only the fixed local path is involved.
+            & "$env:SystemRoot\System32\takeown.exe" /F $Path /A | Out-Null
+            if($LASTEXITCODE -ne 0){throw 'Unable to take ownership of the legacy protected bootstrap blob.'}
+            & "$env:SystemRoot\System32\icacls.exe" $Path /inheritance:r /grant:r '*S-1-5-18:(F)' '*S-1-5-32-544:(F)' | Out-Null
+            if($LASTEXITCODE -ne 0){throw 'Unable to migrate the ACL on the legacy protected bootstrap blob.'}
+        }
+        $temporaryPath=Join-Path $parent ('.bootstrap-' + [guid]::NewGuid().ToString('N') + '.tmp')
+        try {
+            [IO.File]::WriteAllBytes($temporaryPath,$protected)
+            $acl = Get-Acl -LiteralPath $temporaryPath
+            $acl.SetAccessRuleProtection($true,$false)
+            @($acl.Access) | ForEach-Object { $acl.RemoveAccessRule($_) | Out-Null }
+            $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new('SYSTEM','FullControl','Allow'))
+            $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new('Administrators','FullControl','Allow'))
+            Set-Acl -LiteralPath $temporaryPath -AclObject $acl
+            Move-Item -LiteralPath $temporaryPath -Destination $Path -Force -ErrorAction Stop
+        } finally {
+            if(Test-Path -LiteralPath $temporaryPath){Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue}
+        }
     } finally {
         if ($bstr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
         $plain = $null

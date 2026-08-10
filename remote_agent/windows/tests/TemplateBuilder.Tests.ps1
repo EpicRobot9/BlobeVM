@@ -31,6 +31,15 @@ Describe 'EpicVM template builder' {
         (Get-EpicVMTemplateGuestSanitizer).ToString() | Should -Match 'New-Item -ItemType Directory'
     }
 
+    It 'rotates the machine-protected bootstrap blob atomically on retry' {
+        $builder = Get-Content -LiteralPath (Join-Path $windowsRoot 'TemplateBuilder.ps1') -Raw
+        $builder | Should -Match "\.bootstrap-"
+        $builder | Should -Match 'Move-Item -LiteralPath \$temporaryPath -Destination \$Path -Force'
+        $builder | Should -Not -Match 'WriteAllBytes\(\$Path,\$protected\)'
+        $builder | Should -Match 'takeown\.exe'
+        $builder | Should -Match "Administrators','FullControl'"
+    }
+
     It 'flattens the active exported disk chain before restarting the source' {
         $builder = Get-Content -LiteralPath (Join-Path $windowsRoot 'TemplateBuilder.ps1') -Raw
         $convertIndex = $builder.IndexOf("Name 'Convert-VHD'")
