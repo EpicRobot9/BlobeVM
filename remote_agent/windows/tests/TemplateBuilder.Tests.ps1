@@ -40,4 +40,10 @@ Describe 'EpicVM template builder' {
         $restartIndex | Should -BeGreaterThan $copyIndex
         $restartIndex | Should -BeLessThan $switchIndex
     }
+
+    It 'accepts only the expected Sysprep shutdown transport signature' {
+        $builder = Get-Content -LiteralPath (Join-Path $windowsRoot 'TemplateBuilder.ps1') -Raw
+        $builder | Should -Match 'remote session might have ended'
+        $builder | Should -Match 'builder_shutdown_timeout'
+    }
 }

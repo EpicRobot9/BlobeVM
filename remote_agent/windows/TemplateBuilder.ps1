@@ -197,7 +197,15 @@ function Invoke-EpicVMTemplateBuild {
         try {
             $bootstrapBstr=[Runtime.InteropServices.Marshal]::SecureStringToBSTR($BootstrapSecret.Password)
             $bootstrapPlain=[Runtime.InteropServices.Marshal]::PtrToStringBSTR($bootstrapBstr)
-            Invoke-EpicVMTemplateGuestScript -VmName $BuilderName -Credential $SourceCredential -Script $sanitizer -ArgumentList @($BootstrapName,$bootstrapPlain,$BootstrapPath) | Out-Null
+            try {
+                Invoke-EpicVMTemplateGuestScript -VmName $BuilderName -Credential $SourceCredential -Script $sanitizer -ArgumentList @($BootstrapName,$bootstrapPlain,$BootstrapPath) | Out-Null
+            }
+            catch {
+                # Sysprep /shutdown can sever PowerShell Direct before the
+                # remoting layer returns.  Accept only that exact transport
+                # signature; the bounded VM-Off gate below must still pass.
+                if($_.Exception.Message -notmatch '(?i)remote session might have ended') { throw }
+            }
         } finally {
             if($bootstrapBstr -ne [IntPtr]::Zero){[Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bootstrapBstr)}
             $bootstrapPlain=$null
