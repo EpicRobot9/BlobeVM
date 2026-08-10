@@ -54,13 +54,17 @@ function Invoke-EpicVMTemplateGuestScript {
         [AllowNull()][object[]]$ArgumentList=@()
     )
     if ($null -ne $script:GuestInvoker) { return & $script:GuestInvoker $VmName $Credential $Script $ArgumentList }
-    $session=$null
+    $guestJob=$null
     try {
-        $sessionOption=New-PSSessionOption -OperationTimeout 1200000
-        $session=New-PSSession -VMName $VmName -Credential $Credential -SessionOption $sessionOption -ErrorAction Stop
-        return Invoke-Command -Session $session -ScriptBlock $Script -ArgumentList $ArgumentList -ErrorAction Stop
+        $guestJob=Invoke-Command -VMName $VmName -Credential $Credential -ScriptBlock $Script -ArgumentList $ArgumentList -AsJob -ErrorAction Stop
+        $completedJob=Wait-Job -Job $guestJob -Timeout 1200
+        if($null -eq $completedJob){
+            Stop-Job -Job $guestJob -ErrorAction SilentlyContinue
+            throw (New-EpicVMTemplateError -Code 'guest_sanitation_timeout' -Message 'Template guest sanitation exceeded 20 minutes.')
+        }
+        return Receive-Job -Job $guestJob -ErrorAction Stop
     } finally {
-        if($null -ne $session){Remove-PSSession -Session $session -ErrorAction SilentlyContinue}
+        if($null -ne $guestJob){Remove-Job -Job $guestJob -Force -ErrorAction SilentlyContinue}
     }
 }
 
