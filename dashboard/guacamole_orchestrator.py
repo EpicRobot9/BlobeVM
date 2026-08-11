@@ -201,7 +201,7 @@ class GuacamoleOrchestrator:
             "expires": int((time.time() + max(5, min(int(ttl_seconds), 60))) * 1000),
             "connections": {safe: {"protocol": "rdp", "parameters": {
                 "hostname": guest_ip, "port": "3389", "security": "nla", "ignore-cert": "true",
-                "username": credentials["username"], "password": credentials["password"],
+                "username": credentials["username"], "password": credentials["password"], "domain": ".",
             }}},
         }, separators=(",", ":")).encode("utf-8")
         key = self._json_auth_key(safe)

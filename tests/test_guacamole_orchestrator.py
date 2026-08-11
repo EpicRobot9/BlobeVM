@@ -82,6 +82,7 @@ def test_short_lived_json_auth_payload_contains_connection_only_after_decryption
     assert signed[:32] == __import__('hmac').new(key, payload, hashlib.sha256).digest()
     decoded = json.loads(payload)
     assert decoded['connections']['alpha']['parameters']['password'] == 'transient-password'
+    assert decoded['connections']['alpha']['parameters']['domain'] == '.'
     assert decoded['expires'] > 0
 
 
