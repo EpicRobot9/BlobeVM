@@ -227,7 +227,11 @@ def test_admin_can_enable_and_launch_automatic_console_without_password_reflecti
     )
     assert setup.status_code == 200
     assert 'transient-password' not in setup.get_data(as_text=True)
-    launch = client.get('/dashboard/console/alpha/')
+    assert setup.get_json()['launchUrl'] == '/dashboard/console/alpha/launch'
+    entry = client.get('/dashboard/console/alpha/')
+    assert entry.status_code == 302
+    assert entry.headers['Location'] == '/dashboard/console/alpha/setup'
+    launch = client.get('/dashboard/console/alpha/launch')
     assert launch.status_code == 200
     body = launch.get_data(as_text=True)
     assert 'localStorage.removeItem("GUAC_AUTH_TOKEN")' in body

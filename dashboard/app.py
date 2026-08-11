@@ -2286,6 +2286,15 @@ def dashboard_vm_forward_auth(name):
 
 
 @app.get('/dashboard/console/<name>/')
+@admin_auth_required
+def dashboard_console_entry(name):
+    safe = str(name or '').strip().lower()
+    if not re.fullmatch(r'[a-z0-9][a-z0-9._-]{0,62}', safe):
+        return Response('Invalid VM name.', 400)
+    return redirect(f'/dashboard/console/{url_quote(safe, safe="")}/setup')
+
+
+@app.get('/dashboard/console/<name>/launch')
 def dashboard_console_launch(name):
     denied = _enforce_vm_user_access(name)
     if denied is not None:
@@ -2346,7 +2355,7 @@ def dashboard_console_credentials(name):
     password = str(payload.get('password') or '')
     try:
         _console_orchestrator().enable_auto_login(name=name, username=username, password=password)
-        response = jsonify({'ok': True, 'launchUrl': f'/dashboard/console/{url_quote(str(name).lower(), safe="")}/'})
+        response = jsonify({'ok': True, 'launchUrl': f'/dashboard/console/{url_quote(str(name).lower(), safe="")}/launch'})
         response.headers['Cache-Control'] = 'no-store'
         return response
     except ConsoleOrchestrationError as exc:
