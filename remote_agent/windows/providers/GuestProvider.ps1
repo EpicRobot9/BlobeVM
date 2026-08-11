@@ -62,7 +62,7 @@ function Get-EpicVMGuestConfigurationScript {
         param($DesiredUser,$DesiredPassword,$BootstrapUser,$BootstrapCredentialPath)
         $ErrorActionPreference='Stop'
         if($DesiredUser -notmatch '^[A-Za-z][A-Za-z0-9._-]{2,31}$'){throw 'Invalid desired user.'}
-        if([string]::IsNullOrEmpty([string]$DesiredPassword) -or $DesiredPassword.Length -lt 12){throw 'Invalid desired password.'}
+        if([string]::IsNullOrEmpty([string]$DesiredPassword)){throw 'Invalid desired password.'}
         $secure=ConvertTo-SecureString $DesiredPassword -AsPlainText -Force
         $user=Get-LocalUser -Name $DesiredUser -ErrorAction SilentlyContinue
         if($null -eq $user){New-LocalUser -Name $DesiredUser -Password $secure -AccountNeverExpires -PasswordNeverExpires -UserMayNotChangePassword|Out-Null}

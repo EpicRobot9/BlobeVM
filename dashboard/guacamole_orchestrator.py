@@ -62,7 +62,7 @@ def derive_guacamole_verifier(username: str, password: str, *, salt: bytes | Non
         raise ConsoleOrchestrationError("Invalid console username.", status=400, code="invalid_username")
     if user.casefold() == "guacadmin":
         raise ConsoleOrchestrationError("The reserved Guacamole administrator name cannot be used.", status=400, code="reserved_username")
-    if not password or len(password) < 12:
+    if not password:
         raise ConsoleOrchestrationError("Console password policy rejected the claim.", status=400, code="invalid_password")
     salt = salt if salt is not None else secrets.token_bytes(32)
     # Guacamole hashes the UTF-8 password followed by the raw 32-byte salt.

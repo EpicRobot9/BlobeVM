@@ -409,7 +409,7 @@ function Invoke-EpicVMProvisioningClaim {
     }
     $username = [string](Get-EpicVMProperty -Object $Request -Name 'username' -Default '')
     $password = [string](Get-EpicVMProperty -Object $Request -Name 'password' -Default '')
-    if ($username -notmatch '^[A-Za-z][A-Za-z0-9._-]{2,31}$' -or $password.Length -lt 12) {
+    if ($username -notmatch '^[A-Za-z][A-Za-z0-9._-]{2,31}$' -or [string]::IsNullOrEmpty($password)) {
         throw (New-EpicVMProvisioningError -Code 'invalid_credentials' -Message 'The claim credentials do not meet policy.' -Status 400)
     }
     $configure = Get-EpicVMProperty -Object $State.Provider -Name 'ConfigureGuest' -Default $null
