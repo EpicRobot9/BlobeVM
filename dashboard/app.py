@@ -2301,14 +2301,23 @@ def dashboard_console_launch(name):
             return Response('Automatic console login must be configured by an administrator.', 409)
         data = orchestrator.build_json_auth_data(safe)
         client_id = base64.urlsafe_b64encode(f'{safe}\0c\0json'.encode('utf-8')).decode('ascii').rstrip('=')
-        target = f'/vm/{url_quote(safe, safe="")}/?data={url_quote(data, safe="")}#/client/{client_id}'
-        # Guacamole ignores fresh JSON authentication data while an older
-        # GUAC_AUTH session remains in browser storage.  That leaves reconnects
-        # pointing at an expired ephemeral JSON connection.  Clear only the
-        # Guacamole token before launching the newly signed connection.
+        prefix = f'/vm/{url_quote(safe, safe="")}'
+        token_endpoint = f'{prefix}/api/tokens'
+        target = f'{prefix}/#/client/{client_id}'
+        # Exchange the short-lived JSON assertion before navigation, then keep
+        # it out of browser history.  Guacamole's resulting session token is
+        # sufficient for ordinary refreshes of the clean client URL.
         response = Response(
             '<!doctype html><meta charset="utf-8"><title>Opening console</title>'
-            f'<script>localStorage.removeItem("GUAC_AUTH_TOKEN");sessionStorage.removeItem("GUAC_AUTH_TOKEN");location.replace({json.dumps(target)});</script>',
+            '<body style="background:#000;color:#ddd;font:16px system-ui">Opening secure console…'
+            '<script>(async()=>{'
+            'localStorage.removeItem("GUAC_AUTH_TOKEN");sessionStorage.removeItem("GUAC_AUTH_TOKEN");'
+            f'const body=new URLSearchParams({{data:{json.dumps(data)}}});'
+            f'const response=await fetch({json.dumps(token_endpoint)},{{method:"POST",headers:{{"Content-Type":"application/x-www-form-urlencoded"}},body}});'
+            'const result=await response.json();if(!response.ok||!result.authToken)throw new Error("authentication failed");'
+            'localStorage.setItem("GUAC_AUTH_TOKEN",result.authToken);'
+            f'location.replace({json.dumps(target)});'
+            '})().catch(()=>{document.body.textContent="Secure console authentication failed. Return to EpicVM and try again."});</script>',
             mimetype='text/html',
         )
         response.headers['Cache-Control'] = 'no-store'

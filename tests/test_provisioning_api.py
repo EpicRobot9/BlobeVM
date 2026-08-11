@@ -232,5 +232,8 @@ def test_admin_can_enable_and_launch_automatic_console_without_password_reflecti
     body = launch.get_data(as_text=True)
     assert 'localStorage.removeItem("GUAC_AUTH_TOKEN")' in body
     assert 'sessionStorage.removeItem("GUAC_AUTH_TOKEN")' in body
-    assert 'data=encrypted-data' in body
+    assert 'new URLSearchParams({data:"encrypted-data"})' in body
+    assert '/vm/alpha/api/tokens' in body
+    assert 'localStorage.setItem("GUAC_AUTH_TOKEN",result.authToken)' in body
+    assert '/vm/alpha/?data=' not in body
     assert launch.headers['Cache-Control'] == 'no-store'
