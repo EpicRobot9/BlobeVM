@@ -132,15 +132,13 @@ class GuacamoleOrchestrator:
         self.auth_status_probe = auth_status_probe or self._public_auth_rejected
         self.command_runner = command_runner or subprocess.run
 
-    def _routing_config(self) -> tuple[str, str, str, int]:
-        if not re.fullmatch(r"[a-z0-9.-]+", self.public_host) or not self.tls_resolver or not self.auth_middleware or not self.router_priority.isdigit():
+    def _routing_config(self) -> tuple[str, str, int]:
+        if not re.fullmatch(r"[a-z0-9.-]+", self.public_host) or not self.tls_resolver or not self.router_priority.isdigit():
             raise ConsoleOrchestrationError("Verified Traefik routing configuration is unavailable.", status=503, code="routing_config_required")
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+(?:@[A-Za-z0-9_.-]+)?", self.auth_middleware):
-            raise ConsoleOrchestrationError("The Traefik authentication middleware is invalid.", status=503, code="routing_config_invalid")
         priority = int(self.router_priority)
         if priority < 1 or priority > 100000:
             raise ConsoleOrchestrationError("The Traefik router priority is invalid.", status=503, code="routing_config_invalid")
-        return self.public_host, self.tls_resolver, self.auth_middleware, priority
+        return self.public_host, self.tls_resolver, priority
 
     def _disk_ready(self) -> bool:
         candidate = self.root
@@ -172,8 +170,7 @@ class GuacamoleOrchestrator:
             raise ConsoleOrchestrationError("Traefik route ownership could not be verified.", status=503, code="route_probe_failed") from exc
 
     def _routing_available(self) -> bool:
-        _, tls_resolver, auth_middleware, _ = self._routing_config()
-        middleware_name = auth_middleware.split("@", 1)[0]
+        _, tls_resolver, _ = self._routing_config()
         try:
             self.command_runner(["docker", "network", "inspect", self.proxy_network], check=True, capture_output=True, text=True)
             listed = self.command_runner(["docker", "ps", "-q"], check=True, capture_output=True, text=True)
@@ -186,15 +183,13 @@ class GuacamoleOrchestrator:
                 (((record or {}).get("Config") or {}).get("Labels") or {})
                 for record in records
             ]
-            middleware_prefix = f"traefik.http.middlewares.{middleware_name}."
-            middleware_defined = any(any(str(key).startswith(middleware_prefix) for key in item) for item in labels)
-            middleware_reused = any(any(
-                str(key).endswith(".middlewares") and auth_middleware in [part.strip() for part in str(value).split(",")]
-                for key, value in item.items()
-            ) for item in labels)
-            middleware_ok = middleware_defined or middleware_reused
+            dashboard_ok = any(
+                str((record or {}).get("Name") or "").lstrip("/") == "blobedash"
+                and self.proxy_network in (((record or {}).get("NetworkSettings") or {}).get("Networks") or {})
+                for record in records
+            )
             resolver_ok = any(any(str(key).endswith(".tls.certresolver") and str(value) == tls_resolver for key, value in item.items()) for item in labels)
-            return middleware_ok and resolver_ok
+            return dashboard_ok and resolver_ok
         except (OSError, subprocess.SubprocessError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ConsoleOrchestrationError("Traefik authentication and TLS ownership could not be verified.", status=503, code="routing_probe_failed") from exc
 
@@ -233,11 +228,12 @@ class GuacamoleOrchestrator:
     def build_compose(self, *, name: str, guest_ip: str) -> str:
         safe = validate_vm_name(name)
         connection = build_rdp_connection(guest_ip=guest_ip)
-        public_host, tls_resolver, auth_middleware, router_priority = self._routing_config()
+        public_host, tls_resolver, router_priority = self._routing_config()
         guac_image = self._image("guacamole")
         guacd_image = self._image("guacd")
         postgres_image = self._image("postgres")
         db_name = f"epicvm_{safe.replace('-', '_').replace('.', '_')}"
+        auth_middleware = f"epicvm-{safe}-portal-auth"
         labels = {
             "traefik.enable": "true",
             "com.blobevm.managed": "1",
@@ -251,6 +247,8 @@ class GuacamoleOrchestrator:
             f"traefik.http.routers.epicvm-{safe}.priority": str(router_priority),
             f"traefik.http.routers.epicvm-{safe}.service": f"epicvm-{safe}",
             f"traefik.http.routers.epicvm-{safe}.middlewares": f"{auth_middleware},epicvm-{safe}-strip",
+            f"traefik.http.middlewares.{auth_middleware}.forwardauth.address": f"http://blobedash:5000/dashboard/auth/vm/{safe}",
+            f"traefik.http.middlewares.{auth_middleware}.forwardauth.trustForwardHeader": "true",
             f"traefik.http.middlewares.epicvm-{safe}-strip.stripprefix.prefixes": f"/vm/{safe}",
             f"traefik.http.services.epicvm-{safe}.loadbalancer.server.port": "8080",
         }

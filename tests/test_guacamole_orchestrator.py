@@ -47,7 +47,9 @@ def test_plan_is_digest_pinned_and_keeps_rdp_credentials_tokenized(tmp_path):
     assert 'transient-password' not in plan.compose
     assert plan.verifier['password_hash']
     assert 'Host(`techexplore.us`)' in plan.compose
-    assert 'epic-root-auth@docker' in plan.compose
+    assert 'epicvm-alpha-portal-auth' in plan.compose
+    assert 'http://blobedash:5000/dashboard/auth/vm/alpha' in plan.compose
+    assert 'epic-root-auth@docker' not in plan.compose
 
 
 def test_verifier_uses_guacamole_password_then_salt_order():
@@ -128,8 +130,8 @@ def test_teardown_rejects_a_bundle_without_exact_epicvm_ownership(tmp_path):
     assert exc.value.code == 'ownership_required'
 
 
-def test_routing_probe_accepts_only_an_actively_reused_auth_middleware_and_resolver(tmp_path):
-    records = [{"Config": {"Labels": {
+def test_routing_probe_requires_dashboard_on_proxy_and_resolver(tmp_path):
+    records = [{"Name": "/blobedash", "NetworkSettings": {"Networks": {"proxy": {}}}, "Config": {"Labels": {
         "traefik.http.routers.known.middlewares": "epic-root-auth@file,known-strip",
         "traefik.http.routers.known.tls.certresolver": "letsencrypt",
     }}}]
@@ -141,5 +143,5 @@ def test_routing_probe_accepts_only_an_actively_reused_auth_middleware_and_resol
         return SimpleNamespace(stdout='', returncode=0)
     orch = make_orchestrator(tmp_path, command_runner=runner, auth_middleware='epic-root-auth@file')
     assert orch._routing_available() is True
-    records[0]['Config']['Labels'].pop('traefik.http.routers.known.middlewares')
+    records[0]['NetworkSettings']['Networks'].pop('proxy')
     assert orch._routing_available() is False
