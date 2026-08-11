@@ -2308,7 +2308,7 @@ def dashboard_console_launch(name):
         # Guacamole token before launching the newly signed connection.
         response = Response(
             '<!doctype html><meta charset="utf-8"><title>Opening console</title>'
-            f'<script>localStorage.removeItem("GUAC_AUTH");sessionStorage.removeItem("GUAC_AUTH");location.replace({json.dumps(target)});</script>',
+            f'<script>localStorage.removeItem("GUAC_AUTH_TOKEN");sessionStorage.removeItem("GUAC_AUTH_TOKEN");location.replace({json.dumps(target)});</script>',
             mimetype='text/html',
         )
         response.headers['Cache-Control'] = 'no-store'
