@@ -579,7 +579,11 @@ export default function VMManager(){
     logRequestSequenceRef.current += 1
     setSelected(name)
     setSelectedVmHostId(hostId || 'local')
-    setSelectedVmUrl(hostId && hostId !== 'local' ? `/dashboard/console/${encodeURIComponent(name)}/` : (vmUrl || ''))
+    // Force a new launcher request on every open. Guacamole logout leaves the
+    // iframe on its login page, and reusing the same src can preserve that
+    // document instead of running EpicVM's short-lived SSO exchange again.
+    const launcherUrl = `/dashboard/console/${encodeURIComponent(name)}/?launch=${Date.now()}`
+    setSelectedVmUrl(hostId && hostId !== 'local' ? launcherUrl : (vmUrl || ''))
     await apiFetch(`/optimizer/activity/${encodeURIComponent(name)}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ source:'details-open' }) }).catch(()=>null)
     await fetchLogs(name, hostId)
   }
@@ -929,7 +933,7 @@ export default function VMManager(){
         </div>
       </div>
 
-      <Modal open={!!selected} title={`VM: ${selected}`} onClose={()=>setSelected(null)} width={1180}>
+      <Modal open={!!selected} title={`VM: ${selected}`} onClose={()=>{ setSelected(null); setSelectedVmUrl('') }} width={1180}>
         <div style={{display:'flex',gap:12, flexWrap:'wrap'}}>
           <div style={{flex:'1 1 620px'}}>
             <iframe title={`VM ${selected}`} src={selectedVmUrl || `/dashboard/vm/${encodeURIComponent(selected)}/`} style={{width:'100%',height:360,border:'1px solid rgba(255,255,255,0.04)', background:'#020617'}} />
