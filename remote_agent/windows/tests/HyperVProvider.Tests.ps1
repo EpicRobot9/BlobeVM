@@ -109,6 +109,20 @@ Describe 'Hyper-V provider capabilities' {
         $capabilities.resources.logicalProcessorCount | Should -Be 16
         $capabilities.resources.memoryCapacityBytes | Should -Be 68719476736
     }
+
+    It 'projects allowlisted Tailscale configuration onto the enrollment provider' {
+        $provider = New-EpicVMHyperVProvider -Config @{
+            TailscaleOAuthClientId='client-id'
+            TailscaleOAuthSecretPath='C:\ProgramData\EpicVM\agent\tailscale-oauth.dpapi'
+            TailscaleTailnet='example.ts.net'
+            TailscaleGuestTag='tag:epicvm-guest'
+        } -CommandInvoker ${function:Invoke-MockHyperVCmdlet}
+
+        $provider.TailscaleOAuthClientId | Should -Be 'client-id'
+        $provider.TailscaleOAuthSecretPath | Should -Be 'C:\ProgramData\EpicVM\agent\tailscale-oauth.dpapi'
+        $provider.TailscaleTailnet | Should -Be 'example.ts.net'
+        $provider.TailscaleGuestTag | Should -Be 'tag:epicvm-guest'
+    }
 }
 
 Describe 'Hyper-V provider lifecycle safety' {

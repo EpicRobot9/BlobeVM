@@ -694,6 +694,11 @@ function New-EpicVMHyperVProvider {
         TailscaleHttpInvoker = $TailscaleHttpInvoker
         TailscaleOAuthInvoker = $TailscaleOAuthInvoker
         TailscaleOAuthSecretLoader = $TailscaleOAuthSecretLoader
+        TailscaleOAuthClientId = [string](Get-EpicVMHyperVValue -Object $Config -Name 'TailscaleOAuthClientId' -Default '')
+        TailscaleOAuthSecretPath = [string](Get-EpicVMHyperVValue -Object $Config -Name 'TailscaleOAuthSecretPath' -Default '')
+        TailscaleTailnet = [string](Get-EpicVMHyperVValue -Object $Config -Name 'TailscaleTailnet' -Default '')
+        TailscaleGuestTag = [string](Get-EpicVMHyperVValue -Object $Config -Name 'TailscaleGuestTag' -Default 'tag:epicvm-guest')
+        TailscaleApiBaseUrl = [string](Get-EpicVMHyperVValue -Object $Config -Name 'TailscaleApiBaseUrl' -Default 'https://api.tailscale.com/api/v2')
         LastTailscaleEnrollment = $null
         GetCapabilities = $null
         GetVMs = $null
