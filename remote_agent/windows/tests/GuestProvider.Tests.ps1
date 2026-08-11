@@ -27,6 +27,7 @@ Describe 'PowerShell Direct guest provider' {
         $text = $script.ToString()
         $text | Should -Match 'UserAuthentication'
         $text | Should -Match '100.64.0.0/10'
+        $text | Should -Match '100.64.0.0/255.192.0.0'
         $text | Should -Match 'EpicVM-RDP-Tailscale'
         $text | Should -Match 'Remove-LocalUser'
     }

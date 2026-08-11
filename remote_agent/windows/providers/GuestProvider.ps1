@@ -82,7 +82,8 @@ function Get-EpicVMGuestConfigurationScript {
         $addressFilter=if($null -ne $rule){Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule -ErrorAction SilentlyContinue}else{$null}
         $nlaOk=(Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -ErrorAction Stop).UserAuthentication -eq 1
         $portOk=$null -ne $listener
-        $ruleOk=$null -ne $rule -and [string]$rule.Direction -eq 'Inbound' -and [string]$rule.Action -eq 'Allow' -and $null -ne $addressFilter -and (@($addressFilter.RemoteAddress) -contains '100.64.0.0/10')
+        $expectedScopes=@('100.64.0.0/10','100.64.0.0/255.192.0.0')
+        $ruleOk=$null -ne $rule -and [string]$rule.Direction -eq 'Inbound' -and [string]$rule.Action -eq 'Allow' -and $null -ne $addressFilter -and [bool](@($addressFilter.RemoteAddress)|Where-Object { $expectedScopes -contains [string]$_ })
         if(-not $adminOk -or -not $portOk -or -not $ruleOk -or -not $nlaOk){throw 'RDP/NLA/firewall verification failed.'}
         if($BootstrapUser -and $BootstrapUser -cne $DesiredUser){
             Remove-LocalUser -Name $BootstrapUser -ErrorAction SilentlyContinue
