@@ -453,6 +453,10 @@ function New-EpicVMHyperVVM {
             # Full independent copy.  Differencing disks are intentionally not
             # used because template identity and recovery depend on isolation.
             Copy-Item -LiteralPath $templateDiskPath -Destination $diskPath -Force -ErrorAction Stop
+            # The golden image is immutable and therefore read-only. Copy-Item
+            # preserves that attribute, but the independent guest disk must be
+            # writable before Resize-VHD and Hyper-V can use it.
+            (Get-Item -LiteralPath $diskPath -ErrorAction Stop).IsReadOnly = $false
             $templateVhd = Invoke-EpicVMHyperVCmdlet -Provider $Provider -CommandName 'Get-VHD' -Parameters @{ Path=$diskPath; ErrorAction='Stop' }
             if (-not [string]::IsNullOrWhiteSpace([string](Get-EpicVMHyperVValue -Object $templateVhd -Name 'ParentPath' -Default '')) -or
                 [string](Get-EpicVMHyperVValue -Object $templateVhd -Name 'VhdType' -Default '') -ine 'Dynamic') {
