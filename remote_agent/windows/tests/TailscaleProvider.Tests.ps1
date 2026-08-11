@@ -30,7 +30,8 @@ Describe 'Tailscale OAuth enrollment' {
         $script:request.capabilities.devices.create.reusable | Should -BeFalse
         $script:request.capabilities.devices.create.preauthorized | Should -BeTrue
         $script:request.capabilities.devices.create.tags | Should -Contain 'tag:epicvm-guest'
-        (Get-EpicVMTailscaleGuestScript).ToString() | Should -Match 'file:\\\\.\\pipe\\'
+        (Get-EpicVMTailscaleGuestScript).ToString() | Should -Match "'file:-'"
+        (Get-EpicVMTailscaleGuestScript).ToString() | Should -Match 'RedirectStandardInput=\$true'
         (Get-EpicVMTailscaleGuestScript).ToString() | Should -Not -Match '--authkey\s+\$AuthKey'
     }
 

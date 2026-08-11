@@ -94,37 +94,20 @@ function Get-EpicVMTailscaleGuestScript {
         param($AuthKey,$Hostname,$Executable)
         $ErrorActionPreference='Stop'
         if(-not(Test-Path -LiteralPath $Executable)){throw 'Tailscale is not installed in the guest.'}
-        if(-not('EpicVM.NamedPipeSecret' -as [type])) {
-            Add-Type -TypeDefinition @'
-using System;
-using System.IO.Pipes;
-using System.Text;
-using System.Threading.Tasks;
-namespace EpicVM {
-    public static class NamedPipeSecret {
-        public static Task Serve(string pipeName, string value) {
-            return Task.Run(() => {
-                using (var pipe = new NamedPipeServerStream(pipeName, PipeDirection.Out, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous)) {
-                    pipe.WaitForConnection();
-                    byte[] bytes = Encoding.UTF8.GetBytes(value);
-                    try { pipe.Write(bytes, 0, bytes.Length); pipe.Flush(); }
-                    finally { Array.Clear(bytes, 0, bytes.Length); }
-                }
-            });
-        }
-    }
-}
-'@
-        }
-        $pipeName='EpicVM-Tailscale-' + [Guid]::NewGuid().ToString('N')
-        $pipeTask=[EpicVM.NamedPipeSecret]::Serve($pipeName,$AuthKey)
+        $process=$null;$stderr=$null;$stdout=$null
         try {
-            # The one-use key is served from memory through a named pipe. The
-            # Tailscale process receives only the pipe path in its arguments.
-            & $Executable up --authkey ("file:\\.\pipe\" + $pipeName) --hostname $Hostname --unattended --accept-dns=false --reset 2>$null | Out-Null
-            if(-not $pipeTask.Wait(30000)){throw 'Tailscale did not consume the enrollment key.'}
+            # Tailscale reads the one-use key from redirected stdin. Process
+            # arguments contain only file:-, never the key itself.
+            $start=[Diagnostics.ProcessStartInfo]::new()
+            $start.FileName=$Executable;$start.UseShellExecute=$false;$start.CreateNoWindow=$true
+            $start.RedirectStandardInput=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+            foreach($argument in @('up','--authkey','file:-','--hostname',$Hostname,'--unattended','--accept-dns=false','--reset')){[void]$start.ArgumentList.Add($argument)}
+            $process=[Diagnostics.Process]::new();$process.StartInfo=$start;[void]$process.Start()
+            $process.StandardInput.Write($AuthKey);$process.StandardInput.Close()
+            $stdout=$process.StandardOutput.ReadToEnd();$stderr=$process.StandardError.ReadToEnd();$process.WaitForExit()
+            if($process.ExitCode -ne 0){throw 'Tailscale rejected the memory-only enrollment input.'}
         }
-        finally {$AuthKey=$null;$pipeTask=$null}
+        finally {$AuthKey=$null;$stdout=$null;$stderr=$null;if($null-ne$process){$process.Dispose()}}
         $ip=[string]((& $Executable ip -4 2>$null | Select-Object -First 1)).Trim()
         if($ip -notmatch '^100\.(6[4-9]|[78][0-9]|9[0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}$'){throw 'Guest Tailscale IP verification failed.'}
         return [ordered]@{ok=$true;ip=$ip}
