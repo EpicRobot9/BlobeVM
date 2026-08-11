@@ -154,6 +154,22 @@ export default function VMManager(){
   const vmSettingsCacheRef = useRef(new Map())
   const vmSettingsInFlightRef = useRef(new Map())
   const vmSettingsGenerationRef = useRef(0)
+
+  useEffect(()=>{
+    const params = new URLSearchParams(window.location.search)
+    const jobId = String(params.get('resume_job') || '')
+    const hostId = String(params.get('host_id') || '')
+    if(!/^[a-f0-9]{32}$/i.test(jobId) || !/^[a-z0-9][a-z0-9._-]{0,62}$/.test(hostId)) return
+    let stopped = false
+    apiFetch(`/provisioning-jobs/${encodeURIComponent(jobId)}?host_id=${encodeURIComponent(hostId)}`)
+      .then(async res => {
+        const body = await res.json().catch(()=>({ ok:res.ok }))
+        if(!res.ok || body.ok === false) throw new Error(body.error?.message || body.error || 'Unable to resume provisioning job')
+        if(!stopped){ setProvisioningHostId(hostId); setProvisioningJob(body.job || null) }
+      })
+      .catch(err => { if(!stopped) addToast({title:'Provisioning resume failed',message:String(err),type:'error',timeout:7000}) })
+    return ()=>{ stopped=true }
+  }, [addToast])
   const vmSettingsNamesRef = useRef(new Set())
   const loadSequenceRef = useRef(0)
   const loadInFlightRef = useRef(null)

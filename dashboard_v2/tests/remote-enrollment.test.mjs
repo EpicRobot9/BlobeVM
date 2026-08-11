@@ -22,3 +22,10 @@ test('claim and console retry buttons do not create nested forms', () => {
   assert.match(source, /type="button" onClick=\{claimProvisioningJob\}/)
   assert.match(source, /type="button" onClick=\{retryProvisioningConsole\}/)
 })
+
+test('retained provisioning jobs can be reopened without persisting credentials', () => {
+  assert.match(source, /params\.get\('resume_job'\)/)
+  assert.match(source, /params\.get\('host_id'\)/)
+  assert.match(source, /setProvisioningJob\(body\.job \|\| null\)/)
+  assert.doesNotMatch(source, /URLSearchParams[^\n]*(password|claimToken)/i)
+})
