@@ -365,6 +365,7 @@ class GuacamoleOrchestrator:
     restart: unless-stopped
     networks:
       - internal
+      - egress
     healthcheck:
       test: ["CMD-SHELL", "nc -z 127.0.0.1 4822 || exit 1"]
       interval: 5s
@@ -403,6 +404,8 @@ class GuacamoleOrchestrator:
 networks:
   internal:
     internal: true
+  egress:
+    driver: bridge
   proxy:
     external: true
 '''

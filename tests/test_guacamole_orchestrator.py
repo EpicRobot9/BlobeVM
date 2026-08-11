@@ -39,6 +39,8 @@ def test_plan_is_digest_pinned_and_keeps_rdp_credentials_tokenized(tmp_path):
 
     assert '@sha256:' in plan.compose
     assert 'internal: true' in plan.compose
+    assert '      - egress' in plan.compose
+    assert '  egress:\n    driver: bridge' in plan.compose
     assert 'POSTGRES_HOST_AUTH_METHOD' in plan.compose
     assert 'WEBAPP_CONTEXT: "ROOT"' in plan.compose
     assert 'nc -z 127.0.0.1 4822' in plan.compose
