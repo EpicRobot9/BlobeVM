@@ -101,7 +101,7 @@ function Get-EpicVMTailscaleGuestScript {
             $start=[Diagnostics.ProcessStartInfo]::new()
             $start.FileName=$Executable;$start.UseShellExecute=$false;$start.CreateNoWindow=$true
             $start.RedirectStandardInput=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
-            foreach($argument in @('up','--authkey','file:-','--hostname',$Hostname,'--unattended','--accept-dns=false','--reset')){[void]$start.ArgumentList.Add($argument)}
+            $start.Arguments='up --authkey file:- --hostname "'+$Hostname+'" --unattended --accept-dns=false --reset'
             $process=[Diagnostics.Process]::new();$process.StartInfo=$start;[void]$process.Start()
             $process.StandardInput.Write($AuthKey);$process.StandardInput.Close()
             $stdout=$process.StandardOutput.ReadToEnd();$stderr=$process.StandardError.ReadToEnd();$process.WaitForExit()
