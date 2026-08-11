@@ -608,3 +608,18 @@ def test_create_rechecks_remote_placement_and_capability(monkeypatch, tmp_path):
         json={"name": "alpha", "placement": "local", "host_id": "epic-pc"},
     )
     assert mismatch.status_code == 400
+
+
+def test_admin_auth_accepts_hash_and_rejects_plaintext_fallback(monkeypatch):
+    import importlib
+    from werkzeug.security import generate_password_hash
+
+    module = importlib.import_module("dashboard.app")
+    monkeypatch.setenv("BLOBEDASH_USER", "Epic")
+    monkeypatch.setenv("BLOBEDASH_PASS", "legacy-password")
+    monkeypatch.setenv("BLOBEDASH_PASS_HASH", generate_password_hash("new-password"))
+
+    user, verifier = module._admin_credentials()
+    assert user == "Epic"
+    assert module._admin_password_matches("new-password", verifier) is True
+    assert module._admin_password_matches("legacy-password", verifier) is False

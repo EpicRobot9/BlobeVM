@@ -6,6 +6,7 @@ from urllib import request as urlrequest, error as urlerror
 from urllib.parse import quote as url_quote, urlparse
 from functools import wraps
 from flask import Flask, jsonify, request, abort, send_from_directory, render_template_string, Response, send_file, redirect
+from werkzeug.security import check_password_hash
 import optimizer as dash_optimizer
 from runtime_stats import get_docker_stats
 import hmac, hashlib, time, base64
@@ -54,6 +55,9 @@ def _allow_insecure_dashboard() -> bool:
 
 def _admin_credentials():
     user = os.environ.get('BLOBEDASH_USER', '').strip()
+    password_hash = os.environ.get('BLOBEDASH_PASS_HASH', '').strip()
+    if user and password_hash:
+        return user, password_hash
     password = os.environ.get('BLOBEDASH_PASS', '')
     if user and password:
         return user, password
@@ -61,6 +65,15 @@ def _admin_credentials():
     if legacy:
         return 'admin', legacy
     return None, None
+
+def _admin_password_matches(candidate: str, expected: str) -> bool:
+    password_hash = os.environ.get('BLOBEDASH_PASS_HASH', '').strip()
+    if password_hash and hmac.compare_digest(expected, password_hash):
+        try:
+            return bool(check_password_hash(password_hash, candidate))
+        except (TypeError, ValueError):
+            return False
+    return hmac.compare_digest(candidate, expected)
 
 def need_auth():
     """Whether the dashboard is configured for protected access."""
@@ -109,7 +122,7 @@ def check_auth(header: str) -> bool:
     try:
         raw = base64.b64decode(header.split(None,1)[1]).decode('utf-8')
         user, pw = raw.split(':',1)
-        return hmac.compare_digest(user, user_expected) and hmac.compare_digest(pw, password_expected)
+        return hmac.compare_digest(user, user_expected) and _admin_password_matches(pw, password_expected)
     except Exception:
         return False
 
@@ -2494,7 +2507,7 @@ def dashboard_v2_login_public():
         attempt = _LOGIN_ATTEMPTS.get(remote, {'count': 0, 'until': 0})
         if attempt['until'] > now:
             return jsonify({'ok': False, 'error': 'Try again shortly'}), 429
-    if not hmac.compare_digest(username, user) or not hmac.compare_digest(pw, expected_password):
+    if not hmac.compare_digest(username, user) or not _admin_password_matches(pw, expected_password):
         with _LOGIN_LOCK:
             count = _LOGIN_ATTEMPTS.get(remote, {}).get('count', 0) + 1
             _LOGIN_ATTEMPTS[remote] = {'count': count, 'until': now + min(30, 2 ** min(count, 5))}
