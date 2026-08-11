@@ -579,7 +579,7 @@ export default function VMManager(){
     logRequestSequenceRef.current += 1
     setSelected(name)
     setSelectedVmHostId(hostId || 'local')
-    setSelectedVmUrl(vmUrl || '')
+    setSelectedVmUrl(hostId && hostId !== 'local' ? `/dashboard/console/${encodeURIComponent(name)}/` : (vmUrl || ''))
     await apiFetch(`/optimizer/activity/${encodeURIComponent(name)}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ source:'details-open' }) }).catch(()=>null)
     await fetchLogs(name, hostId)
   }

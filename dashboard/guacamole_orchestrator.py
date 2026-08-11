@@ -20,9 +20,17 @@ import socket
 import subprocess
 import time
 from urllib import error as urlerror, request as urlrequest
+from urllib.parse import urlparse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
+
+try:
+    from cryptography.hazmat.primitives import padding
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+except ImportError:  # Production fails closed until the pinned dependency exists.
+    padding = Cipher = algorithms = modes = AESGCM = None
 
 VM_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
 SHA256_IMAGE_RE = re.compile(r"^[^@]+@sha256:[0-9a-f]{64}$")
@@ -98,6 +106,7 @@ class ConsolePlan:
     connection: dict[str, str]
     sql_seed: str = ""
     guacamole_properties: str = ""
+    credential_blob: str = ""
 
 
 class GuacamoleOrchestrator:
@@ -117,6 +126,7 @@ class GuacamoleOrchestrator:
         routing_probe: Callable[[], bool] | None = None,
         auth_status_probe: Callable[[str], bool] | None = None,
         command_runner: Callable[..., Any] | None = None,
+        credential_secret: str | None = None,
     ):
         self.root = Path(root)
         self.proxy_network = str(proxy_network)
@@ -131,6 +141,75 @@ class GuacamoleOrchestrator:
         self.routing_probe = routing_probe or self._routing_available
         self.auth_status_probe = auth_status_probe or self._public_auth_rejected
         self.command_runner = command_runner or subprocess.run
+        self.credential_secret = str(credential_secret or "")
+
+    def _credential_key(self) -> bytes:
+        if AESGCM is None or not self.credential_secret:
+            raise ConsoleOrchestrationError("Console credential encryption is unavailable.", status=503, code="credential_encryption_unavailable")
+        return hashlib.sha256(b"EpicVM console credentials v1\0" + self.credential_secret.encode("utf-8")).digest()
+
+    def _json_auth_key(self, name: str) -> bytes:
+        safe = validate_vm_name(name)
+        return hmac.new(self._credential_key(), ("guacamole-json:" + safe).encode("utf-8"), hashlib.sha256).digest()[:16]
+
+    def seal_credentials(self, *, name: str, username: str, password: str) -> str:
+        safe = validate_vm_name(name)
+        derive_guacamole_verifier(username, password)
+        plaintext = json.dumps({"username": username, "password": password}, separators=(",", ":")).encode("utf-8")
+        nonce = secrets.token_bytes(12)
+        ciphertext = AESGCM(self._credential_key()).encrypt(nonce, plaintext, safe.encode("utf-8"))
+        return base64.urlsafe_b64encode(b"EV1" + nonce + ciphertext).decode("ascii")
+
+    def _open_credentials(self, name: str) -> dict[str, str]:
+        safe = validate_vm_name(name)
+        path = self._instance_root(safe) / "credentials.enc"
+        try:
+            raw = base64.urlsafe_b64decode(path.read_text(encoding="ascii"))
+            if not raw.startswith(b"EV1"):
+                raise ValueError("invalid envelope")
+            plaintext = AESGCM(self._credential_key()).decrypt(raw[3:15], raw[15:], safe.encode("utf-8"))
+            value = json.loads(plaintext)
+            username = str(value.get("username") or "")
+            password = str(value.get("password") or "")
+            derive_guacamole_verifier(username, password)
+            return {"username": username, "password": password}
+        except ConsoleOrchestrationError:
+            raise
+        except Exception as exc:
+            raise ConsoleOrchestrationError("Automatic console credentials are unavailable.", status=409, code="console_credentials_unavailable") from exc
+
+    def has_auto_login(self, name: str) -> bool:
+        try:
+            self._open_credentials(name)
+            return True
+        except ConsoleOrchestrationError:
+            return False
+
+    def build_json_auth_data(self, name: str, *, ttl_seconds: int = 30) -> str:
+        safe = validate_vm_name(name)
+        target = self._instance_root(safe)
+        try:
+            plan = json.loads((target / "plan.json").read_text(encoding="utf-8"))
+            if plan.get("owner") != "EpicVM" or plan.get("name") != safe:
+                raise ValueError("ownership")
+            guest_ip = str(plan["guestIp"])
+        except Exception as exc:
+            raise ConsoleOrchestrationError("The named console instance is not owned by EpicVM.", status=403, code="ownership_required") from exc
+        credentials = self._open_credentials(safe)
+        payload = json.dumps({
+            "username": credentials["username"],
+            "expires": int((time.time() + max(5, min(int(ttl_seconds), 60))) * 1000),
+            "connections": {safe: {"protocol": "rdp", "parameters": {
+                "hostname": guest_ip, "port": "3389", "security": "nla", "ignore-cert": "true",
+                "username": credentials["username"], "password": credentials["password"],
+            }}},
+        }, separators=(",", ":")).encode("utf-8")
+        key = self._json_auth_key(safe)
+        signed = hmac.new(key, payload, hashlib.sha256).digest() + payload
+        padder = padding.PKCS7(128).padder()
+        padded = padder.update(signed) + padder.finalize()
+        encryptor = Cipher(algorithms.AES(key), modes.CBC(b"\0" * 16)).encryptor()
+        return base64.b64encode(encryptor.update(padded) + encryptor.finalize()).decode("ascii")
 
     def _routing_config(self) -> tuple[str, str, int]:
         if not re.fullmatch(r"[a-z0-9.-]+", self.public_host) or not self.tls_resolver or not self.router_priority.isdigit():
@@ -203,11 +282,19 @@ class GuacamoleOrchestrator:
 
     def _public_auth_rejected(self, route_prefix: str) -> bool:
         url = f"https://{self.public_host}{route_prefix}"
+        class NoRedirect(urlrequest.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
         try:
-            with urlrequest.urlopen(url, timeout=8):
+            with urlrequest.build_opener(NoRedirect).open(url, timeout=8):
                 return False
         except urlerror.HTTPError as exc:
-            return int(exc.code) in (401, 403)
+            if int(exc.code) in (401, 403):
+                return True
+            if int(exc.code) not in (302, 303, 307, 308):
+                return False
+            location = urlparse(str(exc.headers.get("Location") or ""))
+            return location.path == "/portal/login" and (not location.netloc or location.netloc == self.public_host)
         except (OSError, urlerror.URLError):
             return False
 
@@ -300,6 +387,8 @@ class GuacamoleOrchestrator:
       POSTGRESQL_USERNAME: "guac"
       POSTGRESQL_PASSWORD: ""
       POSTGRESQL_SSL_MODE: "disable"
+      JSON_ENABLED: "true"
+      JSON_SECRET_KEY: "${{EPICVM_JSON_SECRET_KEY:?missing EpicVM JSON authentication key}}"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/ >/dev/null"]
       interval: 5s
@@ -398,6 +487,7 @@ COMMIT;
             connection=connection,
             sql_seed=sql_seed,
             guacamole_properties=self.build_guacamole_properties(name=safe),
+            credential_blob=self.seal_credentials(name=safe, username=username, password=password),
         )
 
     def stage_plan(self, plan: ConsolePlan) -> Path:
@@ -429,11 +519,13 @@ COMMIT;
             (stage / "docker-compose.yml").write_text(plan.compose, encoding="utf-8")
             (stage / "initdb.sql").write_text(schema.rstrip() + "\n" + plan.sql_seed, encoding="utf-8")
             (stage / "plan.json").write_text(json.dumps({"owner": "EpicVM", "version": 1, "name": plan.name, "guestIp": plan.guest_ip, "routePrefix": plan.route_prefix}, separators=(",", ":")), encoding="utf-8")
+            (stage / "credentials.enc").write_text(plan.credential_blob, encoding="ascii")
             # The PostgreSQL image runs as its own UID and must be able to read
             # this bind-mounted file.  The containing directory remains 0700,
             # while the file contains only schema and a salted verifier.
             os.chmod(stage / "initdb.sql", 0o644)
             os.chmod(stage / "plan.json", 0o600)
+            os.chmod(stage / "credentials.enc", 0o600)
             stage.rename(target)
             return target
         except Exception:
@@ -461,7 +553,9 @@ COMMIT;
         except (OSError, KeyError, TypeError, ValueError) as exc:
             raise ConsoleOrchestrationError("The staged console plan is invalid.", status=503, code="console_plan_invalid") from exc
         try:
-            self.command_runner(["docker", "compose", "-p", self._project_name(name), "up", "-d", "--wait", "--wait-timeout", "90"], cwd=str(target), check=True, capture_output=True, text=True)
+            env = os.environ.copy()
+            env["EPICVM_JSON_SECRET_KEY"] = self._json_auth_key(name).hex()
+            self.command_runner(["docker", "compose", "-p", self._project_name(name), "up", "-d", "--wait", "--wait-timeout", "90"], cwd=str(target), check=True, capture_output=True, text=True, env=env)
         except (OSError, subprocess.SubprocessError) as exc:
             self.stop_staged(name)
             raise ConsoleOrchestrationError("The console stack failed its startup gate.", status=502, code="console_start_failed") from exc
@@ -478,6 +572,33 @@ COMMIT;
             self.stop_staged(name)
             raise ConsoleOrchestrationError("The public console route did not reject unauthenticated access.", status=502, code="console_auth_failed")
         return {"ok": True, "routePrefix": str(staged["routePrefix"]), "guestTcpVerified": True}
+
+    def enable_auto_login(self, *, name: str, username: str, password: str) -> None:
+        safe = validate_vm_name(name)
+        target = self._instance_root(safe)
+        try:
+            plan = json.loads((target / "plan.json").read_text(encoding="utf-8"))
+            if plan.get("owner") != "EpicVM" or plan.get("name") != safe:
+                raise ValueError("ownership")
+            compose_path = target / "docker-compose.yml"
+            compose = compose_path.read_text(encoding="utf-8")
+        except Exception as exc:
+            raise ConsoleOrchestrationError("The named console instance is not owned by EpicVM.", status=403, code="ownership_required") from exc
+        if "JSON_ENABLED:" not in compose:
+            anchor = '      POSTGRESQL_SSL_MODE: "disable"\n'
+            if anchor not in compose:
+                raise ConsoleOrchestrationError("The console bundle cannot be upgraded safely.", status=409, code="console_upgrade_unavailable")
+            compose = compose.replace(anchor, anchor + '      JSON_ENABLED: "true"\n      JSON_SECRET_KEY: "${EPICVM_JSON_SECRET_KEY:?missing EpicVM JSON authentication key}"\n', 1)
+            compose_path.write_text(compose, encoding="utf-8")
+        credential_path = target / "credentials.enc"
+        credential_path.write_text(self.seal_credentials(name=safe, username=username, password=password), encoding="ascii")
+        os.chmod(credential_path, 0o600)
+        env = os.environ.copy()
+        env["EPICVM_JSON_SECRET_KEY"] = self._json_auth_key(safe).hex()
+        try:
+            self.command_runner(["docker", "compose", "-p", self._project_name(safe), "up", "-d", "--wait", "--wait-timeout", "90"], cwd=str(target), check=True, capture_output=True, text=True, env=env)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ConsoleOrchestrationError("The automatic console login upgrade failed.", status=502, code="console_upgrade_failed") from exc
 
     def _runtime_isolated(self, name: str) -> bool:
         project = self._project_name(name)

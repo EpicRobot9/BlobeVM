@@ -229,6 +229,7 @@ def _console_orchestrator():
             tls_resolver=os.environ.get('EPICVM_TRAEFIK_CERTRESOLVER', ''),
             auth_middleware=os.environ.get('EPICVM_TRAEFIK_AUTH_MIDDLEWARE', ''),
             router_priority=os.environ.get('EPICVM_TRAEFIK_ROUTER_PRIORITY', ''),
+            credential_secret=_dashboard_secret(),
         )
     return _CONSOLE_ORCHESTRATOR
 
@@ -2282,6 +2283,60 @@ def dashboard_vm_forward_auth(name):
         denied_url = f'{ext_base}{denied_path}' if ext_base else denied_path
         return Response('', 302, {'Location': denied_url})
     return Response('OK', 200)
+
+
+@app.get('/dashboard/console/<name>/')
+def dashboard_console_launch(name):
+    denied = _enforce_vm_user_access(name)
+    if denied is not None:
+        return denied
+    try:
+        safe = str(name or '').strip().lower()
+        if not re.fullmatch(r'[a-z0-9][a-z0-9._-]{0,62}', safe):
+            return Response('Invalid VM name.', 400)
+        orchestrator = _console_orchestrator()
+        if not orchestrator.has_auto_login(safe):
+            if _admin_vm_sso_authenticated():
+                return redirect(f'/dashboard/console/{url_quote(safe, safe="")}/setup')
+            return Response('Automatic console login must be configured by an administrator.', 409)
+        data = orchestrator.build_json_auth_data(safe)
+        client_id = base64.urlsafe_b64encode(f'{safe}\0c\0json'.encode('utf-8')).decode('ascii').rstrip('=')
+        response = redirect(f'/vm/{url_quote(safe, safe="")}/?data={url_quote(data, safe="")}#/client/{client_id}')
+        response.headers['Cache-Control'] = 'no-store'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Referrer-Policy'] = 'no-referrer'
+        return response
+    except ConsoleOrchestrationError as exc:
+        return Response(str(exc), int(getattr(exc, 'status', 502) or 502))
+
+
+@app.get('/dashboard/console/<name>/setup')
+@admin_auth_required
+def dashboard_console_setup(name):
+    safe = str(name or '').strip().lower()
+    csrf = _csrf_token_for_session()
+    return Response(f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Enable automatic console login</title><style>body{{margin:0;background:#050816;color:#e7f0f4;font:15px Inter,system-ui;display:grid;place-items:center;min-height:100vh}}form{{width:min(420px,calc(100vw - 48px));background:#071117;border:1px solid #1a2b33;padding:30px}}input,button{{display:block;box-sizing:border-box;width:100%;margin-top:12px;padding:12px;background:#061016;color:#e7f0f4;border:1px solid #29404a}}button{{background:#02bdf3;color:#00131b;font-weight:700}}#error{{color:#ff9ab0;margin-top:12px}}</style></head><body><form id="setup"><h1>Enable automatic login</h1><p>Enter the Windows credentials once. EpicVM will encrypt them at rest and use short-lived Guacamole launch tokens.</p><input id="username" autocomplete="username" placeholder="Windows username" required><input id="password" type="password" autocomplete="current-password" placeholder="Windows password" required><button>Enable and open desktop</button><div id="error"></div></form><script>document.getElementById('setup').addEventListener('submit',async(e)=>{{e.preventDefault();const r=await fetch('/dashboard/api/console-credentials/{url_quote(safe, safe="")}',{{method:'POST',headers:{{'Content-Type':'application/json','X-CSRF-Token':'{csrf}'}},body:JSON.stringify({{username:document.getElementById('username').value,password:document.getElementById('password').value}})}});const j=await r.json().catch(()=>({{}}));document.getElementById('password').value='';if(r.ok&&j.ok)location.href=j.launchUrl;else document.getElementById('error').textContent=j.error?.message||j.error||'Setup failed';}});</script></body></html>''', mimetype='text/html', headers={'Cache-Control':'no-store','Referrer-Policy':'no-referrer'})
+
+
+@app.post('/dashboard/api/console-credentials/<name>')
+@admin_auth_required
+def dashboard_console_credentials(name):
+    if not _request_is_https():
+        return jsonify({'ok': False, 'error': 'Automatic console login setup requires HTTPS'}), 426
+    payload = request.get_json(silent=True) or {}
+    username = str(payload.get('username') or '')
+    password = str(payload.get('password') or '')
+    try:
+        _console_orchestrator().enable_auto_login(name=name, username=username, password=password)
+        response = jsonify({'ok': True, 'launchUrl': f'/dashboard/console/{url_quote(str(name).lower(), safe="")}/'})
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+    except ConsoleOrchestrationError as exc:
+        response = jsonify({'ok': False, 'error': {'code': str(getattr(exc, 'code', 'console_error')), 'message': str(exc)}})
+        response.headers['Cache-Control'] = 'no-store'
+        return response, int(getattr(exc, 'status', 502) or 502)
+    finally:
+        username = password = ''
 
 
 @app.post('/portal/api/auth/login')

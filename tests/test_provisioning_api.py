@@ -64,6 +64,7 @@ def attach_host(module):
     module.VM_HOST_REGISTRY = Registry()
 
     class Console:
+        automatic = False
         def build_plan(self, name, guest_ip, username, password):
             return SimpleNamespace(name=name, route_prefix=f"/vm/{name}/")
         def stage_plan(self, plan):
@@ -76,6 +77,15 @@ def attach_host(module):
             return None
         def teardown(self, **kwargs):
             return {"ok": True}
+        def has_auto_login(self, name):
+            return self.automatic
+        def enable_auto_login(self, name, username, password):
+            assert username == 'operator'
+            assert password == 'transient-password'
+            self.automatic = True
+        def build_json_auth_data(self, name):
+            assert self.automatic
+            return 'encrypted-data'
     module._CONSOLE_ORCHESTRATOR = Console()
 
 
@@ -203,3 +213,21 @@ def test_console_retry_requires_failed_state_and_reentered_credentials(monkeypat
     assert response.status_code == 200
     assert response.get_json()["job"]["state"] == "ready"
     assert "transient-password" not in response.get_data(as_text=True)
+
+
+def test_admin_can_enable_and_launch_automatic_console_without_password_reflection(monkeypatch, tmp_path):
+    module = load_app(monkeypatch, tmp_path)
+    attach_host(module)
+    client = authenticated_client(module)
+    csrf = client.get('/dashboard/api/auth/csrf').get_json()['csrfToken']
+    setup = client.post(
+        '/dashboard/api/console-credentials/alpha',
+        json={'username':'operator','password':'transient-password'},
+        headers={'Origin':'http://localhost','X-Forwarded-Proto':'https','X-CSRF-Token':csrf},
+    )
+    assert setup.status_code == 200
+    assert 'transient-password' not in setup.get_data(as_text=True)
+    launch = client.get('/dashboard/console/alpha/')
+    assert launch.status_code == 302
+    assert 'data=encrypted-data' in launch.headers['Location']
+    assert launch.headers['Cache-Control'] == 'no-store'

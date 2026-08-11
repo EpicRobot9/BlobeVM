@@ -5,7 +5,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl jq \
-    && pip install --no-cache-dir flask \
+    && pip install --no-cache-dir flask cryptography==46.0.3 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

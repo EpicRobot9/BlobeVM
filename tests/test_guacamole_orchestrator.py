@@ -4,6 +4,8 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from dashboard.guacamole_orchestrator import ConsoleOrchestrationError, GuacamoleOrchestrator, build_rdp_connection, derive_guacamole_verifier
 
@@ -25,6 +27,7 @@ def make_orchestrator(root, **overrides):
         "tls_resolver": "letsencrypt",
         "auth_middleware": "epic-root-auth@docker",
         "router_priority": 500,
+        "credential_secret": "test-dashboard-secret",
     }
     options.update(overrides)
     return GuacamoleOrchestrator(**options)
@@ -50,6 +53,8 @@ def test_plan_is_digest_pinned_and_keeps_rdp_credentials_tokenized(tmp_path):
     assert 'epicvm-alpha-portal-auth' in plan.compose
     assert 'http://blobedash:5000/dashboard/auth/vm/alpha' in plan.compose
     assert 'epic-root-auth@docker' not in plan.compose
+    assert 'JSON_ENABLED: "true"' in plan.compose
+    assert 'transient-password' not in plan.credential_blob
 
 
 def test_verifier_uses_guacamole_password_then_salt_order():
@@ -57,6 +62,27 @@ def test_verifier_uses_guacamole_password_then_salt_order():
     verifier = derive_guacamole_verifier('operator', 'transient-password', salt=salt)
     expected = hashlib.sha256(b'transient-password' + salt).digest()
     assert base64.b64decode(verifier['password_hash']) == expected
+
+
+def test_short_lived_json_auth_payload_contains_connection_only_after_decryption(tmp_path):
+    orch = make_orchestrator(tmp_path)
+    plan = orch.build_plan(name='alpha', guest_ip='100.111.82.1', username='operator', password='transient-password')
+    target = tmp_path / 'alpha'
+    target.mkdir()
+    (target / 'plan.json').write_text(json.dumps({'owner':'EpicVM','name':'alpha','guestIp':'100.111.82.1'}))
+    (target / 'credentials.enc').write_text(plan.credential_blob)
+    data = orch.build_json_auth_data('alpha')
+    assert 'transient-password' not in data
+    key = orch._json_auth_key('alpha')
+    decryptor = Cipher(algorithms.AES(key), modes.CBC(b'\0' * 16)).decryptor()
+    padded = decryptor.update(base64.b64decode(data)) + decryptor.finalize()
+    unpadder = padding.PKCS7(128).unpadder()
+    signed = unpadder.update(padded) + unpadder.finalize()
+    payload = signed[32:]
+    assert signed[:32] == __import__('hmac').new(key, payload, hashlib.sha256).digest()
+    decoded = json.loads(payload)
+    assert decoded['connections']['alpha']['parameters']['password'] == 'transient-password'
+    assert decoded['expires'] > 0
 
 
 def test_reserved_default_administrator_is_rejected():
@@ -84,6 +110,8 @@ def test_stage_and_teardown_quarantines_named_resources(tmp_path):
     plan = orch.build_plan(name='alpha', guest_ip='100.111.82.1', username='operator', password='transient-password')
     target = orch.stage_plan(plan)
     assert (target / 'docker-compose.yml').is_file()
+    assert (target / 'credentials.enc').is_file()
+    assert 'transient-password' not in (target / 'credentials.enc').read_text()
     assert 'com.blobevm.managed: "1"' in (target / 'docker-compose.yml').read_text()
     seed = (target / 'initdb.sql').read_text()
     assert 'CREATE TABLE guacamole_entity' in seed
