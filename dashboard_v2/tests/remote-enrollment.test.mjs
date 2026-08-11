@@ -15,3 +15,10 @@ test('VM manager exposes authenticated RemoteVM token-file enrollment', () => {
   assert.doesNotMatch(source, /localStorage\.[^\n]*token/i)
   assert.doesNotMatch(source, /sessionStorage\.[^\n]*token/i)
 })
+
+test('claim and console retry buttons do not create nested forms', () => {
+  assert.doesNotMatch(source, /<form onSubmit=\{claimProvisioningJob\}/)
+  assert.doesNotMatch(source, /<form onSubmit=\{retryProvisioningConsole\}/)
+  assert.match(source, /type="button" onClick=\{claimProvisioningJob\}/)
+  assert.match(source, /type="button" onClick=\{retryProvisioningConsole\}/)
+})

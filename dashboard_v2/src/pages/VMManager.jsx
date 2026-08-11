@@ -869,24 +869,24 @@ export default function VMManager(){
               </div>
               <div style={{height:8,background:'rgba(255,255,255,.1)',borderRadius:999,marginTop:10,overflow:'hidden'}}><div style={{height:'100%',width:`${provisioningProgress(provisioningJob)}%`,background:'#22c55e',transition:'width .25s'}} /></div>
               {canClaimProvisioningJob(provisioningJob) && provisioningClaimToken ? (
-                <form onSubmit={claimProvisioningJob} style={{display:'grid',gap:8,marginTop:12}}>
+                <div style={{display:'grid',gap:8,marginTop:12}}>
                   <strong>One-time guest claim</strong>
                   <span style={{color:'var(--muted)',fontSize:13}}>Use an administrator username and password for this guest. The claim is single-use and is not shown again.</span>
                   <input value={claimDraft.username} onChange={e=>setClaimDraft(s=>({...s,username:e.target.value}))} placeholder="Guest admin username" autoComplete="username" required />
                   <input value={claimDraft.password} onChange={e=>setClaimDraft(s=>({...s,password:e.target.value}))} placeholder="Guest admin password" type="password" autoComplete="new-password" minLength={12} required />
                   <input value={claimDraft.confirm} onChange={e=>setClaimDraft(s=>({...s,confirm:e.target.value}))} placeholder="Repeat password" type="password" autoComplete="new-password" minLength={12} required />
-                  <Button type="submit" disabled={provisioningBusy}>{provisioningBusy ? 'Claiming…' : 'Claim guest securely'}</Button>
-                </form>
+                  <Button type="button" onClick={claimProvisioningJob} disabled={provisioningBusy}>{provisioningBusy ? 'Claiming…' : 'Claim guest securely'}</Button>
+                </div>
               ) : null}
               {canRetryProvisioningConsole(provisioningJob) ? (
-                <form onSubmit={retryProvisioningConsole} style={{display:'grid',gap:8,marginTop:12}}>
+                <div style={{display:'grid',gap:8,marginTop:12}}>
                   <strong>Retry retained console</strong>
                   <span style={{color:'var(--muted)',fontSize:13}}>The VM was retained. Re-enter its credentials to rebuild only the stopped console bundle.</span>
                   <input value={claimDraft.username} onChange={e=>setClaimDraft(s=>({...s,username:e.target.value}))} placeholder="Guest administrator" autoComplete="username" required />
                   <input value={claimDraft.password} onChange={e=>setClaimDraft(s=>({...s,password:e.target.value}))} placeholder="Guest password" type="password" autoComplete="current-password" minLength={12} required />
                   <input value={claimDraft.confirm} onChange={e=>setClaimDraft(s=>({...s,confirm:e.target.value}))} placeholder="Repeat password" type="password" autoComplete="current-password" minLength={12} required />
-                  <Button type="submit" disabled={provisioningBusy}>{provisioningBusy ? 'Retrying…' : 'Retry console securely'}</Button>
-                </form>
+                  <Button type="button" onClick={retryProvisioningConsole} disabled={provisioningBusy}>{provisioningBusy ? 'Retrying…' : 'Retry console securely'}</Button>
+                </div>
               ) : null}
               {canOpenProvisionedVm(provisioningJob) ? <div style={{color:'#86efac',marginTop:10}}>Ready. The VM will appear in the fleet after the next refresh.</div> : null}
               {provisioningJob.state === 'failed' ? <div role="alert" style={{color:'#fca5a5',marginTop:10}}>Guest setup stopped safely. The VM was retained for diagnosis.</div> : null}
