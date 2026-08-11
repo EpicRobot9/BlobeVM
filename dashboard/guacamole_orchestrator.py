@@ -240,6 +240,7 @@ class GuacamoleOrchestrator:
         db_name = f"epicvm_{safe.replace('-', '_').replace('.', '_')}"
         labels = {
             "traefik.enable": "true",
+            "com.blobevm.managed": "1",
             "com.epicvm.console": "1",
             "com.epicvm.vm.name": safe,
             "traefik.docker.network": self.proxy_network,

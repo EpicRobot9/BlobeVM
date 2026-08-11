@@ -82,6 +82,7 @@ def test_stage_and_teardown_quarantines_named_resources(tmp_path):
     plan = orch.build_plan(name='alpha', guest_ip='100.111.82.1', username='operator', password='transient-password')
     target = orch.stage_plan(plan)
     assert (target / 'docker-compose.yml').is_file()
+    assert 'com.blobevm.managed: "1"' in (target / 'docker-compose.yml').read_text()
     seed = (target / 'initdb.sql').read_text()
     assert 'CREATE TABLE guacamole_entity' in seed
     assert "DELETE FROM guacamole_entity WHERE name = 'guacadmin'" in seed
