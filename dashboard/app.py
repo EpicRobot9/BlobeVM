@@ -2301,7 +2301,16 @@ def dashboard_console_launch(name):
             return Response('Automatic console login must be configured by an administrator.', 409)
         data = orchestrator.build_json_auth_data(safe)
         client_id = base64.urlsafe_b64encode(f'{safe}\0c\0json'.encode('utf-8')).decode('ascii').rstrip('=')
-        response = redirect(f'/vm/{url_quote(safe, safe="")}/?data={url_quote(data, safe="")}#/client/{client_id}')
+        target = f'/vm/{url_quote(safe, safe="")}/?data={url_quote(data, safe="")}#/client/{client_id}'
+        # Guacamole ignores fresh JSON authentication data while an older
+        # GUAC_AUTH session remains in browser storage.  That leaves reconnects
+        # pointing at an expired ephemeral JSON connection.  Clear only the
+        # Guacamole token before launching the newly signed connection.
+        response = Response(
+            '<!doctype html><meta charset="utf-8"><title>Opening console</title>'
+            f'<script>localStorage.removeItem("GUAC_AUTH");sessionStorage.removeItem("GUAC_AUTH");location.replace({json.dumps(target)});</script>',
+            mimetype='text/html',
+        )
         response.headers['Cache-Control'] = 'no-store'
         response.headers['Pragma'] = 'no-cache'
         response.headers['Referrer-Policy'] = 'no-referrer'
