@@ -2315,7 +2315,7 @@ def dashboard_console_launch(name):
             f'const body=new URLSearchParams({{data:{json.dumps(data)}}});'
             f'const response=await fetch({json.dumps(token_endpoint)},{{method:"POST",headers:{{"Content-Type":"application/x-www-form-urlencoded"}},body}});'
             'const result=await response.json();if(!response.ok||!result.authToken)throw new Error("authentication failed");'
-            'localStorage.setItem("GUAC_AUTH_TOKEN",result.authToken);'
+            'localStorage.setItem("GUAC_AUTH_TOKEN",JSON.stringify(result.authToken));'
             f'location.replace({json.dumps(target)});'
             '})().catch(()=>{document.body.textContent="Secure console authentication failed. Return to EpicVM and try again."});</script>',
             mimetype='text/html',
