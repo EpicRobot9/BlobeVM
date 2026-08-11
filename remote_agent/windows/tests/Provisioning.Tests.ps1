@@ -18,6 +18,13 @@ BeforeAll {
 }
 
 Describe 'EpicVM provisioning safety' {
+    It 'skips the expensive content hash only for capability readiness' {
+        $text = Get-Content (Join-Path $windowsRoot 'Provisioning.ps1') -Raw
+        $text | Should -Match 'Test-EpicVMTemplateManifest -Config \$Config -SkipContentHash'
+        $text | Should -Match 'if \(-not \$SkipContentHash\)'
+        $text | Should -Match 'Test-EpicVMTemplateManifest -Config \$State\.Config\)'
+    }
+
     It 'uses the locked standard and gaming resource profiles' {
         (Get-EpicVMProvisioningProfile -Profile standard).cpuCount | Should -Be 4
         (Get-EpicVMProvisioningProfile -Profile standard).memoryBytes | Should -Be 8589934592

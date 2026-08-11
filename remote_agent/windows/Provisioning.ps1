@@ -184,7 +184,7 @@ function Save-EpicVMProvisioningStore {
 }
 
 function Test-EpicVMTemplateManifest {
-    param([Parameter(Mandatory)] [object] $Config)
+    param([Parameter(Mandatory)] [object] $Config, [switch] $SkipContentHash)
     $manifestPath = [string](Get-EpicVMProperty -Object $Config -Name 'TemplateManifestPath' -Default '')
     if ([string]::IsNullOrWhiteSpace($manifestPath) -or -not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { return $false }
     try {
@@ -203,8 +203,13 @@ function Test-EpicVMTemplateManifest {
                 $imagePath.StartsWith($manifestDirectory + '\', [StringComparison]::OrdinalIgnoreCase))) { return $false }
         $image = Get-Item -LiteralPath $imagePath -ErrorAction Stop
         if (($image.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
-        $actual = (Get-FileHash -LiteralPath $imagePath -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($actual -ne ([string]$manifest.sha256).ToLowerInvariant()) { return $false }
+        # Capability discovery runs frequently and must not hash a multi-GB
+        # template on every request. The provisioning mutation path omits this
+        # switch and performs the full SHA-256 gate immediately before cloning.
+        if (-not $SkipContentHash) {
+            $actual = (Get-FileHash -LiteralPath $imagePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne ([string]$manifest.sha256).ToLowerInvariant()) { return $false }
+        }
         if (Get-Command -Name Get-VHD -ErrorAction SilentlyContinue) {
             $vhd = Get-VHD -Path $imagePath -ErrorAction Stop
             if (-not [string]::IsNullOrWhiteSpace([string]$vhd.ParentPath) -or [string]$vhd.VhdType -ine 'Dynamic') { return $false }
@@ -217,7 +222,7 @@ function Test-EpicVMTemplateManifest {
 function Test-EpicVMProvisioningPrerequisites {
     param([Parameter(Mandatory)] [object] $Config)
 
-    if (-not (Test-EpicVMTemplateManifest -Config $Config)) { return $false }
+    if (-not (Test-EpicVMTemplateManifest -Config $Config -SkipContentHash)) { return $false }
     foreach ($pathField in @('BootstrapCredentialPath', 'TailscaleOAuthSecretPath')) {
         $path = [string](Get-EpicVMProperty -Object $Config -Name $pathField -Default '')
         if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
