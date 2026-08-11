@@ -170,7 +170,7 @@ def test_remote_create_uses_long_operation_timeout():
         opener=fake_open,
     ).create("alpha")
 
-    assert calls[0] >= 120
+    assert calls[0] >= 600
 
 
 def test_remote_lifecycle_uses_explicit_agent_contract_routes():

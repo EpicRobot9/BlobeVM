@@ -51,7 +51,10 @@ class RemoteAgentClient:
         self.base_url = str(base_url).rstrip("/") + "/"
         self.token = str(token)
         self.timeout = max(0.5, float(timeout))
-        self.operation_timeout = max(self.timeout, 120.0)
+        # Full-copy Windows templates can take several minutes on real Hyper-V
+        # storage. The create response carries the one-time claim token, so an
+        # upstream timeout must never discard a still-running create response.
+        self.operation_timeout = max(self.timeout, 600.0)
         self._opener = opener or urlopen
 
     def _request(
