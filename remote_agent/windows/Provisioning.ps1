@@ -524,13 +524,11 @@ function Invoke-EpicVMProvisioningClaimReissue {
     if ($Job.state -ne 'awaiting_claim' -or [bool]$Job.claimUsed) {
         throw (New-EpicVMProvisioningError -Code 'claim_reissue_not_allowed' -Message 'A claim can only be reissued while the VM is awaiting its first claim.' -Status 409)
     }
-    try {
-        if ([string]::IsNullOrWhiteSpace([string]$Job.claimExpires) -or [DateTime]::Parse([string]$Job.claimExpires) -le [DateTime]::UtcNow) {
-            throw (New-EpicVMProvisioningError -Code 'claim_expired' -Message 'The pending claim has expired.' -Status 409)
-        }
-    }
-    catch [System.InvalidOperationException] { throw }
-    catch {
+    # An authenticated operator may recover an unclaimed exact-name VM even
+    # after the old 30-minute token expired.  The old verifier is replaced
+    # immediately, so an expired or lost token can never be reused.
+    if ([string]::IsNullOrWhiteSpace([string]$Job.claimHash) -or
+        [string]$Job.claimHash -notmatch '^[0-9a-fA-F]{64}$') {
         throw (New-EpicVMProvisioningError -Code 'claim_state_invalid' -Message 'The pending claim state is invalid.' -Status 409)
     }
 
