@@ -1,4 +1,5 @@
 # Pinned local development and CI tooling. Production remains the Linux dashboard image.
 Flask==3.1.1
+cryptography==46.0.3
 pytest==8.3.5
 ruff==0.11.0

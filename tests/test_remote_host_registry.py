@@ -11,12 +11,17 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "dashboard"))
 
-from dashboard.remote_hosts import ConfiguredVmHostRegistry, RemoteHostConfigError, load_remote_host_configs
+from dashboard.remote_hosts import (
+    ConfiguredVmHostRegistry,
+    RemoteHostConfigError,
+    load_remote_host_configs,
+)
 from dashboard.remote_agent_client import RemoteAgentClient, RemoteAgentError, RemoteAgentHost
 from dashboard.vm_hosts import LocalDockerHost, VmHostUnavailable
 
 
-def test_load_configs_redacts_tokens_and_rejects_duplicate_ids(tmp_path):
+def test_load_configs_redacts_tokens_and_rejects_duplicate_ids(tmp_path, monkeypatch):
+    monkeypatch.setenv("EPICVM_ALLOW_PLAINTEXT_REMOTE_HOST_TOKENS", "1")
     path = tmp_path / "remote-hosts.json"
     path.write_text(json.dumps({
         "version": 1,
@@ -54,7 +59,8 @@ def test_load_configs_redacts_tokens_and_rejects_duplicate_ids(tmp_path):
         load_remote_host_configs(path)
 
 
-def test_registry_marks_unreachable_host_offline_without_hiding_local(tmp_path):
+def test_registry_marks_unreachable_host_offline_without_hiding_local(tmp_path, monkeypatch):
+    monkeypatch.setenv("EPICVM_ALLOW_PLAINTEXT_REMOTE_HOST_TOKENS", "1")
     path = tmp_path / "remote-hosts.json"
     path.write_text(json.dumps({
         "version": 1,
@@ -81,6 +87,8 @@ def test_registry_marks_unreachable_host_offline_without_hiding_local(tmp_path):
 
 
 def test_registry_rejects_group_or_world_readable_secret_file(tmp_path):
+    if os.name == "nt":
+        pytest.skip("Windows chmod does not expose DACL restrictions through st_mode")
     path = tmp_path / "remote-hosts.json"
     path.write_text(json.dumps({"hosts": []}))
     path.chmod(0o644)
@@ -89,7 +97,8 @@ def test_registry_rejects_group_or_world_readable_secret_file(tmp_path):
         load_remote_host_configs(path)
 
 
-def test_registry_rejects_invalid_timeout_without_startup_exception(tmp_path):
+def test_registry_rejects_invalid_timeout_without_startup_exception(tmp_path, monkeypatch):
+    monkeypatch.setenv("EPICVM_ALLOW_PLAINTEXT_REMOTE_HOST_TOKENS", "1")
     path = tmp_path / "remote-hosts.json"
     path.write_text(json.dumps({
         "hosts": [{
@@ -112,7 +121,8 @@ def test_registry_persists_remote_inventory_cache_for_offline_cards(tmp_path):
     path.chmod(0o600)
     registry = ConfiguredVmHostRegistry(LocalDockerHost(manager="manager"), path)
     registry.remember_inventory("epic-pc", [{"name": "alpha", "host_id": "epic-pc", "token": "must-not-persist"}])
-    assert stat.S_IMODE(registry.inventory_cache_path.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(registry.inventory_cache_path.stat().st_mode) == 0o600
 
     reloaded = ConfiguredVmHostRegistry(LocalDockerHost(manager="manager"), path)
     assert reloaded.cached_inventory("epic-pc") == [{"name": "alpha", "host_id": "epic-pc"}]
@@ -448,8 +458,29 @@ def test_authenticated_dashboard_enrollment_uploads_token_without_returning_it(m
     assert payload["ok"] is True
     assert "token" not in payload
     assert "secret-token" not in json.dumps(payload)
-    assert stat.S_IMODE(registry_path.stat().st_mode) == 0o600
-    assert json.loads(registry_path.read_text())[0]["token"] == "secret-token"
+    if os.name != "nt":
+        assert stat.S_IMODE(registry_path.stat().st_mode) == 0o600
+    persisted = json.loads(registry_path.read_text())[0]
+    assert "token" not in persisted
+    assert persisted["token_enc"].startswith("EV1:")
+    assert "secret-token" not in registry_path.read_text()
+
+
+def test_persisted_plaintext_agent_token_is_rejected(monkeypatch, tmp_path):
+    monkeypatch.delenv("EPICVM_ALLOW_PLAINTEXT_REMOTE_HOST_TOKENS", raising=False)
+    monkeypatch.setenv("DASH_V2_SECRET", "test-secret")
+    path = tmp_path / "remote-hosts.json"
+    path.write_text(json.dumps({
+        "hosts": [{
+            "id": "epic-pc",
+            "display_name": "Epic PC",
+            "agent_url": "http://100.64.0.2:8765",
+            "token": "secret-token",
+        }],
+    }))
+    path.chmod(0o600)
+    with pytest.raises(RemoteHostConfigError, match="unencrypted token"):
+        load_remote_host_configs(path)
 
 
 def test_remote_host_enrollment_rejects_unauthenticated_upload(monkeypatch, tmp_path):

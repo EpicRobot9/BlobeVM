@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import base64
+import hashlib
 import os
 import re
 import stat
@@ -15,6 +17,11 @@ import tempfile
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 from urllib.parse import urlparse
+
+try:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+except ImportError:  # pragma: no cover - production fails closed without the pinned dependency
+    AESGCM = None
 
 try:
     from .remote_agent_client import RemoteAgentHost
@@ -26,6 +33,8 @@ except ImportError:  # pragma: no cover - direct module loading
 
 HOST_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
 DEFAULT_REMOTE_HOSTS_FILE = "/opt/blobe-vm/remote-hosts.json"
+_TOKEN_PREFIX = "EV1:"
+_TOKEN_AAD = b"EpicVM remote host token v1"
 
 
 class RemoteHostConfigError(ValueError):
@@ -66,11 +75,57 @@ def _validate_agent_url(value: Any) -> str:
     return url
 
 
-def _normalize_record(raw: Mapping[str, Any]) -> dict[str, Any]:
+def _token_key() -> bytes:
+    secret = str(
+        os.environ.get("EPICVM_REMOTE_HOST_KEY")
+        or os.environ.get("DASH_V2_SECRET")
+        or os.environ.get("BLOBEVM_SECRET_KEY")
+        or ""
+    ).strip()
+    if AESGCM is None or not secret:
+        raise RemoteHostConfigError("remote host token encryption is unavailable")
+    return hashlib.sha256(b"EpicVM remote host tokens v1\0" + secret.encode("utf-8")).digest()
+
+
+def _encrypt_token(token: str) -> str:
+    value = str(token or "").strip()
+    if not value or any(char.isspace() for char in value):
+        raise RemoteHostConfigError("remote host token must be a single line")
+    nonce = os.urandom(12)
+    sealed = AESGCM(_token_key()).encrypt(nonce, value.encode("utf-8"), _TOKEN_AAD)
+    return _TOKEN_PREFIX + base64.urlsafe_b64encode(nonce + sealed).decode("ascii")
+
+
+def _decrypt_token(value: str) -> str:
+    encoded = str(value or "")
+    if not encoded.startswith(_TOKEN_PREFIX):
+        if os.environ.get("EPICVM_ALLOW_PLAINTEXT_REMOTE_HOST_TOKENS") == "1":
+            return encoded.strip()
+        raise RemoteHostConfigError("remote host registry contains an unencrypted token")
+    try:
+        raw = base64.urlsafe_b64decode(encoded[len(_TOKEN_PREFIX):].encode("ascii"))
+        if len(raw) <= 12:
+            raise ValueError("short token envelope")
+        token = AESGCM(_token_key()).decrypt(raw[:12], raw[12:], _TOKEN_AAD).decode("utf-8").strip()
+    except Exception as exc:
+        if isinstance(exc, RemoteHostConfigError):
+            raise
+        raise RemoteHostConfigError("remote host token could not be decrypted") from exc
+    if not token or any(char.isspace() for char in token):
+        raise RemoteHostConfigError("remote host token is invalid")
+    return token
+
+
+def _normalize_record(raw: Mapping[str, Any], *, persisted: bool = False) -> dict[str, Any]:
     host_id = str(raw.get("id") or "").strip().lower()
     if not HOST_ID_RE.fullmatch(host_id):
         raise RemoteHostConfigError("host id must match [a-z0-9][a-z0-9._-]{0,62}")
-    token = str(raw.get("token") or "").strip()
+    if "token_enc" in raw:
+        token = _decrypt_token(str(raw.get("token_enc") or ""))
+    elif persisted:
+        token = _decrypt_token(str(raw.get("token") or ""))
+    else:
+        token = str(raw.get("token") or "").strip()
     if not token:
         raise RemoteHostConfigError(f"remote host {host_id} is missing an agent token")
     try:
@@ -98,7 +153,10 @@ def _read_all_remote_host_configs(path: str | os.PathLike[str] | None = None) ->
         return []
     try:
         mode = stat.S_IMODE(config_path.stat().st_mode)
-        if mode & 0o077:
+        # POSIX mode bits are authoritative on the Linux dashboard host. On
+        # Windows, chmod() does not provide meaningful DACL information and
+        # the agent token registry is not a supported dashboard deployment.
+        if os.name != "nt" and mode & 0o077:
             raise RemoteHostConfigError("remote host registry must not be group/world readable")
         data = json.loads(config_path.read_text(encoding="utf-8"))
     except RemoteHostConfigError:
@@ -115,7 +173,7 @@ def _read_all_remote_host_configs(path: str | os.PathLike[str] | None = None) ->
     for raw in raw_hosts:
         if not isinstance(raw, Mapping):
             raise RemoteHostConfigError("each remote host must be an object")
-        record = _normalize_record(raw)
+        record = _normalize_record(raw, persisted=True)
         if record["id"] == "local" or record["id"] in seen:
             raise RemoteHostConfigError(f"duplicate or reserved remote host id: {record['id']}")
         seen.add(record["id"])
@@ -128,15 +186,36 @@ def _write_remote_host_configs(path: str | os.PathLike[str] | None, hosts: Itera
     config_path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=f".{config_path.name}.", dir=str(config_path.parent), text=True)
     try:
-        os.fchmod(fd, 0o600)
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
+        else:
+            # Windows lacks fchmod(); chmod the named temporary file before
+            # opening it through the descriptor. The production dashboard is
+            # Linux, where the descriptor path enforces the POSIX mode.
+            os.chmod(temporary, 0o600)
+        persisted_hosts = []
+        for host in hosts:
+            item = dict(host)
+            token = str(item.pop("token", "") or "").strip()
+            if not token:
+                raise RemoteHostConfigError("remote host token is required")
+            item.pop("token_enc", None)
+            item["token_enc"] = _encrypt_token(token)
+            persisted_hosts.append(item)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(list(hosts), handle, indent=2, sort_keys=True)
+            fd = None
+            json.dump(persisted_hosts, handle, indent=2, sort_keys=True)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, config_path)
         os.chmod(config_path, 0o600)
     finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         try:
             os.unlink(temporary)
         except FileNotFoundError:
@@ -175,7 +254,7 @@ class ConfiguredVmHostRegistry(VmHostRegistry):
         if not self.inventory_cache_path.exists():
             return {}
         try:
-            if stat.S_IMODE(self.inventory_cache_path.stat().st_mode) & 0o077:
+            if os.name != "nt" and stat.S_IMODE(self.inventory_cache_path.stat().st_mode) & 0o077:
                 return {}
         except OSError:
             return {}
