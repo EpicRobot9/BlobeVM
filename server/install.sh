@@ -1377,6 +1377,7 @@ deploy_dashboard_direct() {
   echo "[dashboard] Pulling latest dashboard base image..."
   docker pull python:3.11-slim
   docker run -d --name blobedash --restart unless-stopped \
+    --env-file /opt/blobe-vm/.env \
     -p "${DASHBOARD_PORT}:5000" \
     -v /opt/blobe-vm:/opt/blobe-vm \
     -v /opt/epicvm:/opt/epicvm \
@@ -1385,13 +1386,11 @@ deploy_dashboard_direct() {
     -v "${compose_bin}:/usr/libexec/docker/cli-plugins/docker-compose:ro" \
     -v /var/run/docker.sock:/var/run/docker.sock \
     -v /opt/blobe-vm/dashboard:/app:ro \
-    -e BLOBEDASH_USER="${BLOBEDASH_USER:-}" \
-    -e BLOBEDASH_PASS="${BLOBEDASH_PASS:-}" \
-    -e DASH_V2_SECRET="${DASH_V2_SECRET:-}" \
-    -e BLOBEVM_USER_SECRET="${BLOBEVM_USER_SECRET:-}" \
     -e BLOBEVM_ALLOW_INSECURE_DASHBOARD="${BLOBEVM_ALLOW_INSECURE_DASHBOARD:-0}" \
     -e HOST_DOCKER_BIN="${docker_bin}" \
     -e EPICVM_CONSOLE_ROOT="${EPICVM_CONSOLE_ROOT:-/opt/epicvm/instances}" \
+    -e EPICVM_CONSOLE_BACKEND="${EPICVM_CONSOLE_BACKEND:-moonlight}" \
+    -e EPICVM_MOONLIGHT_ROOT="${EPICVM_MOONLIGHT_ROOT:-/opt/epicvm/moonlight-instances}" \
     -e EPICVM_TRAEFIK_NETWORK="${EPICVM_TRAEFIK_NETWORK:-}" \
     -e EPICVM_PUBLIC_HOST="${EPICVM_PUBLIC_HOST:-}" \
     -e EPICVM_TRAEFIK_CERTRESOLVER="${EPICVM_TRAEFIK_CERTRESOLVER:-}" \
@@ -1400,6 +1399,7 @@ deploy_dashboard_direct() {
     -e EPICVM_GUACAMOLE_IMAGE="${EPICVM_GUACAMOLE_IMAGE:-}" \
     -e EPICVM_GUACD_IMAGE="${EPICVM_GUACD_IMAGE:-}" \
     -e EPICVM_POSTGRES_IMAGE="${EPICVM_POSTGRES_IMAGE:-}" \
+    -e EPICVM_MOONLIGHT_IMAGE="${EPICVM_MOONLIGHT_IMAGE:-}" \
   python:3.11-slim \
   bash -c "apt-get update && apt-get install -y curl jq && pip install --no-cache-dir flask && python /app/app.py" \
     >/dev/null
@@ -1487,7 +1487,7 @@ install_manager() {
     cp -f "$REPO_DIR/dashboard/app.py" /opt/blobe-vm/dashboard/app.py
     # Keep the provider/RemoteVM imports beside the deployed app. Existing
     # deployments often copy only app.py into /opt/blobe-vm/dashboard.
-    for dashboard_module in vm_hosts.py remote_hosts.py remote_agent_client.py guacamole_orchestrator.py; do
+    for dashboard_module in vm_hosts.py remote_hosts.py remote_agent_client.py guacamole_orchestrator.py moonlight_orchestrator.py; do
       if [[ -f "$REPO_DIR/dashboard/$dashboard_module" ]]; then
         install -Dm644 "$REPO_DIR/dashboard/$dashboard_module" "/opt/blobe-vm/dashboard/$dashboard_module"
       fi
@@ -1532,6 +1532,8 @@ install_manager() {
     echo "HOST_DOCKER_BIN=$(sh_q "${HOST_DOCKER_BIN}")";
     echo "HOST_DOCKER_COMPOSE_BIN=$(sh_q "${HOST_DOCKER_COMPOSE_BIN:-}")";
     echo "EPICVM_CONSOLE_ROOT=$(sh_q "${EPICVM_CONSOLE_ROOT:-/opt/epicvm/instances}")";
+    echo "EPICVM_CONSOLE_BACKEND=$(sh_q "${EPICVM_CONSOLE_BACKEND:-moonlight}")";
+    echo "EPICVM_MOONLIGHT_ROOT=$(sh_q "${EPICVM_MOONLIGHT_ROOT:-/opt/epicvm/moonlight-instances}")";
     echo "EPICVM_TRAEFIK_NETWORK=$(sh_q "${EPICVM_TRAEFIK_NETWORK:-}")";
     echo "EPICVM_PUBLIC_HOST=$(sh_q "${EPICVM_PUBLIC_HOST:-}")";
     echo "EPICVM_TRAEFIK_CERTRESOLVER=$(sh_q "${EPICVM_TRAEFIK_CERTRESOLVER:-}")";
@@ -1540,6 +1542,8 @@ install_manager() {
     echo "EPICVM_GUACAMOLE_IMAGE=$(sh_q "${EPICVM_GUACAMOLE_IMAGE:-}")";
     echo "EPICVM_GUACD_IMAGE=$(sh_q "${EPICVM_GUACD_IMAGE:-}")";
     echo "EPICVM_POSTGRES_IMAGE=$(sh_q "${EPICVM_POSTGRES_IMAGE:-}")";
+    echo "EPICVM_MOONLIGHT_IMAGE=$(sh_q "${EPICVM_MOONLIGHT_IMAGE:-}")";
+    echo "EPICVM_BLOBEDASH_IMAGE=$(sh_q "${EPICVM_BLOBEDASH_IMAGE:-}")";
   } > /opt/blobe-vm/.env
 }
 
@@ -1569,7 +1573,7 @@ preflight_dashboard_runtime() {
   fi
   # 4) Instances dir exists
   mkdir -p /opt/blobe-vm/instances
-  install -d -m 700 /opt/epicvm /opt/epicvm/instances
+  install -d -m 700 /opt/epicvm /opt/epicvm/instances /opt/epicvm/moonlight-instances
 
   # 5) In-container probe: ensure docker ps works when mounting CLI and socket
   local probe="blobedash-preflight-$$"

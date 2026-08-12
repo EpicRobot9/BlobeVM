@@ -135,7 +135,7 @@ export default function VMManager(){
   const [provisioningJob, setProvisioningJob] = useState(null)
   const [provisioningHostId, setProvisioningHostId] = useState('')
   const [provisioningClaimToken, setProvisioningClaimToken] = useState('')
-  const [claimDraft, setClaimDraft] = useState({ username:'', password:'', confirm:'' })
+  const [claimDraft, setClaimDraft] = useState({ username:'', password:'', confirm:'', sunshineUsername:'', sunshinePassword:'', sunshineConfirm:'' })
   const [provisioningBusy, setProvisioningBusy] = useState(false)
   const [createBusy, setCreateBusy] = useState(false)
   const [manageVm, setManageVm] = useState(null)
@@ -463,7 +463,7 @@ export default function VMManager(){
         setProvisioningJob(j.job || null)
         setProvisioningHostId(selectedHostId)
         setProvisioningClaimToken(String(j.claimToken || ''))
-        setClaimDraft({ username:'', password:'', confirm:'' })
+        setClaimDraft({ username:'', password:'', confirm:'', sunshineUsername:'', sunshinePassword:'', sunshineConfirm:'' })
         addToast({ title:'Provisioning started', message:`${name} is moving through the EpicVM setup gates`, type:'success', timeout:6000 })
         setCreateName('')
         setCreateBusy(false)
@@ -505,14 +505,14 @@ export default function VMManager(){
   async function claimProvisioningJob(e){
     e?.preventDefault?.()
     if(!provisioningJob || !canClaimProvisioningJob(provisioningJob) || !provisioningClaimToken) return
-    if(claimDraft.password !== claimDraft.confirm) { addToast({title:'Claim rejected', message:'Passwords do not match.', type:'error', timeout:6000}); return }
+    if(claimDraft.password !== claimDraft.confirm || claimDraft.sunshinePassword !== claimDraft.sunshineConfirm) { addToast({title:'Claim rejected', message:'Passwords do not match.', type:'error', timeout:6000}); return }
     setProvisioningBusy(true)
     try{
-      const res = await apiFetch(`/provisioning-jobs/${encodeURIComponent(provisioningJob.id)}/claim`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(provisioningClaimPayload({hostId:provisioningHostId, username:claimDraft.username, password:claimDraft.password, claimToken:provisioningClaimToken})) })
+      const res = await apiFetch(`/provisioning-jobs/${encodeURIComponent(provisioningJob.id)}/claim`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(provisioningClaimPayload({hostId:provisioningHostId, username:claimDraft.username, password:claimDraft.password, claimToken:provisioningClaimToken, sunshineUsername:claimDraft.sunshineUsername, sunshinePassword:claimDraft.sunshinePassword})) })
       const body = await res.json().catch(()=>({ ok:res.ok }))
       if(!res.ok || body.ok === false) throw new Error(body.error?.message || body.error || 'Guest claim failed')
       setProvisioningClaimToken('')
-      setClaimDraft({ username:'', password:'', confirm:'' })
+      setClaimDraft({ username:'', password:'', confirm:'', sunshineUsername:'', sunshinePassword:'', sunshineConfirm:'' })
       setProvisioningJob(body.job || provisioningJob)
       addToast({title:'Guest claimed', message:'Continuing Tailscale, console, and readiness verification.', type:'success', timeout:7000})
     }catch(err){
@@ -520,16 +520,16 @@ export default function VMManager(){
       await refreshProvisioningJob().catch(()=>null)
       addToast({title:'Claim failed', message:String(err), type:'error', timeout:8000})
     }
-    finally{ setClaimDraft({ username:'', password:'', confirm:'' }); setProvisioningBusy(false) }
+    finally{ setClaimDraft({ username:'', password:'', confirm:'', sunshineUsername:'', sunshinePassword:'', sunshineConfirm:'' }); setProvisioningBusy(false) }
   }
 
   async function retryProvisioningConsole(e){
     e?.preventDefault?.()
     if(!provisioningJob || !canRetryProvisioningConsole(provisioningJob)) return
-    if(claimDraft.password !== claimDraft.confirm) { addToast({title:'Retry rejected', message:'Passwords do not match.', type:'error', timeout:6000}); return }
+    if(claimDraft.password !== claimDraft.confirm || claimDraft.sunshinePassword !== claimDraft.sunshineConfirm) { addToast({title:'Retry rejected', message:'Passwords do not match.', type:'error', timeout:6000}); return }
     setProvisioningBusy(true)
     try{
-      const res = await apiFetch(`/provisioning-jobs/${encodeURIComponent(provisioningJob.id)}/retry-console`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(provisioningConsoleRetryPayload({hostId:provisioningHostId, username:claimDraft.username, password:claimDraft.password})) })
+      const res = await apiFetch(`/provisioning-jobs/${encodeURIComponent(provisioningJob.id)}/retry-console`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(provisioningConsoleRetryPayload({hostId:provisioningHostId, username:claimDraft.username, password:claimDraft.password, sunshineUsername:claimDraft.sunshineUsername, sunshinePassword:claimDraft.sunshinePassword})) })
       const body = await res.json().catch(()=>({ ok:res.ok }))
       if(!res.ok || body.ok === false) throw new Error(body.error?.message || body.error || 'Console retry failed')
       setProvisioningJob(body.job || provisioningJob)
@@ -537,7 +537,7 @@ export default function VMManager(){
     }catch(err){
       await refreshProvisioningJob().catch(()=>null)
       addToast({title:'Console retry failed', message:String(err), type:'error', timeout:8000})
-    }finally{ setClaimDraft({ username:'', password:'', confirm:'' }); setProvisioningBusy(false) }
+    }finally{ setClaimDraft({ username:'', password:'', confirm:'', sunshineUsername:'', sunshinePassword:'', sunshineConfirm:'' }); setProvisioningBusy(false) }
   }
 
   async function startTeardown(name, hostId){
@@ -895,6 +895,11 @@ export default function VMManager(){
                   <input value={claimDraft.username} onChange={e=>setClaimDraft(s=>({...s,username:e.target.value}))} placeholder="Guest admin username" autoComplete="username" required />
                   <input value={claimDraft.password} onChange={e=>setClaimDraft(s=>({...s,password:e.target.value}))} placeholder="Guest admin password" type="password" autoComplete="new-password" required />
                   <input value={claimDraft.confirm} onChange={e=>setClaimDraft(s=>({...s,confirm:e.target.value}))} placeholder="Repeat password" type="password" autoComplete="new-password" required />
+                  <strong style={{marginTop:8}}>Sunshine pairing account</strong>
+                  <span style={{color:'var(--muted)',fontSize:13}}>Use the existing Sunshine web account on the guest. These fields are request-only and are cleared after pairing.</span>
+                  <input value={claimDraft.sunshineUsername} onChange={e=>setClaimDraft(s=>({...s,sunshineUsername:e.target.value}))} placeholder="Sunshine username" autoComplete="username" required />
+                  <input value={claimDraft.sunshinePassword} onChange={e=>setClaimDraft(s=>({...s,sunshinePassword:e.target.value}))} placeholder="Sunshine password" type="password" autoComplete="current-password" required />
+                  <input value={claimDraft.sunshineConfirm} onChange={e=>setClaimDraft(s=>({...s,sunshineConfirm:e.target.value}))} placeholder="Repeat Sunshine password" type="password" autoComplete="current-password" required />
                   <Button type="button" onClick={claimProvisioningJob} disabled={provisioningBusy}>{provisioningBusy ? 'Claiming…' : 'Claim guest securely'}</Button>
                 </div>
               ) : null}
@@ -905,6 +910,11 @@ export default function VMManager(){
                   <input value={claimDraft.username} onChange={e=>setClaimDraft(s=>({...s,username:e.target.value}))} placeholder="Guest administrator" autoComplete="username" required />
                   <input value={claimDraft.password} onChange={e=>setClaimDraft(s=>({...s,password:e.target.value}))} placeholder="Guest password" type="password" autoComplete="current-password" required />
                   <input value={claimDraft.confirm} onChange={e=>setClaimDraft(s=>({...s,confirm:e.target.value}))} placeholder="Repeat password" type="password" autoComplete="current-password" required />
+                  <strong style={{marginTop:8}}>Sunshine pairing account</strong>
+                  <span style={{color:'var(--muted)',fontSize:13}}>Re-enter the existing Sunshine web account to pair the retained VM. No password is stored.</span>
+                  <input value={claimDraft.sunshineUsername} onChange={e=>setClaimDraft(s=>({...s,sunshineUsername:e.target.value}))} placeholder="Sunshine username" autoComplete="username" required />
+                  <input value={claimDraft.sunshinePassword} onChange={e=>setClaimDraft(s=>({...s,sunshinePassword:e.target.value}))} placeholder="Sunshine password" type="password" autoComplete="current-password" required />
+                  <input value={claimDraft.sunshineConfirm} onChange={e=>setClaimDraft(s=>({...s,sunshineConfirm:e.target.value}))} placeholder="Repeat Sunshine password" type="password" autoComplete="current-password" required />
                   <Button type="button" onClick={retryProvisioningConsole} disabled={provisioningBusy}>{provisioningBusy ? 'Retrying…' : 'Retry console securely'}</Button>
                 </div>
               ) : null}

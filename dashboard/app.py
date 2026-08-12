@@ -15,10 +15,12 @@ try:
     from .vm_hosts import LocalDockerHost, VmHostRegistry, VmHostUnavailable
     from .remote_hosts import ConfiguredVmHostRegistry, RemoteHostConfigError, redact_host_record, upsert_remote_host_config
     from .guacamole_orchestrator import GuacamoleOrchestrator, ConsoleOrchestrationError
+    from .moonlight_orchestrator import MoonlightOrchestrator
 except ImportError:
     from vm_hosts import LocalDockerHost, VmHostRegistry, VmHostUnavailable
     from remote_hosts import ConfiguredVmHostRegistry, RemoteHostConfigError, redact_host_record, upsert_remote_host_config
     from guacamole_orchestrator import GuacamoleOrchestrator, ConsoleOrchestrationError
+    from moonlight_orchestrator import MoonlightOrchestrator
 try:
     import psutil
 except Exception:
@@ -218,11 +220,50 @@ LOCAL_VM_HOST = LocalDockerHost(manager=MANAGER)
 VM_HOST_REGISTRY = ConfiguredVmHostRegistry(LOCAL_VM_HOST)
 VM_HOSTS = VM_HOST_REGISTRY
 _CONSOLE_ORCHESTRATOR = None
+_LEGACY_GUACAMOLE_ORCHESTRATOR = None
 
 def _console_orchestrator():
     global _CONSOLE_ORCHESTRATOR
     if _CONSOLE_ORCHESTRATOR is None:
-        _CONSOLE_ORCHESTRATOR = GuacamoleOrchestrator(
+        backend = os.environ.get('EPICVM_CONSOLE_BACKEND', 'moonlight').strip().lower()
+        common = dict(
+            proxy_network=os.environ.get('EPICVM_TRAEFIK_NETWORK', 'proxy'),
+            public_host=os.environ.get('EPICVM_PUBLIC_HOST', ''),
+            tls_resolver=os.environ.get('EPICVM_TRAEFIK_CERTRESOLVER', ''),
+            auth_middleware=os.environ.get('EPICVM_TRAEFIK_AUTH_MIDDLEWARE', ''),
+            router_priority=os.environ.get('EPICVM_TRAEFIK_ROUTER_PRIORITY', ''),
+        )
+        if backend in ('moonlight', 'sunshine'):
+            _CONSOLE_ORCHESTRATOR = MoonlightOrchestrator(
+                root=os.environ.get('EPICVM_MOONLIGHT_ROOT', '/opt/epicvm/moonlight-instances'),
+                **common,
+            )
+        else:
+            _CONSOLE_ORCHESTRATOR = GuacamoleOrchestrator(
+                root=os.environ.get('EPICVM_CONSOLE_ROOT', '/opt/epicvm/instances'),
+                credential_secret=_dashboard_secret(),
+                **common,
+            )
+    return _CONSOLE_ORCHESTRATOR
+
+
+def _moonlight_console(orchestrator=None) -> bool:
+    """Return true only for the explicitly selected Moonlight backend."""
+    value = orchestrator if orchestrator is not None else _console_orchestrator()
+    return str(getattr(value, 'backend', '')).lower() == 'moonlight'
+
+
+def _console_for_vm(name: str):
+    """Use Moonlight for new bundles but preserve an owned legacy Guac VM."""
+    primary = _console_orchestrator()
+    if not _moonlight_console(primary):
+        return primary
+    safe = str(name or '').strip().lower()
+    if primary.has_auto_login(safe):
+        return primary
+    global _LEGACY_GUACAMOLE_ORCHESTRATOR
+    if _LEGACY_GUACAMOLE_ORCHESTRATOR is None:
+        _LEGACY_GUACAMOLE_ORCHESTRATOR = GuacamoleOrchestrator(
             root=os.environ.get('EPICVM_CONSOLE_ROOT', '/opt/epicvm/instances'),
             proxy_network=os.environ.get('EPICVM_TRAEFIK_NETWORK', 'proxy'),
             public_host=os.environ.get('EPICVM_PUBLIC_HOST', ''),
@@ -231,7 +272,9 @@ def _console_orchestrator():
             router_priority=os.environ.get('EPICVM_TRAEFIK_ROUTER_PRIORITY', ''),
             credential_secret=_dashboard_secret(),
         )
-    return _CONSOLE_ORCHESTRATOR
+    if _LEGACY_GUACAMOLE_ORCHESTRATOR.has_auto_login(safe):
+        return _LEGACY_GUACAMOLE_ORCHESTRATOR
+    return primary
 
 def _vm_host(host_id=None):
     VM_HOST_REGISTRY.refresh()
@@ -2291,6 +2334,9 @@ def dashboard_console_entry(name):
     safe = str(name or '').strip().lower()
     if not re.fullmatch(r'[a-z0-9][a-z0-9._-]{0,62}', safe):
         return Response('Invalid VM name.', 400)
+    orchestrator = _console_for_vm(safe)
+    if _moonlight_console(orchestrator) and orchestrator.has_auto_login(safe):
+        return redirect(f'/vm/{url_quote(safe, safe="")}/')
     return redirect(f'/dashboard/console/{url_quote(safe, safe="")}/setup')
 
 
@@ -2303,11 +2349,16 @@ def dashboard_console_launch(name):
         safe = str(name or '').strip().lower()
         if not re.fullmatch(r'[a-z0-9][a-z0-9._-]{0,62}', safe):
             return Response('Invalid VM name.', 400)
-        orchestrator = _console_orchestrator()
+        orchestrator = _console_for_vm(safe)
         if not orchestrator.has_auto_login(safe):
             if _admin_vm_sso_authenticated():
                 return redirect(f'/dashboard/console/{url_quote(safe, safe="")}/setup')
             return Response('Automatic console login must be configured by an administrator.', 409)
+        if _moonlight_console(orchestrator):
+            response = redirect(f'/vm/{url_quote(safe, safe="")}/')
+            response.headers['Cache-Control'] = 'no-store'
+            response.headers['Referrer-Policy'] = 'no-referrer'
+            return response
         data = orchestrator.build_json_auth_data(safe)
         client_id = base64.urlsafe_b64encode(f'{safe}\0c\0json'.encode('utf-8')).decode('ascii').rstrip('=')
         prefix = f'/vm/{url_quote(safe, safe="")}'
@@ -2342,6 +2393,9 @@ def dashboard_console_launch(name):
 def dashboard_console_setup(name):
     safe = str(name or '').strip().lower()
     csrf = _csrf_token_for_session()
+    orchestrator = _console_for_vm(safe)
+    if _moonlight_console(orchestrator):
+        return Response(f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Pair Sunshine console</title><style>body{{margin:0;background:#050816;color:#e7f0f4;font:15px Inter,system-ui;display:grid;place-items:center;min-height:100vh}}form{{width:min(460px,calc(100vw - 48px));background:#071117;border:1px solid #1a2b33;padding:30px}}input,button{{display:block;box-sizing:border-box;width:100%;margin-top:12px;padding:12px;background:#061016;color:#e7f0f4;border:1px solid #29404a}}button{{background:#02bdf3;color:#00131b;font-weight:700}}#error{{color:#ff9ab0;margin-top:12px}}</style></head><body><form id="setup"><h1>Pair Sunshine</h1><p>Enter the existing Sunshine web account for this VM. The credentials are used only for this pairing request and are never stored by EpicVM.</p><input id="sunshineUsername" autocomplete="username" placeholder="Sunshine username" required><input id="sunshinePassword" type="password" autocomplete="current-password" placeholder="Sunshine password" required><button>Pair and open desktop</button><div id="error"></div></form><script>document.getElementById('setup').addEventListener('submit',async(e)=>{{e.preventDefault();const u=document.getElementById('sunshineUsername'),p=document.getElementById('sunshinePassword');const r=await fetch('/dashboard/api/console-credentials/{url_quote(safe, safe="")}',{{method:'POST',headers:{{'Content-Type':'application/json','X-CSRF-Token':'{csrf}'}},body:JSON.stringify({{sunshineUsername:u.value,sunshinePassword:p.value}})}});const j=await r.json().catch(()=>({{}}));p.value='';if(r.ok&&j.ok)location.href=j.launchUrl;else document.getElementById('error').textContent=j.error?.message||j.error||'Pairing failed';}});</script></body></html>''', mimetype='text/html', headers={'Cache-Control':'no-store','Referrer-Policy':'no-referrer'})
     return Response(f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Enable automatic console login</title><style>body{{margin:0;background:#050816;color:#e7f0f4;font:15px Inter,system-ui;display:grid;place-items:center;min-height:100vh}}form{{width:min(420px,calc(100vw - 48px));background:#071117;border:1px solid #1a2b33;padding:30px}}input,button{{display:block;box-sizing:border-box;width:100%;margin-top:12px;padding:12px;background:#061016;color:#e7f0f4;border:1px solid #29404a}}button{{background:#02bdf3;color:#00131b;font-weight:700}}#error{{color:#ff9ab0;margin-top:12px}}</style></head><body><form id="setup"><h1>Enable automatic login</h1><p>Enter the Windows credentials once. EpicVM will encrypt them at rest and use short-lived Guacamole launch tokens.</p><input id="username" autocomplete="username" placeholder="Windows username" required><input id="password" type="password" autocomplete="current-password" placeholder="Windows password" required><button>Enable and open desktop</button><div id="error"></div></form><script>document.getElementById('setup').addEventListener('submit',async(e)=>{{e.preventDefault();const r=await fetch('/dashboard/api/console-credentials/{url_quote(safe, safe="")}',{{method:'POST',headers:{{'Content-Type':'application/json','X-CSRF-Token':'{csrf}'}},body:JSON.stringify({{username:document.getElementById('username').value,password:document.getElementById('password').value}})}});const j=await r.json().catch(()=>({{}}));document.getElementById('password').value='';if(r.ok&&j.ok)location.href=j.launchUrl;else document.getElementById('error').textContent=j.error?.message||j.error||'Setup failed';}});</script></body></html>''', mimetype='text/html', headers={'Cache-Control':'no-store','Referrer-Policy':'no-referrer'})
 
 
@@ -2353,8 +2407,16 @@ def dashboard_console_credentials(name):
     payload = request.get_json(silent=True) or {}
     username = str(payload.get('username') or '')
     password = str(payload.get('password') or '')
+    sunshine_username = str(payload.get('sunshineUsername') or payload.get('sunshine_username') or '')
+    sunshine_password = str(payload.get('sunshinePassword') or payload.get('sunshine_password') or '')
     try:
-        _console_orchestrator().enable_auto_login(name=name, username=username, password=password)
+        orchestrator = _console_for_vm(name)
+        if _moonlight_console(orchestrator):
+            if not sunshine_username or not sunshine_password:
+                return jsonify({'ok': False, 'error': {'code': 'sunshine_credentials_required', 'message': 'Sunshine credentials are required for pairing.'}}), 400
+            orchestrator.enable_auto_login(name=name, username='', password='', sunshine_username=sunshine_username, sunshine_password=sunshine_password)
+        else:
+            orchestrator.enable_auto_login(name=name, username=username, password=password)
         response = jsonify({'ok': True, 'launchUrl': f'/dashboard/console/{url_quote(str(name).lower(), safe="")}/launch'})
         response.headers['Cache-Control'] = 'no-store'
         return response
@@ -2363,7 +2425,7 @@ def dashboard_console_credentials(name):
         response.headers['Cache-Control'] = 'no-store'
         return response, int(getattr(exc, 'status', 502) or 502)
     finally:
-        username = password = ''
+        username = password = sunshine_username = sunshine_password = ''
 
 
 @app.post('/portal/api/auth/login')
@@ -3576,8 +3638,15 @@ def api_provisioning_job_claim(job_id):
     username = str(payload.get('username') or '')
     password = str(payload.get('password') or '')
     claim_token = str(payload.get('claimToken') or payload.get('claim_token') or '')
+    sunshine_username = str(payload.get('sunshineUsername') or payload.get('sunshine_username') or '')
+    sunshine_password = str(payload.get('sunshinePassword') or payload.get('sunshine_password') or '')
     if not host_id or not username or not password or not claim_token:
         response = jsonify({'ok': False, 'error': 'host_id and claim fields are required'})
+        response.headers['Cache-Control'] = 'no-store'
+        return response, 400
+    orchestrator = _console_orchestrator()
+    if _moonlight_console(orchestrator) and (not sunshine_username or not sunshine_password):
+        response = jsonify({'ok': False, 'error': {'code': 'sunshine_credentials_required', 'message': 'Sunshine credentials are required for Moonlight pairing.'}})
         response.headers['Cache-Control'] = 'no-store'
         return response, 400
     try:
@@ -3592,10 +3661,14 @@ def api_provisioning_job_claim(job_id):
             raise ConsoleOrchestrationError('The Windows host did not reach the console gate.', status=422, code='console_gate_missing')
         guest_ip = str(job.get('tailnetIp') or '')
         name = str(job.get('name') or '')
-        orchestrator = _console_orchestrator()
-        plan = orchestrator.build_plan(name=name, guest_ip=guest_ip, username=username, password=password)
+        if _moonlight_console(orchestrator):
+            plan = orchestrator.build_plan(name=name, guest_ip=guest_ip)
+        else:
+            plan = orchestrator.build_plan(name=name, guest_ip=guest_ip, username=username, password=password)
         orchestrator.stage_plan(plan)
         started = orchestrator.start_staged(name)
+        if _moonlight_console(orchestrator):
+            started = orchestrator.pair_staged(name, sunshine_username=sunshine_username, sunshine_password=sunshine_password)
         result = host.console_complete(
             job_id,
             route_prefix=str(started.get('routePrefix') or plan.route_prefix),
@@ -3635,7 +3708,7 @@ def api_provisioning_job_claim(job_id):
     finally:
         # Drop local references after the transport call. The request body is
         # never logged or returned, and the agent owns the one-time verifier.
-        username = password = claim_token = ''
+        username = password = claim_token = sunshine_username = sunshine_password = ''
 
 
 @app.post('/dashboard/api/provisioning-jobs/<job_id>/retry-console')
@@ -3650,8 +3723,13 @@ def api_provisioning_job_retry_console(job_id):
     host_id = str(payload.get('host_id') or '').strip()
     username = str(payload.get('username') or '')
     password = str(payload.get('password') or '')
+    sunshine_username = str(payload.get('sunshineUsername') or payload.get('sunshine_username') or '')
+    sunshine_password = str(payload.get('sunshinePassword') or payload.get('sunshine_password') or '')
     if not host_id or not username or not password:
         return jsonify({'ok': False, 'error': 'host_id and console credentials are required'}), 400
+    orchestrator = _console_orchestrator()
+    if _moonlight_console(orchestrator) and (not sunshine_username or not sunshine_password):
+        return jsonify({'ok': False, 'error': {'code': 'sunshine_credentials_required', 'message': 'Sunshine credentials are required for Moonlight pairing.'}}), 400
     try:
         host = _vm_host(host_id)
         current = host.provisioning_status(job_id)
@@ -3660,11 +3738,15 @@ def api_provisioning_job_retry_console(job_id):
             raise ConsoleOrchestrationError('Only a failed console step may be retried.', status=409, code='console_retry_not_allowed')
         name = str(job.get('name') or '')
         guest_ip = str(job.get('tailnetIp') or '')
-        orchestrator = _console_orchestrator()
         orchestrator.quarantine_staged(name)
-        plan = orchestrator.build_plan(name=name, guest_ip=guest_ip, username=username, password=password)
+        if _moonlight_console(orchestrator):
+            plan = orchestrator.build_plan(name=name, guest_ip=guest_ip)
+        else:
+            plan = orchestrator.build_plan(name=name, guest_ip=guest_ip, username=username, password=password)
         orchestrator.stage_plan(plan)
         started = orchestrator.start_staged(name)
+        if _moonlight_console(orchestrator):
+            started = orchestrator.pair_staged(name, sunshine_username=sunshine_username, sunshine_password=sunshine_password)
         result = host.console_complete(job_id, route_prefix=plan.route_prefix, guest_tcp_verified=bool(started.get('guestTcpVerified')))
         response = jsonify({'ok': True, 'host_id': host_id, **result})
         response.headers['Cache-Control'] = 'no-store'
@@ -3694,7 +3776,7 @@ def api_provisioning_job_retry_console(job_id):
         response.headers['Cache-Control'] = 'no-store'
         return response, 502
     finally:
-        username = password = ''
+        username = password = sunshine_username = sunshine_password = ''
 
 
 @app.post('/dashboard/api/deprovisioning-jobs')
@@ -3718,7 +3800,7 @@ def api_deprovisioning_job_create():
         # Remove the externally reachable route first. The orchestrator only
         # accepts exact EpicVM-owned bundle directories and quarantines rather
         # than deleting their volumes.
-        _console_orchestrator().teardown(name=name, confirm_name=confirm_name)
+        _console_for_vm(name).teardown(name=name, confirm_name=confirm_name)
         result = host.deprovision(name, confirm_name=confirm_name, idempotency_key=request.headers.get('Idempotency-Key'))
         response = jsonify({'ok': True, 'host_id': host_id, **result})
         response.headers['Cache-Control'] = 'no-store'

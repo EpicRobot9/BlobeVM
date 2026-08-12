@@ -25,12 +25,16 @@ export function provisioningProgress(job){
   return Math.round((index / (PROVISIONING_STATES.length - 1)) * 100)
 }
 
-export function provisioningClaimPayload({ hostId, username, password, claimToken } = {}){
-  return { host_id:String(hostId || ''), username:String(username || ''), password:String(password || ''), claimToken:String(claimToken || '') }
+export function provisioningClaimPayload({ hostId, username, password, claimToken, sunshineUsername, sunshinePassword } = {}){
+  const payload = { host_id:String(hostId || ''), username:String(username || ''), password:String(password || ''), claimToken:String(claimToken || '') }
+  if(sunshineUsername || sunshinePassword) { payload.sunshineUsername = String(sunshineUsername || ''); payload.sunshinePassword = String(sunshinePassword || '') }
+  return payload
 }
 
-export function provisioningConsoleRetryPayload({ hostId, username, password } = {}){
-  return { host_id:String(hostId || ''), username:String(username || ''), password:String(password || '') }
+export function provisioningConsoleRetryPayload({ hostId, username, password, sunshineUsername, sunshinePassword } = {}){
+  const payload = { host_id:String(hostId || ''), username:String(username || ''), password:String(password || '') }
+  if(sunshineUsername || sunshinePassword) { payload.sunshineUsername = String(sunshineUsername || ''); payload.sunshinePassword = String(sunshinePassword || '') }
+  return payload
 }
 
 export function deprovisioningPayload({ hostId, name } = {}){

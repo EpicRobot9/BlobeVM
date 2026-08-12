@@ -5,7 +5,6 @@ ENV_FILE="/opt/blobe-vm/.env"
 STATE_DIR="/opt/blobe-vm"
 APP_PATH="/opt/blobe-vm/dashboard/app.py"
 NAME="blobedash"
-IMAGE_NAME="blobedash:local"
 IMAGE_HASH_FILE="/opt/blobe-vm/.blobedash-image.hash"
 
 # Load env file if present
@@ -16,6 +15,8 @@ if [[ -f "$ENV_FILE" ]]; then
     export "$k"="$v"
   done < "$ENV_FILE"
 fi
+
+IMAGE_NAME="${EPICVM_BLOBEDASH_IMAGE:-blobedash:local}"
 
 NO_TRAEFIK=${NO_TRAEFIK:-0}
 ENABLE_DASHBOARD=${ENABLE_DASHBOARD:-0}
@@ -72,6 +73,7 @@ blobedash_build_hash() {
   for p in \
     "$STATE_DIR/dashboard/app.py" \
     "$STATE_DIR/dashboard/guacamole_orchestrator.py" \
+    "$STATE_DIR/dashboard/moonlight_orchestrator.py" \
     "$STATE_DIR/dashboard/remote_agent_client.py" \
     "$STATE_DIR/dashboard/optimizer.py" \
     "$STATE_DIR/server/blobedash.Dockerfile"
@@ -84,6 +86,13 @@ blobedash_build_hash() {
 }
 
 ensure_blobedash_image() {
+  # A promoted release may already be present as an immutable image.  Reuse
+  # it across service restarts rather than rebuilding through a package
+  # network that may be unavailable; the operator changes the tag explicitly
+  # when a new release is ready.
+  if [[ -n "${EPICVM_BLOBEDASH_IMAGE:-}" ]] && docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
+    return 0
+  fi
   local dockerfile="$STATE_DIR/server/blobedash.Dockerfile"
   [[ -f "$dockerfile" ]] || { echo "blobedash Dockerfile not found: $dockerfile" >&2; exit 1; }
   local new_hash old_hash image_id build_ctx
@@ -139,7 +148,7 @@ if [[ -z "$DASHBOARD_PORT" ]] || { port_in_use "$DASHBOARD_PORT" && ! container_
 fi
 
 ensure_blobedash_image
-install -d -m 700 /opt/epicvm /opt/epicvm/instances
+install -d -m 700 /opt/epicvm /opt/epicvm/instances /opt/epicvm/moonlight-instances
 
 # Recreate container to ensure correct port mapping
 if docker ps -a --format '{{.Names}}' | grep -qx "$NAME"; then
@@ -190,6 +199,7 @@ if docker network inspect proxy >/dev/null 2>&1; then
 fi
 
 docker run -d --name "$NAME" --restart unless-stopped \
+  --env-file "$ENV_FILE" \
   -p "${DASHBOARD_PORT}:5000" \
   "${NET_ARGS[@]}" \
   -v "$STATE_DIR:/opt/blobe-vm" \
@@ -200,13 +210,11 @@ docker run -d --name "$NAME" --restart unless-stopped \
   -v "${HOST_DOCKER_COMPOSE_BIN}:/usr/libexec/docker/cli-plugins/docker-compose:ro" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v "$STATE_DIR/dashboard:/app:ro" \
-  -e BLOBEDASH_USER="${BLOBEDASH_USER:-}" \
-  -e BLOBEDASH_PASS="${BLOBEDASH_PASS:-}" \
-  -e DASH_V2_SECRET="${DASH_V2_SECRET:-}" \
-  -e BLOBEVM_USER_SECRET="${BLOBEVM_USER_SECRET:-}" \
   -e BLOBEVM_ALLOW_INSECURE_DASHBOARD="${BLOBEVM_ALLOW_INSECURE_DASHBOARD:-0}" \
   -e HOST_DOCKER_BIN="${HOST_DOCKER_BIN}" \
   -e EPICVM_CONSOLE_ROOT="${EPICVM_CONSOLE_ROOT:-/opt/epicvm/instances}" \
+  -e EPICVM_CONSOLE_BACKEND="${EPICVM_CONSOLE_BACKEND:-moonlight}" \
+  -e EPICVM_MOONLIGHT_ROOT="${EPICVM_MOONLIGHT_ROOT:-/opt/epicvm/moonlight-instances}" \
   -e EPICVM_TRAEFIK_NETWORK="${EPICVM_TRAEFIK_NETWORK:-}" \
   -e EPICVM_PUBLIC_HOST="${EPICVM_PUBLIC_HOST:-}" \
   -e EPICVM_TRAEFIK_CERTRESOLVER="${EPICVM_TRAEFIK_CERTRESOLVER:-}" \
@@ -215,6 +223,7 @@ docker run -d --name "$NAME" --restart unless-stopped \
   -e EPICVM_GUACAMOLE_IMAGE="${EPICVM_GUACAMOLE_IMAGE:-}" \
   -e EPICVM_GUACD_IMAGE="${EPICVM_GUACD_IMAGE:-}" \
   -e EPICVM_POSTGRES_IMAGE="${EPICVM_POSTGRES_IMAGE:-}" \
+  -e EPICVM_MOONLIGHT_IMAGE="${EPICVM_MOONLIGHT_IMAGE:-}" \
   "$IMAGE_NAME" \
   >/dev/null
 

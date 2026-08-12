@@ -40,3 +40,21 @@ def test_installer_dashboard_auth_status_uses_epicvm_brand_only():
     assert "BlobeVM Dashboard Auth" not in installer
     assert re.search(r'echo "  EpicVM Dashboard Auth: enabled', installer)
     assert re.search(r'echo "  EpicVM Dashboard Auth: disabled', installer)
+
+
+def test_dashboard_secret_transport_uses_protected_env_file():
+    ensure = _text("server/blobedash-ensure.sh")
+    installer = _text("server/install.sh")
+    assert '--env-file "$ENV_FILE"' in ensure
+    assert "--env-file /opt/blobe-vm/.env" in installer
+    for text in (ensure, installer):
+        assert '-e BLOBEDASH_PASS=' not in text
+        assert '-e DASH_V2_SECRET=' not in text
+        assert '-e BLOBEVM_USER_SECRET=' not in text
+
+
+def test_dashboard_image_pin_is_loaded_before_selection():
+    ensure = _text("server/blobedash-ensure.sh")
+    load_marker = "done < \"$ENV_FILE\""
+    image_marker = 'IMAGE_NAME="${EPICVM_BLOBEDASH_IMAGE:-blobedash:local}"'
+    assert ensure.index(load_marker) < ensure.index(image_marker)
