@@ -491,7 +491,16 @@ class RemoteAgentHost:
     @staticmethod
     def _host_error(exc: RemoteAgentError) -> VmHostUnavailable:
         status = int(exc.status or 503)
-        if status >= 500:
+        remote_code = ""
+        if isinstance(exc.data, Mapping):
+            error = exc.data.get("error")
+            if isinstance(error, Mapping):
+                candidate = str(error.get("code") or "").strip().lower()
+                if candidate and candidate.replace("_", "").isalnum():
+                    remote_code = candidate
+        if remote_code:
+            code = remote_code
+        elif status >= 500:
             code = "host_unavailable"
         else:
             code = {

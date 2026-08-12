@@ -304,6 +304,10 @@ def _vm_host_error_response(exc):
         'not_found': 'The requested remote VM resource was not found.',
         'conflict': 'The remote VM request conflicts with existing state.',
         'claim_failed': 'The one-time guest claim was rejected.',
+        'claim_reissue_not_allowed': 'The pending claim is no longer eligible for reissue.',
+        'claim_state_invalid': 'The pending claim state is invalid.',
+        'claim_reissue_failed': 'The pending claim could not be reissued safely.',
+        'claim_expired': 'The pending claim has expired.',
         'host_unavailable': 'The remote VM host is unavailable.',
     }
     response = jsonify({'ok': False, 'error': messages.get(code, 'The remote VM request failed.'), 'code': code})
