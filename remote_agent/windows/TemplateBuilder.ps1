@@ -142,11 +142,14 @@ function Get-EpicVMTemplateGuestSanitizer {
     return {
         param($BootstrapName,$BootstrapPassword,$BootstrapPath,$ExpectedSunshineVersion)
         $ErrorActionPreference='Stop'
-        if (-not (Get-LocalUser -Name $BootstrapName -ErrorAction SilentlyContinue)) {
-            $secure = ConvertTo-SecureString $BootstrapPassword -AsPlainText -Force
+        $secure = ConvertTo-SecureString $BootstrapPassword -AsPlainText -Force
+        $existingBootstrap = Get-LocalUser -Name $BootstrapName -ErrorAction SilentlyContinue
+        if ($null -eq $existingBootstrap) {
             New-LocalUser -Name $BootstrapName -Password $secure -AccountNeverExpires -PasswordNeverExpires -UserMayNotChangePassword | Out-Null
-            Add-LocalGroupMember -Group 'Administrators' -Member $BootstrapName -ErrorAction Stop
+        } else {
+            Set-LocalUser -Name $BootstrapName -Password $secure -AccountNeverExpires -PasswordNeverExpires -UserMayNotChangePassword -ErrorAction Stop
         }
+        Add-LocalGroupMember -Group 'Administrators' -Member $BootstrapName -ErrorAction SilentlyContinue
         # The bootstrap secret is machine-DPAPI protected inside the builder.
         # It is consumed by the host agent and removed after the first claim.
         $raw=[Text.Encoding]::UTF8.GetBytes([string]$BootstrapPassword)
@@ -169,7 +172,10 @@ function Get-EpicVMTemplateGuestSanitizer {
         $sunshineExe=[string]$sunshineCim.PathName
         if($sunshineExe -match '^"([^"]+)"'){$sunshineExe=$Matches[1]}elseif($sunshineExe -match '^([^ ]+)'){$sunshineExe=$Matches[1]}
         if([string]::IsNullOrWhiteSpace($sunshineExe) -or -not(Test-Path -LiteralPath $sunshineExe -PathType Leaf)){throw 'sunshine_missing'}
-        $installedSunshineVersion=[string]([Diagnostics.FileVersionInfo]::GetVersionInfo($sunshineExe).ProductVersion)
+        $serviceDirectory=Split-Path -Parent $sunshineExe
+        $mainSunshineExe=Join-Path (Split-Path -Parent $serviceDirectory) 'sunshine.exe'
+        if(-not (Test-Path -LiteralPath $mainSunshineExe -PathType Leaf)){throw 'sunshine_missing'}
+        $installedSunshineVersion=[string]([Diagnostics.FileVersionInfo]::GetVersionInfo($mainSunshineExe).ProductVersion)
         if(-not [string]::IsNullOrWhiteSpace([string]$ExpectedSunshineVersion) -and $installedSunshineVersion -cne [string]$ExpectedSunshineVersion){throw 'sunshine_version_mismatch'}
         if($sunshineService.Status -eq 'Running'){Stop-Service -Name 'SunshineService' -Force -ErrorAction SilentlyContinue}
         Set-Service -Name 'SunshineService' -StartupType Automatic -ErrorAction SilentlyContinue

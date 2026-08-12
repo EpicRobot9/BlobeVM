@@ -2,7 +2,8 @@
 [CmdletBinding()]
 param(
     [string]$InstallerPath = 'C:\Users\Epic\.codex\visualizations\2026\08\02\019fc3f3-fb3f-7361-b1b6-8eed5c67abe2\epicvm-provisioning-integration\.deps\Sunshine-Windows-AMD64-installer.msi',
-    [string]$ReportPath = 'C:\Users\Epic\.codex\visualizations\2026\08\02\019fc3f3-fb3f-7361-b1b6-8eed5c67abe2\epicvm-provisioning-integration\.epicvm-clean-source-sunshine.json'
+    [string]$ReportPath = 'C:\Users\Epic\.codex\visualizations\2026\08\02\019fc3f3-fb3f-7361-b1b6-8eed5c67abe2\epicvm-provisioning-integration\.epicvm-clean-source-sunshine.json',
+    [string]$CredentialUser = 'EpicVMBootstrap'
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -14,7 +15,7 @@ try {
     if ((Get-FileHash -LiteralPath $InstallerPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedHash) { throw 'Pinned Sunshine installer hash mismatch.' }
     $integration = Get-VMIntegrationService -VMName 'EpicVM-CleanTemplateSource' -Name 'Guest Service Interface' -ErrorAction Stop
     if (-not $integration.Enabled) { Enable-VMIntegrationService -VMName 'EpicVM-CleanTemplateSource' -Name 'Guest Service Interface' }
-    $credential = Get-Credential -Message 'Enter the current Windows credentials for EpicVM-CleanTemplateSource. They remain in memory only.'
+    $credential = Get-Credential -UserName $CredentialUser -Message 'Enter the current Windows password for EpicVM-CleanTemplateSource. It remains in memory only.'
     if ($null -eq $credential) { throw 'Guest credentials were not provided.' }
     Copy-VMFile -VMName 'EpicVM-CleanTemplateSource' -SourcePath $InstallerPath -DestinationPath $destination -FileSource Host -CreateFullPath -Force
     $result = Invoke-Command -VMName 'EpicVM-CleanTemplateSource' -Credential $credential -ErrorAction Stop -ScriptBlock {

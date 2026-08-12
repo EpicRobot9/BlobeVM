@@ -128,7 +128,10 @@ function Get-EpicVMSunshineConfigurationScript {
         if($servicePath -match '^"([^"]+)"'){$servicePath=$Matches[1]}
         elseif($servicePath -match '^([^ ]+)'){$servicePath=$Matches[1]}
         if([string]::IsNullOrWhiteSpace($servicePath) -or -not (Test-Path -LiteralPath $servicePath -PathType Leaf)){throw 'Sunshine executable could not be located.'}
-        $installedVersion=[string]([Diagnostics.FileVersionInfo]::GetVersionInfo($servicePath).ProductVersion)
+        $serviceDirectory=Split-Path -Parent $servicePath
+        $mainSunshinePath=Join-Path (Split-Path -Parent $serviceDirectory) 'sunshine.exe'
+        if(-not (Test-Path -LiteralPath $mainSunshinePath -PathType Leaf)){throw 'Sunshine executable could not be located.'}
+        $installedVersion=[string]([Diagnostics.FileVersionInfo]::GetVersionInfo($mainSunshinePath).ProductVersion)
         if(-not [string]::IsNullOrWhiteSpace([string]$ExpectedVersion) -and $installedVersion -cne [string]$ExpectedVersion){throw 'Sunshine version did not match the pinned release.'}
         $paths=@($StatePaths | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
         $statePath=@($paths | Where-Object { Test-Path -LiteralPath ([string]$_) -PathType Leaf } | Select-Object -First 1)
