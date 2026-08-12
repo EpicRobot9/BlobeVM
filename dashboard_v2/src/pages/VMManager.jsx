@@ -154,6 +154,7 @@ export default function VMManager(){
   const vmSettingsCacheRef = useRef(new Map())
   const vmSettingsInFlightRef = useRef(new Map())
   const vmSettingsGenerationRef = useRef(0)
+  const provisioningRecoveryInFlightRef = useRef(new Map())
 
   function clearProvisioningRecovery(){
     try{ window.sessionStorage.removeItem('epicvm.provisioning-recovery') }catch(_e){}
@@ -163,14 +164,24 @@ export default function VMManager(){
     const safeHostId = String(hostId || '')
     const safeName = String(name || '').trim().toLowerCase()
     if(!safeHostId || !safeName) return false
-    const res = await apiFetch('/provisioning-jobs/recover', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({host_id:safeHostId, name:safeName}) })
-    const body = await res.json().catch(()=>({ ok:res.ok }))
-    if(!res.ok || body.ok === false || !body.claimToken || !body.job) throw new Error(body.error?.message || body.error || 'No pending claim is available')
-    setProvisioningHostId(safeHostId)
-    setProvisioningJob(body.job)
-    setProvisioningClaimToken(String(body.claimToken))
-    setClaimDraft({ username:'', password:'', confirm:'', sunshineUsername:'', sunshinePassword:'', sunshineConfirm:'' })
-    return true
+    const key = `${safeHostId}\u0000${safeName}`
+    const existing = provisioningRecoveryInFlightRef.current.get(key)
+    if(existing) return existing
+    const request = (async()=>{
+      const res = await apiFetch('/provisioning-jobs/recover', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({host_id:safeHostId, name:safeName}) })
+      const body = await res.json().catch(()=>({ ok:res.ok }))
+      if(!res.ok || body.ok === false || !body.claimToken || !body.job) throw new Error(body.error?.message || body.error || 'No pending claim is available')
+      setProvisioningHostId(safeHostId)
+      setProvisioningJob(body.job)
+      setProvisioningClaimToken(String(body.claimToken))
+      setClaimDraft({ username:'', password:'', confirm:'', sunshineUsername:'', sunshinePassword:'', sunshineConfirm:'' })
+      return true
+    })()
+    provisioningRecoveryInFlightRef.current.set(key, request)
+    try{ return await request }
+    finally{
+      if(provisioningRecoveryInFlightRef.current.get(key) === request) provisioningRecoveryInFlightRef.current.delete(key)
+    }
   }
 
   useEffect(()=>{
