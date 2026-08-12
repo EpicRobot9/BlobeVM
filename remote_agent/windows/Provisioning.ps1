@@ -666,9 +666,16 @@ function New-EpicVMDeprovisioningJob {
                     }; Descending = $true } |
             Select-Object -First 1)
         $deviceId = [string](Get-EpicVMProperty -Object $vm -Name 'tailnetDeviceId' -Default '')
-        if (-not $deviceId -and $provisioned.Count -gt 0) { $deviceId = [string](Get-EpicVMProperty -Object $provisioned[0] -Name 'tailnetDeviceId' -Default '') }
+        $routePrefix = [string](Get-EpicVMProperty -Object $vm -Name 'consoleRoutePrefix' -Default '')
+        if ($provisioned.Count -gt 0) {
+            if (-not $deviceId) { $deviceId = [string](Get-EpicVMProperty -Object $provisioned[0] -Name 'tailnetDeviceId' -Default '') }
+            if (-not $routePrefix) { $routePrefix = [string](Get-EpicVMProperty -Object $provisioned[0] -Name 'consoleRoutePrefix' -Default '') }
+        }
         $console = Get-EpicVMProperty -Object $State.Provider -Name 'TeardownConsole' -Default $null
-        if ($null -ne $console) { & $console $name $confirm $deviceId | Out-Null }
+        # A failed guest claim never reaches the console gate, so there is no
+        # route to tear down. Calling the remote orchestrator in that state
+        # turns an otherwise safe, idempotent VM cleanup into a false failure.
+        if ($null -ne $console -and -not [string]::IsNullOrWhiteSpace($routePrefix)) { & $console $name $confirm $deviceId | Out-Null }
         $revoke = Get-EpicVMProperty -Object $State.Provider -Name 'RevokeTailscale' -Default $null
         if ($null -ne $revoke) { & $revoke $deviceId | Out-Null }
         if ([string](Get-EpicVMProperty -Object $vm -Name 'state' -Default '') -ieq 'Running') { & $State.Provider.StopVM $name | Out-Null }
