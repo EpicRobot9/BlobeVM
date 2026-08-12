@@ -228,6 +228,9 @@ def test_admin_can_enable_and_launch_automatic_console_without_password_reflecti
     assert setup.status_code == 200
     assert 'transient-password' not in setup.get_data(as_text=True)
     assert setup.get_json()['launchUrl'] == '/dashboard/console/alpha/launch'
+    paired_setup = client.get('/dashboard/console/alpha/setup')
+    assert paired_setup.status_code == 302
+    assert paired_setup.headers['Location'] == '/dashboard/console/alpha/launch'
     entry = client.get('/dashboard/console/alpha/')
     assert entry.status_code == 302
     assert entry.headers['Location'] == '/dashboard/console/alpha/setup'
