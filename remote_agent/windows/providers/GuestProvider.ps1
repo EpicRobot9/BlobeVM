@@ -67,17 +67,37 @@ function Get-EpicVMGuestConfigurationScript {
         $user=Get-LocalUser -Name $DesiredUser -ErrorAction SilentlyContinue
         if($null -eq $user){New-LocalUser -Name $DesiredUser -Password $secure -AccountNeverExpires -PasswordNeverExpires -UserMayNotChangePassword|Out-Null}
         else{Set-LocalUser -Name $DesiredUser -Password $secure -AccountNeverExpires -PasswordNeverExpires}
-        Add-LocalGroupMember -Group 'Administrators' -Member $DesiredUser -ErrorAction SilentlyContinue
-        $adminMembers=@(Get-LocalGroupMember -Group 'Administrators' -ErrorAction Stop | ForEach-Object { [string]$_.Name.Split('\')[-1] })
-        $adminOk=$adminMembers -contains $DesiredUser
-        Set-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Type DWord -Value 0
-        Set-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Type DWord -Value 1
+        $adminOk=$false
+        try { Add-LocalGroupMember -Group 'Administrators' -Member $DesiredUser -ErrorAction Stop } catch { }
+        try {
+            $adminMembers=@(Get-LocalGroupMember -Group 'Administrators' -ErrorAction Stop | ForEach-Object { [string]$_.Name.Split('\')[-1] })
+            $adminOk=$adminMembers -contains $DesiredUser
+        } catch { }
+        # Some Windows images expose the built-in group through a localized
+        # alias or return an unresolved member from Get-LocalGroupMember.  The
+        # native localgroup command is a narrow, username-only fallback.
+        if(-not $adminOk){
+            try { & "$env:SystemRoot\System32\net.exe" localgroup Administrators $DesiredUser /add | Out-Null } catch { }
+            try {
+                $groupText=@(& "$env:SystemRoot\System32\net.exe" localgroup Administrators 2>$null)
+                $adminOk=[bool](@($groupText | Where-Object { [string]$_ -match [regex]::Escape($DesiredUser) }))
+            } catch { }
+        }
+        if(-not $adminOk){throw 'Guest account could not be placed in Administrators.'}
+        New-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -PropertyType DWord -Value 0 -Force | Out-Null
+        New-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -PropertyType DWord -Value 1 -Force | Out-Null
         Set-Service -Name TermService -StartupType Automatic
         Start-Service -Name TermService
         Get-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue | Disable-NetFirewallRule -ErrorAction SilentlyContinue
         Get-NetFirewallRule -Name 'EpicVM-RDP-Tailscale' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
         New-NetFirewallRule -Name 'EpicVM-RDP-Tailscale' -DisplayName 'EpicVM RDP (Tailscale only)' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3389 -RemoteAddress '100.64.0.0/10' -Profile Any -EdgeTraversalPolicy Block | Out-Null
-        $listener=Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue
+        $listener=$null
+        $listenerDeadline=[DateTime]::UtcNow.AddSeconds(20)
+        do {
+            $listener=Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue
+            if($null -ne $listener){break}
+            Start-Sleep -Milliseconds 500
+        } while([DateTime]::UtcNow -lt $listenerDeadline)
         $rule=Get-NetFirewallRule -Name 'EpicVM-RDP-Tailscale' -ErrorAction SilentlyContinue
         $addressFilter=if($null -ne $rule){Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule -ErrorAction SilentlyContinue}else{$null}
         $nlaOk=(Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -ErrorAction Stop).UserAuthentication -eq 1
