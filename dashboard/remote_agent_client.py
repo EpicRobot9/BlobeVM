@@ -182,6 +182,17 @@ class RemoteAgentClient:
         result = self._request("GET", f"/v1/provisioning-jobs/{safe_id}")
         return result if isinstance(result, dict) else {"job": result}
 
+    def provisioning_jobs(self) -> list[dict[str, Any]]:
+        result = self._request("GET", "/v1/provisioning-jobs")
+        if isinstance(result, dict):
+            result = result.get("jobs", [])
+        return [dict(item) for item in result if isinstance(item, Mapping)] if isinstance(result, list) else []
+
+    def claim_reissue(self, job_id: str) -> dict[str, Any]:
+        safe_id = quote(str(job_id), safe="")
+        result = self._request("POST", f"/v1/provisioning-jobs/{safe_id}/claim-reissue", {}, timeout=self.operation_timeout)
+        return result if isinstance(result, dict) else {"ok": True, "job": result}
+
     def claim(self, job_id: str, username: str, password: str, claim_token: str) -> dict[str, Any]:
         """Forward a one-time claim without persisting or logging credentials."""
         safe_id = quote(str(job_id), safe="")
@@ -315,6 +326,18 @@ class RemoteAgentHost:
     def console_complete(self, job_id: str, *, route_prefix: str, guest_tcp_verified: bool) -> dict[str, Any]:
         try:
             return self.client.console_complete(job_id, route_prefix=route_prefix, guest_tcp_verified=guest_tcp_verified)
+        except RemoteAgentError as exc:
+            raise self._host_error(exc) from exc
+
+    def provisioning_jobs(self) -> list[dict[str, Any]]:
+        try:
+            return self.client.provisioning_jobs()
+        except RemoteAgentError as exc:
+            raise self._host_error(exc) from exc
+
+    def claim_reissue(self, job_id: str) -> dict[str, Any]:
+        try:
+            return self.client.claim_reissue(job_id)
         except RemoteAgentError as exc:
             raise self._host_error(exc) from exc
 

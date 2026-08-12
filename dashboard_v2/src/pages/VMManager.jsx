@@ -155,6 +155,24 @@ export default function VMManager(){
   const vmSettingsInFlightRef = useRef(new Map())
   const vmSettingsGenerationRef = useRef(0)
 
+  function clearProvisioningRecovery(){
+    try{ window.sessionStorage.removeItem('epicvm.provisioning-recovery') }catch(_e){}
+  }
+
+  async function recoverPendingClaim(hostId, name){
+    const safeHostId = String(hostId || '')
+    const safeName = String(name || '').trim().toLowerCase()
+    if(!safeHostId || !safeName) return false
+    const res = await apiFetch('/provisioning-jobs/recover', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({host_id:safeHostId, name:safeName}) })
+    const body = await res.json().catch(()=>({ ok:res.ok }))
+    if(!res.ok || body.ok === false || !body.claimToken || !body.job) throw new Error(body.error?.message || body.error || 'No pending claim is available')
+    setProvisioningHostId(safeHostId)
+    setProvisioningJob(body.job)
+    setProvisioningClaimToken(String(body.claimToken))
+    setClaimDraft({ username:'', password:'', confirm:'', sunshineUsername:'', sunshinePassword:'', sunshineConfirm:'' })
+    return true
+  }
+
   useEffect(()=>{
     const params = new URLSearchParams(window.location.search)
     const jobId = String(params.get('resume_job') || '')
@@ -165,9 +183,23 @@ export default function VMManager(){
       .then(async res => {
         const body = await res.json().catch(()=>({ ok:res.ok }))
         if(!res.ok || body.ok === false) throw new Error(body.error?.message || body.error || 'Unable to resume provisioning job')
-        if(!stopped){ setProvisioningHostId(hostId); setProvisioningJob(body.job || null) }
+        if(!stopped){
+          if(String(body.job?.state || '') === 'awaiting_claim') await recoverPendingClaim(hostId, body.job?.name)
+          else { setProvisioningHostId(hostId); setProvisioningJob(body.job || null) }
+        }
       })
       .catch(err => { if(!stopped) addToast({title:'Provisioning resume failed',message:String(err),type:'error',timeout:7000}) })
+    return ()=>{ stopped=true }
+  }, [addToast])
+
+  useEffect(()=>{
+    let stopped = false
+    let recovery = null
+    try{ recovery = JSON.parse(window.sessionStorage.getItem('epicvm.provisioning-recovery') || 'null') }catch(_e){}
+    if(!recovery?.hostId || !recovery?.name) return undefined
+    recoverPendingClaim(recovery.hostId, recovery.name)
+      .then(ok=>{ if(ok && !stopped) addToast({title:'Pending claim recovered', message:'The one-use guest claim is ready again.', type:'success', timeout:7000}) })
+      .catch(()=>{ if(!stopped) clearProvisioningRecovery() })
     return ()=>{ stopped=true }
   }, [addToast])
   const vmSettingsNamesRef = useRef(new Set())
@@ -457,6 +489,7 @@ export default function VMManager(){
     setCreateBusy(true)
     try{
       if(placement === 'remote'){
+        try{ window.sessionStorage.setItem('epicvm.provisioning-recovery', JSON.stringify({hostId:selectedHostId,name})) }catch(_e){}
         const res = await apiFetch('/provisioning-jobs', { method:'POST', headers:{'Content-Type':'application/json','Idempotency-Key':crypto.randomUUID()}, body: JSON.stringify({ host_id:selectedHostId, name, profile:provisioningProfile }) })
         const j = await res.json().catch(()=>({ ok:res.ok }))
         if(!res.ok || j.ok === false) throw new Error(j.error?.message || j.error || `Failed to start provisioning for ${name}`)
@@ -477,7 +510,12 @@ export default function VMManager(){
       setCreateName('')
       setTimeout(()=>load({ silent:true }), 1000)
     }catch(err){
-      addToast({ title:'Create failed', message:String(err), type:'error', timeout:8000 })
+      let recovered = false
+      if(placement === 'remote'){
+        try{ recovered = await recoverPendingClaim(selectedHostId, name) }catch(_recoveryError){}
+      }
+      if(recovered) addToast({ title:'Pending claim recovered', message:'The one-use guest claim is ready again.', type:'success', timeout:7000 })
+      else addToast({ title:'Create failed', message:String(err), type:'error', timeout:8000 })
     }
     setCreateBusy(false)
   }
@@ -512,11 +550,13 @@ export default function VMManager(){
       const body = await res.json().catch(()=>({ ok:res.ok }))
       if(!res.ok || body.ok === false) throw new Error(body.error?.message || body.error || 'Guest claim failed')
       setProvisioningClaimToken('')
+      clearProvisioningRecovery()
       setClaimDraft({ username:'', password:'', confirm:'', sunshineUsername:'', sunshinePassword:'', sunshineConfirm:'' })
       setProvisioningJob(body.job || provisioningJob)
       addToast({title:'Guest claimed', message:'Continuing Tailscale, console, and readiness verification.', type:'success', timeout:7000})
     }catch(err){
       setProvisioningClaimToken('')
+      clearProvisioningRecovery()
       await refreshProvisioningJob().catch(()=>null)
       addToast({title:'Claim failed', message:String(err), type:'error', timeout:8000})
     }

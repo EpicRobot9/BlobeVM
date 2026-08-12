@@ -497,6 +497,33 @@ function Invoke-EpicVMProvisioningClaim {
     }
 }
 
+function Invoke-EpicVMProvisioningClaimReissue {
+    param([Parameter(Mandatory)] [object] $State, [Parameter(Mandatory)] [object] $Job)
+    if ($Job.state -ne 'awaiting_claim' -or [bool]$Job.claimUsed) {
+        throw (New-EpicVMProvisioningError -Code 'claim_reissue_not_allowed' -Message 'A claim can only be reissued while the VM is awaiting its first claim.' -Status 409)
+    }
+    try {
+        if ([string]::IsNullOrWhiteSpace([string]$Job.claimExpires) -or [DateTime]::Parse([string]$Job.claimExpires) -le [DateTime]::UtcNow) {
+            throw (New-EpicVMProvisioningError -Code 'claim_expired' -Message 'The pending claim has expired.' -Status 409)
+        }
+    }
+    catch [System.InvalidOperationException] { throw }
+    catch {
+        throw (New-EpicVMProvisioningError -Code 'claim_state_invalid' -Message 'The pending claim state is invalid.' -Status 409)
+    }
+
+    # Replacing the verifier invalidates every previously issued claim. The
+    # plaintext value exists only in this request/response and is never saved.
+    $claim = [guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')
+    $Job.claimHash = ConvertTo-EpicVMClaimHash -Value $claim
+    $Job.claimExpires = [DateTime]::UtcNow.AddMinutes(30).ToString('o')
+    $Job.claimUsed = $false
+    $State.Provisioning.Claims[$Job.id] = $Job
+    $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
+    Save-EpicVMProvisioningStore -Store $State.Provisioning
+    return $claim
+}
+
 function Set-EpicVMProvisioningConsoleCredentials {
     param(
         [Parameter(Mandatory)] [object] $State,
@@ -607,7 +634,17 @@ function New-EpicVMDeprovisioningJob {
     $State.Provisioning.Deprovisioning[$job.id] = $job
     Save-EpicVMProvisioningStore -Store $State.Provisioning
     try {
-        $provisioned = @($State.Provisioning.Jobs.Values | Where-Object { [string]$_.name -ceq $name } | Select-Object -First 1)
+        # Use the newest record for this exact VM name.  Older pilot attempts
+        # may carry a device ID for a different enrollment; selecting the
+        # first dictionary entry could revoke an unrelated device and block
+        # teardown before the owned VM is removed.
+        $provisioned = @($State.Provisioning.Jobs.Values |
+            Where-Object { [string]$_.name -ceq $name } |
+            Sort-Object -Property @{ Expression = {
+                        try { [DateTime]::Parse([string]$_.updatedAt) }
+                        catch { [DateTime]::MinValue }
+                    }; Descending = $true } |
+            Select-Object -First 1)
         $deviceId = [string](Get-EpicVMProperty -Object $vm -Name 'tailnetDeviceId' -Default '')
         if (-not $deviceId -and $provisioned.Count -gt 0) { $deviceId = [string](Get-EpicVMProperty -Object $provisioned[0] -Name 'tailnetDeviceId' -Default '') }
         $console = Get-EpicVMProperty -Object $State.Provider -Name 'TeardownConsole' -Default $null

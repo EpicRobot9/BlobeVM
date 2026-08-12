@@ -3606,6 +3606,50 @@ def api_provisioning_job_create():
         return response, 502
 
 
+@app.post('/dashboard/api/provisioning-jobs/recover')
+@auth_required
+def api_provisioning_job_recover():
+    """Reissue a lost one-use claim for an unclaimed exact-name job.
+
+    The agent replaces the stored verifier and returns the new claim only in
+    this authenticated response. No claim value is persisted or returned by
+    ordinary status/inventory endpoints.
+    """
+    if not _request_is_https():
+        return jsonify({'ok': False, 'error': 'Claim recovery requires HTTPS'}), 426
+    payload = request.get_json(silent=True) if request.is_json else request.form.to_dict(flat=True)
+    payload = payload if isinstance(payload, dict) else {}
+    host_id = str(payload.get('host_id') or '').strip()
+    name = str(payload.get('name') or '').strip().lower()
+    if not host_id or not re.fullmatch(r'[a-z0-9][a-z0-9._-]{0,62}', name):
+        return jsonify({'ok': False, 'error': 'host_id and a valid VM name are required'}), 400
+    try:
+        host = _vm_host(host_id)
+        if not hasattr(host, 'provisioning_jobs') or not hasattr(host, 'claim_reissue'):
+            return jsonify({'ok': False, 'error': 'Claim recovery is unavailable on this host'}), 409
+        jobs = [item for item in host.provisioning_jobs() if isinstance(item, dict)]
+        candidates = [item for item in jobs if str(item.get('name') or '').lower() == name and str(item.get('state') or '') == 'awaiting_claim']
+        if not candidates:
+            return jsonify({'ok': False, 'error': {'code': 'claim_recovery_not_available', 'message': 'No unclaimed pending job exists for this VM.'}}), 404
+        candidates.sort(key=lambda item: str(item.get('updatedAt') or ''), reverse=True)
+        job = candidates[0]
+        job_id = str(job.get('id') or '')
+        result = host.claim_reissue(job_id)
+        claim_token = str(result.get('claimToken') or '') if isinstance(result, dict) else ''
+        if not claim_token:
+            return jsonify({'ok': False, 'error': 'The host did not return a new claim.'}), 502
+        response = jsonify({'ok': True, 'host_id': host_id, 'job': result.get('job') or job, 'claimToken': claim_token})
+        response.headers['Cache-Control'] = 'no-store'
+        response.headers['Pragma'] = 'no-cache'
+        return response
+    except VmHostUnavailable as exc:
+        return _vm_host_error_response(exc)
+    except Exception:
+        response = jsonify({'ok': False, 'error': 'Unable to recover the pending claim'})
+        response.headers['Cache-Control'] = 'no-store'
+        return response, 502
+
+
 @app.get('/dashboard/api/provisioning-jobs/<job_id>')
 @auth_required
 def api_provisioning_job_status(job_id):

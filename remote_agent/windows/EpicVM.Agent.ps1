@@ -335,10 +335,23 @@ function Invoke-EpicVMApiRequest {
             }
             return ConvertTo-EpicVMJsonResponse -StatusCode 202 -Body ([ordered]@{ ok=$true; job=(ConvertTo-EpicVMRedactedJob -Job $job); claimToken=$claim })
         }
+        if ($null -ne $State.Provisioning -and $Method -eq 'GET' -and $normalizedPath -eq '/v1/provisioning-jobs') {
+            $jobs = @($State.Provisioning.Jobs.Values | ForEach-Object { ConvertTo-EpicVMRedactedJob -Job $_ })
+            return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok=$true; jobs=$jobs })
+        }
         if ($null -ne $State.Provisioning -and $segments.Count -ge 3 -and $segments[0] -eq 'v1' -and $segments[1] -eq 'provisioning-jobs') {
             $job = $State.Provisioning.Jobs[$segments[2]]
             if ($null -eq $job) { return ConvertTo-EpicVMJsonResponse -StatusCode 404 -Body (New-EpicVMApiError -Code 'not_found' -Message 'The provisioning job was not found.') }
             if ($Method -eq 'GET') { return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok=$true; job=(ConvertTo-EpicVMRedactedJob -Job $job) }) }
+            if ($Method -eq 'POST' -and $segments.Count -eq 4 -and $segments[3] -eq 'claim-reissue') {
+                try { $claim = Invoke-EpicVMProvisioningClaimReissue -State $State -Job $job }
+                catch {
+                    $code = [string](Get-EpicVMProperty -Object $_.Exception -Name 'ErrorCode' -Default 'claim_reissue_failed')
+                    $status = [int](Get-EpicVMProperty -Object $_.Exception -Name 'HttpStatus' -Default 409)
+                    return ConvertTo-EpicVMJsonResponse -StatusCode $status -Body ([ordered]@{ ok=$false; error=[ordered]@{code=$code;message=[string]$_.Exception.Message}; job=(ConvertTo-EpicVMRedactedJob -Job $job) })
+                }
+                return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok=$true; job=(ConvertTo-EpicVMRedactedJob -Job $job); claimToken=$claim })
+            }
             if ($Method -eq 'POST' -and $segments.Count -eq 4 -and $segments[3] -eq 'claim') {
                 try { Invoke-EpicVMProvisioningClaim -State $State -Job $job -Request (Get-EpicVMRequestBody -Body $Body) }
                 catch {
@@ -443,7 +456,7 @@ function Test-EpicVMMutationRequest {
         [Parameter(Mandatory)] [string] $Path
     )
     if ($Method -eq 'DELETE' -and $Path -match '^/v1/vms/[^/]+$') { return $true }
-    if ($Method -eq 'POST' -and ($Path -eq '/v1/provisioning-jobs' -or $Path -eq '/v1/deprovisioning-jobs' -or $Path -match '^/v1/provisioning-jobs/[^/]+/(claim|console-credentials|console-complete|console-failed)$')) { return $true }
+    if ($Method -eq 'POST' -and ($Path -eq '/v1/provisioning-jobs' -or $Path -eq '/v1/deprovisioning-jobs' -or $Path -match '^/v1/provisioning-jobs/[^/]+/(claim|claim-reissue|console-credentials|console-complete|console-failed)$')) { return $true }
     if ($Method -eq 'POST' -and ($Path -eq '/v1/vms' -or $Path -match '^/v1/vms/[^/]+/(start|stop|restart)$' -or $Path -match '^/v1/vms/[^/]+/actions/(start|stop|restart|delete)$')) { return $true }
     return $false
 }
