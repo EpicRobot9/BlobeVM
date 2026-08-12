@@ -499,6 +499,28 @@ function Invoke-EpicVMProvisioningClaim {
 
 function Invoke-EpicVMProvisioningClaimReissue {
     param([Parameter(Mandatory)] [object] $State, [Parameter(Mandatory)] [object] $Job)
+
+    # The agent keeps its store in memory between requests.  If a browser
+    # request was interrupted after the atomic store write, that object can
+    # lag the persisted verifier/expiry.  Adopt only a newer, still-valid
+    # redacted record for this exact job; never recover a plaintext claim.
+    try {
+        $diskStore = New-EpicVMProvisioningStore -Config $State.Config
+        $persisted = @($diskStore.Jobs.Values | Where-Object { [string]$_.id -ceq [string]$Job.id } | Select-Object -First 1)
+        if ($persisted.Count -gt 0) {
+            $diskUpdated = [DateTime]::MinValue
+            $memoryUpdated = [DateTime]::MinValue
+            try { $diskUpdated = [DateTime]::Parse([string]$persisted[0].updatedAt) } catch { }
+            try { $memoryUpdated = [DateTime]::Parse([string]$Job.updatedAt) } catch { }
+            if ($diskUpdated -gt $memoryUpdated) {
+                foreach ($property in @('state', 'claimHash', 'claimExpires', 'claimUsed', 'updatedAt')) {
+                    $Job.$property = Get-EpicVMProperty -Object $persisted[0] -Name $property -Default $Job.$property
+                }
+            }
+        }
+    }
+    catch { }
+    $State.Provisioning.Jobs[$Job.id] = $Job
     if ($Job.state -ne 'awaiting_claim' -or [bool]$Job.claimUsed) {
         throw (New-EpicVMProvisioningError -Code 'claim_reissue_not_allowed' -Message 'A claim can only be reissued while the VM is awaiting its first claim.' -Status 409)
     }
