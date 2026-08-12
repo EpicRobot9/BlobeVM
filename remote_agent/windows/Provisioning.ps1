@@ -189,12 +189,15 @@ function Test-EpicVMTemplateManifest {
     if ([string]::IsNullOrWhiteSpace($manifestPath) -or -not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { return $false }
     try {
         $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-        foreach ($field in @('templateVersion', 'build', 'sha256', 'bootstrap', 'gpu', 'network', 'sysprep', 'immutable', 'fullCopy', 'diskType', 'imagePath')) {
+        foreach ($field in @('templateVersion', 'build', 'sha256', 'bootstrap', 'gpu', 'network', 'sysprep', 'immutable', 'fullCopy', 'diskType', 'imagePath', 'sunshine', 'sunshineVersion')) {
             if ([string]::IsNullOrWhiteSpace([string](Get-EpicVMProperty -Object $manifest -Name $field -Default ''))) { return $false }
         }
         if (-not [bool]$manifest.immutable -or -not [bool]$manifest.fullCopy) { return $false }
         if ([string]$manifest.network -ne 'private-switch' -or [string]$manifest.diskType -ine 'Dynamic') { return $false }
         if ([string]$manifest.sysprep -notmatch '(?i)/generalize') { return $false }
+        if ([string]$manifest.sunshine -ine 'installed') { return $false }
+        $expectedSunshineVersion = [string](Get-EpicVMProperty -Object $Config -Name 'SunshineVersion' -Default '')
+        if (-not [string]::IsNullOrWhiteSpace($expectedSunshineVersion) -and [string]$manifest.sunshineVersion -cne $expectedSunshineVersion) { return $false }
         if ([string]$manifest.sha256 -notmatch '^[0-9a-fA-F]{64}$') { return $false }
 
         $manifestDirectory = [IO.Path]::GetFullPath((Split-Path -Parent $manifestPath)).TrimEnd([char[]]@([char]92, [char]47))
@@ -219,18 +222,54 @@ function Test-EpicVMTemplateManifest {
     catch { return $false }
 }
 
-function Test-EpicVMProvisioningPrerequisites {
-    param([Parameter(Mandatory)] [object] $Config)
+function Get-EpicVMProvisioningReadiness {
+    param(
+        [Parameter(Mandatory)] [object] $Config,
+        [AllowNull()] [object] $Provider = $null
+    )
 
-    if (-not (Test-EpicVMTemplateManifest -Config $Config -SkipContentHash)) { return $false }
+    # These are deliberately boolean-only diagnostics.  Paths, secret values,
+    # tokens, and provider exception text never cross the capability boundary.
+    $checks = [ordered]@{
+        template = $false
+        bootstrapCredential = $false
+        tailscaleOAuthClient = $false
+        tailscaleTailnet = $false
+        tailscaleOAuthSecret = $false
+        gpuPartitionable = $false
+    }
+    try { $checks.template = [bool](Test-EpicVMTemplateManifest -Config $Config -SkipContentHash) } catch { $checks.template = $false }
     foreach ($pathField in @('BootstrapCredentialPath', 'TailscaleOAuthSecretPath')) {
         $path = [string](Get-EpicVMProperty -Object $Config -Name $pathField -Default '')
-        if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
+        $exists = -not [string]::IsNullOrWhiteSpace($path) -and (Test-Path -LiteralPath $path -PathType Leaf)
+        if ($pathField -eq 'BootstrapCredentialPath') { $checks.bootstrapCredential = [bool]$exists }
+        else { $checks.tailscaleOAuthSecret = [bool]$exists }
     }
-    foreach ($valueField in @('BootstrapUser', 'TailscaleOAuthClientId', 'TailscaleTailnet')) {
-        if ([string]::IsNullOrWhiteSpace([string](Get-EpicVMProperty -Object $Config -Name $valueField -Default ''))) { return $false }
+    $checks.tailscaleOAuthClient = -not [string]::IsNullOrWhiteSpace([string](Get-EpicVMProperty -Object $Config -Name 'TailscaleOAuthClientId' -Default ''))
+    $checks.tailscaleTailnet = -not [string]::IsNullOrWhiteSpace([string](Get-EpicVMProperty -Object $Config -Name 'TailscaleTailnet' -Default ''))
+    if ($null -ne $Provider -and (Get-Command -Name Test-EpicVMHyperVGpuPartitionable -ErrorAction SilentlyContinue)) {
+        try { $checks.gpuPartitionable = [bool](Test-EpicVMHyperVGpuPartitionable -Provider $Provider) } catch { $checks.gpuPartitionable = $false }
     }
-    return $true
+    $standardKeys = @('template', 'bootstrapCredential', 'tailscaleOAuthClient', 'tailscaleTailnet', 'tailscaleOAuthSecret')
+    $standard = $true
+    foreach ($key in $standardKeys) { if (-not [bool]$checks[$key]) { $standard = $false } }
+    return [ordered]@{
+        provisioning = [bool]$standard
+        gaming_provisioning = [bool]($standard -and [bool](Get-EpicVMProperty -Object $Config -Name 'EnableGamingProvisioning' -Default $false) -and [bool]$checks.gpuPartitionable)
+        provisioningChecks = $checks
+    }
+}
+
+function Test-EpicVMProvisioningPrerequisites {
+    param(
+        [Parameter(Mandatory)] [object] $Config,
+        [AllowNull()] [object] $Provider = $null,
+        [switch] $Detailed
+    )
+
+    $readiness = Get-EpicVMProvisioningReadiness -Config $Config -Provider $Provider
+    if ($Detailed) { return $readiness }
+    return [bool]$readiness.provisioning
 }
 
 function ConvertTo-EpicVMClaimHash {
@@ -455,6 +494,53 @@ function Invoke-EpicVMProvisioningClaim {
     }
     finally {
         $claim = $null; $username = $null; $password = $null
+    }
+}
+
+function Set-EpicVMProvisioningConsoleCredentials {
+    param(
+        [Parameter(Mandatory)] [object] $State,
+        [Parameter(Mandatory)] [object] $Job,
+        [Parameter(Mandatory)] [object] $Request
+    )
+    if ($Job.state -notin @('awaiting_console', 'console_failed')) {
+        throw (New-EpicVMProvisioningError -Code 'console_credentials_not_allowed' -Message 'The job is not awaiting console configuration.' -Status 409)
+    }
+    $guestUsername = [string](Get-EpicVMProperty -Object $Request -Name 'username' -Default '')
+    $guestPassword = [string](Get-EpicVMProperty -Object $Request -Name 'password' -Default '')
+    $sunshineUsername = [string](Get-EpicVMProperty -Object $Request -Name 'sunshineUsername' -Default '')
+    $sunshinePassword = [string](Get-EpicVMProperty -Object $Request -Name 'sunshinePassword' -Default '')
+    if ($guestUsername -notmatch '^[A-Za-z][A-Za-z0-9._-]{2,31}$' -or [string]::IsNullOrEmpty($guestPassword) -or
+        [string]::IsNullOrEmpty($sunshineUsername) -or [string]::IsNullOrEmpty($sunshinePassword)) {
+        throw (New-EpicVMProvisioningError -Code 'invalid_console_credentials' -Message 'Guest and Sunshine credentials are required.' -Status 400)
+    }
+    $configureGuest = Get-EpicVMProperty -Object $State.Provider -Name 'ConfigureGuest' -Default $null
+    $configureSunshine = Get-EpicVMProperty -Object $State.Provider -Name 'ConfigureSunshine' -Default $null
+    if ($null -eq $configureGuest -or $null -eq $configureSunshine) {
+        throw (New-EpicVMProvisioningError -Code 'sunshine_setup_unavailable' -Message 'Automatic Sunshine setup is unavailable.' -Status 503)
+    }
+    try {
+        # Re-run the idempotent guest gate for retries, then use the supplied
+        # guest credential to open PowerShell Direct for Sunshine setup. Neither
+        # credential is assigned to the persisted job or returned to the caller.
+        & $configureGuest $Job.name $guestUsername $guestPassword | Out-Null
+        & $configureSunshine $Job.name $guestUsername $guestPassword $sunshineUsername $sunshinePassword | Out-Null
+        $Job.errorCode = $null
+        $Job.errorMessage = $null
+        $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
+        Save-EpicVMProvisioningStore -Store $State.Provisioning
+    }
+    catch {
+        $code = [string](Get-EpicVMProperty -Object $_.Exception -Name 'ErrorCode' -Default 'sunshine_setup_failed')
+        $Job.state = 'console_failed'
+        $Job.errorCode = $code
+        $Job.errorMessage = 'Automatic Sunshine setup failed; the VM and stopped console data were retained.'
+        $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
+        Save-EpicVMProvisioningStore -Store $State.Provisioning
+        throw (New-EpicVMProvisioningError -Code $code -Message 'Automatic Sunshine setup failed.' -Status 422)
+    }
+    finally {
+        $guestUsername = $guestPassword = $sunshineUsername = $sunshinePassword = $null
     }
 }
 

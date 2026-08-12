@@ -33,8 +33,8 @@ def test_plan_is_digest_pinned_path_correct_and_does_not_contain_credentials(tmp
     plan = orch.build_plan(name="alpha", guest_ip="100.111.82.1")
     assert IMAGE in plan.compose
     assert "Host(`techexplore.us`) && PathPrefix(`/vm/alpha/`)" in plan.compose
-    assert "middlewares: \"epicvm-alpha-portal-auth,epicvm-alpha-portal-user\"" in plan.compose
-    assert "middlewares.epicvm-alpha-portal-auth.headers" not in plan.compose
+    assert "middlewares: \"epicvm-portal-auth@file,epicvm-alpha-portal-user\"" in plan.compose
+    assert "middlewares.epicvm-alpha-portal-auth.forwardauth" not in plan.compose
     assert "middlewares.epicvm-alpha-portal-user.forwardauth" not in plan.compose
     assert "url_path_prefix\":\"/vm/alpha\"" in plan.config
     assert "ports:" not in plan.compose

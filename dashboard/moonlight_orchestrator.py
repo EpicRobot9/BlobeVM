@@ -117,7 +117,14 @@ class MoonlightOrchestrator:
         return value
 
     def _routing_config(self) -> tuple[str, str, int]:
-        if not re.fullmatch(r"[a-z0-9.-]+", self.public_host) or not self.tls_resolver or not self.router_priority.isdigit():
+        middlewares = [part.strip() for part in self.auth_middleware.split(",") if part.strip()]
+        if (
+            not re.fullmatch(r"[a-z0-9.-]+", self.public_host)
+            or not self.tls_resolver
+            or not self.router_priority.isdigit()
+            or not middlewares
+            or any(not re.fullmatch(r"[A-Za-z0-9_.-]+@(file|docker)", part) for part in middlewares)
+        ):
             raise ConsoleOrchestrationError("Verified Traefik routing configuration is unavailable.", status=503, code="routing_config_required")
         priority = int(self.router_priority)
         if priority < 1 or priority > 100000:
@@ -224,7 +231,6 @@ class MoonlightOrchestrator:
         safe = validate_vm_name(name)
         public_host, resolver, priority = self._routing_config()
         image = self._image()
-        auth = f"epicvm-{safe}-portal-auth"
         identity = f"epicvm-{safe}-portal-user"
         labels = {
             "traefik.enable": "true",
@@ -238,9 +244,7 @@ class MoonlightOrchestrator:
             f"traefik.http.routers.epicvm-{safe}.tls.certresolver": resolver,
             f"traefik.http.routers.epicvm-{safe}.priority": str(priority),
             f"traefik.http.routers.epicvm-{safe}.service": f"epicvm-{safe}",
-            f"traefik.http.routers.epicvm-{safe}.middlewares": f"{auth},{identity}",
-            f"traefik.http.middlewares.{auth}.forwardauth.address": f"http://blobedash:5000/dashboard/auth/vm/{safe}",
-            f"traefik.http.middlewares.{auth}.forwardauth.trustForwardHeader": "true",
+            f"traefik.http.routers.epicvm-{safe}.middlewares": f"{self.auth_middleware},{identity}",
             f"traefik.http.middlewares.{identity}.headers.customrequestheaders.X-EpicVM-User": safe,
             f"traefik.http.services.epicvm-{safe}.loadbalancer.server.port": "8080",
         }

@@ -345,12 +345,23 @@ function Get-EpicVMHyperVCapabilities {
     $logicalProcessors = Get-EpicVMHyperVValue -Object $hostInfo -Name 'LogicalProcessorCount' -Default $null
     $memoryCapacity = Get-EpicVMHyperVValue -Object $hostInfo -Name 'MemoryCapacity' -Default $null
     $defaultSwitch = Get-EpicVMHyperVOption -Config (Get-EpicVMHyperVValue -Object $Provider -Name 'Config') -Name 'SwitchName' -Default ''
-    $provisioningReady = $false
+    $readiness = [ordered]@{
+        provisioning = $false
+        gaming_provisioning = $false
+        provisioningChecks = [ordered]@{
+            template = $false
+            bootstrapCredential = $false
+            tailscaleOAuthClient = $false
+            tailscaleTailnet = $false
+            tailscaleOAuthSecret = $false
+            gpuPartitionable = $false
+        }
+    }
     if ($available -and (Get-Command -Name Test-EpicVMProvisioningPrerequisites -ErrorAction SilentlyContinue)) {
         try {
-            $provisioningReady = [bool](Test-EpicVMProvisioningPrerequisites -Config (Get-EpicVMHyperVValue -Object $Provider -Name 'Config'))
+            $readiness = Test-EpicVMProvisioningPrerequisites -Config (Get-EpicVMHyperVValue -Object $Provider -Name 'Config') -Provider $Provider -Detailed
         }
-        catch { $provisioningReady = $false }
+        catch { }
     }
 
     return [ordered]@{
@@ -367,7 +378,9 @@ function Get-EpicVMHyperVCapabilities {
         restart = $available
         delete = $available
         console = $false
-        provisioning = $provisioningReady
+        provisioning = [bool]$readiness.provisioning
+        gaming_provisioning = [bool]$readiness.gaming_provisioning
+        provisioningChecks = $readiness.provisioningChecks
         features = @('capabilities', 'list', 'create', 'lifecycle', 'delete-owned', 'full-copy-template', 'powershell-direct', 'tailscale-enrollment')
         resources = [ordered]@{
             logicalProcessorCount = $logicalProcessors
@@ -383,6 +396,20 @@ function Get-EpicVMHyperVCapabilities {
             maxDiskSizeBytes = Get-EpicVMHyperVOption -Config (Get-EpicVMHyperVValue -Object $Provider -Name 'Config') -Name 'MaxDiskSizeBytes' -Default 549755813888
         }
     }
+}
+
+function Test-EpicVMHyperVGpuPartitionable {
+    param([Parameter(Mandatory)] [object] $Provider)
+
+    if (-not [bool](Get-EpicVMHyperVValue -Object $Provider -Name 'Available' -Default $false)) { return $false }
+    try {
+        # The cmdlet is optional on hosts without GPU-P.  A provider or Pester
+        # invoker that cannot resolve it is a clean "not ready", never a reason
+        # to expose GPU provisioning.
+        $items = @(Invoke-EpicVMHyperVCmdlet -Provider $Provider -CommandName 'Get-VMHostPartitionableGpu' -Parameters @{ ErrorAction = 'Stop' })
+        return $items.Count -gt 0
+    }
+    catch { return $false }
 }
 
 function Get-EpicVMHyperVVMs {
@@ -708,6 +735,7 @@ function New-EpicVMHyperVProvider {
         RestartVM = $null
         DeleteVM = $null
         ConfigureGuest = $null
+        ConfigureSunshine = $null
         EnrollTailscale = $null
         VerifyGuest = $null
         RevokeTailscale = $null
@@ -731,6 +759,10 @@ function New-EpicVMHyperVProvider {
     $provider.DeleteVM = ({ param($Name) & $deleteVM -Provider $provider -Name $Name }.GetNewClosure())
     $provider.ConfigureGuest = ({ param($Name,$Username,$Password)
             $result = Invoke-EpicVMGuestConfiguration -Provider $provider -Config $provider.Config -VmName $Name -DesiredUser $Username -DesiredPassword $Password
+            return $result
+        }.GetNewClosure())
+    $provider.ConfigureSunshine = ({ param($Name,$GuestUsername,$GuestPassword,$SunshineUsername,$SunshinePassword)
+            $result = Invoke-EpicVMSunshineConfiguration -Provider $provider -Config $provider.Config -VmName $Name -GuestUsername $GuestUsername -GuestPassword $GuestPassword -SunshineUsername $SunshineUsername -SunshinePassword $SunshinePassword
             return $result
         }.GetNewClosure())
     $provider.EnrollTailscale = ({ param($Name,$Username,$Password)

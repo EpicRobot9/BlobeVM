@@ -21,6 +21,9 @@ param(
     [string] $BuilderVmName = 'EpicVM-TemplateBuilder',
     [string] $BootstrapUser = 'EpicVMBootstrap',
     [string] $BootstrapCredentialPath = 'C:\ProgramData\EpicVM\agent\bootstrap.dpapi',
+    [string] $SunshineVersion = '2026.516.143833',
+    [switch] $UseCleanTemplateSource,
+    [string] $CleanTemplateSourceRoot = 'E:\EpicVM\clean-template-source',
     [int] $BuilderShutdownTimeoutSeconds = 300,
     [PSCredential] $GuestCredential,
     [PSCredential] $BootstrapCredential,
@@ -137,7 +140,7 @@ function Get-EpicVMSourceDisk {
 
 function Get-EpicVMTemplateGuestSanitizer {
     return {
-        param($BootstrapName,$BootstrapPassword,$BootstrapPath)
+        param($BootstrapName,$BootstrapPassword,$BootstrapPath,$ExpectedSunshineVersion)
         $ErrorActionPreference='Stop'
         if (-not (Get-LocalUser -Name $BootstrapName -ErrorAction SilentlyContinue)) {
             $secure = ConvertTo-SecureString $BootstrapPassword -AsPlainText -Force
@@ -158,6 +161,24 @@ function Get-EpicVMTemplateGuestSanitizer {
         $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new('SYSTEM','FullControl','Allow'))
         $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new('Administrators','Read','Allow'))
         Set-Acl -LiteralPath $BootstrapPath -AclObject $acl
+
+        $sunshineService=Get-Service -Name 'SunshineService' -ErrorAction SilentlyContinue
+        if($null -eq $sunshineService){throw 'sunshine_missing'}
+        $sunshineCim=Get-CimInstance Win32_Service -Filter "Name='SunshineService'" -ErrorAction SilentlyContinue
+        if($null -eq $sunshineCim){throw 'sunshine_missing'}
+        $sunshineExe=[string]$sunshineCim.PathName
+        if($sunshineExe -match '^"([^"]+)"'){$sunshineExe=$Matches[1]}elseif($sunshineExe -match '^([^ ]+)'){$sunshineExe=$Matches[1]}
+        if([string]::IsNullOrWhiteSpace($sunshineExe) -or -not(Test-Path -LiteralPath $sunshineExe -PathType Leaf)){throw 'sunshine_missing'}
+        $installedSunshineVersion=[string]([Diagnostics.FileVersionInfo]::GetVersionInfo($sunshineExe).ProductVersion)
+        if(-not [string]::IsNullOrWhiteSpace([string]$ExpectedSunshineVersion) -and $installedSunshineVersion -cne [string]$ExpectedSunshineVersion){throw 'sunshine_version_mismatch'}
+        if($sunshineService.Status -eq 'Running'){Stop-Service -Name 'SunshineService' -Force -ErrorAction SilentlyContinue}
+        Set-Service -Name 'SunshineService' -StartupType Automatic -ErrorAction SilentlyContinue
+        @(
+            'C:\Program Files\Sunshine\config\sunshine_state.json',
+            'C:\ProgramData\Sunshine\config\sunshine_state.json',
+            'C:\Users\*\AppData\Local\Sunshine\config\sunshine_state.json',
+            'C:\Users\*\AppData\Roaming\Sunshine\config\sunshine_state.json'
+        ) | ForEach-Object { Remove-Item -Path $_ -Force -ErrorAction SilentlyContinue }
 
         Get-NetAdapter -ErrorAction SilentlyContinue | Disable-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue
         $usersToRemove=@(Get-LocalUser | Where-Object { $_.Name -notin @($BootstrapName,'Administrator','DefaultAccount','Guest','WDAGUtilityAccount') })
@@ -208,18 +229,27 @@ function Invoke-EpicVMTemplateBuild {
         [PSCredential]$SourceCredential=$GuestCredential,
         [PSCredential]$BootstrapSecret=$BootstrapCredential
     )
-    if ($SourceName -cne 'testre') { throw (New-EpicVMTemplateError -Code 'source_name_gate' -Message 'Only the verified testre source may be used by this builder.') }
+    if ($UseCleanTemplateSource) {
+        if ($SourceName -cne 'EpicVM-CleanTemplateSource' -or [IO.Path]::GetFullPath($CleanTemplateSourceRoot).TrimEnd('\') -ine 'E:\EpicVM\clean-template-source') {
+            throw (New-EpicVMTemplateError -Code 'source_name_gate' -Message 'Only the verified EpicVM-CleanTemplateSource fallback may be used.')
+        }
+    } elseif ($SourceName -cne 'testre') {
+        throw (New-EpicVMTemplateError -Code 'source_name_gate' -Message 'Only the verified testre source may be used by this builder.')
+    }
     if ($null -eq $SourceCredential -or $null -eq $BootstrapSecret) { throw (New-EpicVMTemplateError -Code 'credential_required' -Message 'Interactive source and bootstrap credentials are required.') }
     $managedRoot=Split-Path -Parent ([IO.Path]::GetFullPath($TemplateRoot).TrimEnd('\'))
     if (-not (Test-EpicVMPathUnderRoot -Path $OutputRoot -Root $TemplateRoot) -or -not (Test-EpicVMPathUnderRoot -Path $WorkRoot -Root $managedRoot)) { throw (New-EpicVMTemplateError -Code 'path_gate' -Message 'Template paths failed the managed-root gate.') }
     $source = @(Invoke-EpicVMTemplateCommand -Name 'Get-VM' -Parameters @{ Name=$SourceName; ErrorAction='Stop' }) | Select-Object -First 1
     if ($null -eq $source -or [string]$source.Name -cne $SourceName) { throw (New-EpicVMTemplateError -Code 'source_not_found' -Message 'The exact source VM was not found.') }
     $sourcePath=[string]$source.Path
-    if (-not (Test-EpicVMPathUnderRoot -Path $sourcePath -Root $VmRoot)) { throw (New-EpicVMTemplateError -Code 'source_root_gate' -Message 'The source VM is outside the managed VM root.') }
+    $sourceRoot = if ($UseCleanTemplateSource) { $CleanTemplateSourceRoot } else { $VmRoot }
+    if (-not (Test-EpicVMPathUnderRoot -Path $sourcePath -Root $sourceRoot)) { throw (New-EpicVMTemplateError -Code 'source_root_gate' -Message 'The source VM is outside the managed source root.') }
+    $expectedNotes = if ($UseCleanTemplateSource) { 'EpicVM-CleanTemplateSource\s*:\s*true' } else { 'EpicVM-Managed\s*:\s*true' }
+    if ([string]$source.Notes -notmatch "(?i)$expectedNotes") { throw (New-EpicVMTemplateError -Code 'source_ownership_gate' -Message 'The source VM ownership marker is missing.') }
     $sourceDisks=@(Invoke-EpicVMTemplateCommand -Name 'Get-VMHardDiskDrive' -Parameters @{ VM=$source; ErrorAction='Stop' })
     if($sourceDisks.Count -ne 1){throw (New-EpicVMTemplateError -Code 'source_layout_invalid' -Message 'The source VM must have exactly one attached disk.')}
     $sourceDiskPath=[IO.Path]::GetFullPath([string]$sourceDisks[0].Path)
-    if(-not (Test-EpicVMPathUnderRoot -Path $sourceDiskPath -Root $VmRoot)){throw (New-EpicVMTemplateError -Code 'source_disk_root_gate' -Message 'The source disk is outside the managed VM root.')}
+    if(-not (Test-EpicVMPathUnderRoot -Path $sourceDiskPath -Root $sourceRoot)){throw (New-EpicVMTemplateError -Code 'source_disk_root_gate' -Message 'The source disk is outside the managed source root.')}
     $sourceDiskLeafName=Split-Path -Leaf $sourceDiskPath
     $builderRoot=Join-Path $WorkRoot ("builder-" + [guid]::NewGuid().ToString('N'))
     $exportRoot=Join-Path $builderRoot 'export'
@@ -257,7 +287,7 @@ function Invoke-EpicVMTemplateBuild {
             $bootstrapBstr=[Runtime.InteropServices.Marshal]::SecureStringToBSTR($BootstrapSecret.Password)
             $bootstrapPlain=[Runtime.InteropServices.Marshal]::PtrToStringBSTR($bootstrapBstr)
             try {
-                Invoke-EpicVMTemplateGuestScript -VmName $BuilderName -Credential $SourceCredential -Script $sanitizer -ArgumentList @($BootstrapName,$bootstrapPlain,$BootstrapPath) | Out-Null
+                Invoke-EpicVMTemplateGuestScript -VmName $BuilderName -Credential $SourceCredential -Script $sanitizer -ArgumentList @($BootstrapName,$bootstrapPlain,$BootstrapPath,$SunshineVersion) | Out-Null
             }
             catch {
                 # Sysprep /shutdown can sever PowerShell Direct before the
@@ -283,7 +313,7 @@ function Invoke-EpicVMTemplateBuild {
         Copy-Item -LiteralPath $builderDisk -Destination (Join-Path $stageRoot 'win11-25h2.vhdx') -Force -ErrorAction Stop
         $imagePath=Join-Path $stageRoot 'win11-25h2.vhdx'
         $hash=(Get-FileHash -LiteralPath $imagePath -Algorithm SHA256).Hash.ToLowerInvariant()
-        $manifest=[ordered]@{ templateVersion='1.0.0'; name=$TemplateName; build=('win11-25h2-' + (Get-Date).ToUniversalTime().ToString('yyyyMMdd')); windowsBuild='Windows 11 25H2'; sha256=$hash; imagePath=(Join-Path $finalRoot 'win11-25h2.vhdx'); bootstrap='machine-dpapi-encrypted-system-admin'; gpu='none'; gpuPartition='none'; diskType='Dynamic'; sourceVm=$SourceName; sysprep='/generalize /oobe /shutdown /mode:vm'; network='private-switch'; fullCopy=$true; immutable=$true; sanitation='accounts;profiles;browser-data;logs;tailscale-identity;machine-generalize'; createdAt=[DateTime]::UtcNow.ToString('o') }
+        $manifest=[ordered]@{ templateVersion='1.0.0'; name=$TemplateName; build=('win11-25h2-' + (Get-Date).ToUniversalTime().ToString('yyyyMMdd')); windowsBuild='Windows 11 25H2'; sha256=$hash; imagePath=(Join-Path $finalRoot 'win11-25h2.vhdx'); bootstrap='machine-dpapi-encrypted-system-admin'; sunshine='installed'; sunshineVersion=$SunshineVersion; sunshineService='SunshineService'; sunshineCredentials='request-only'; gpu='none'; gpuPartition='none'; diskType='Dynamic'; sourceVm=$SourceName; sysprep='/generalize /oobe /shutdown /mode:vm'; network='private-switch'; fullCopy=$true; immutable=$true; sanitation='accounts;profiles;browser-data;logs;tailscale-identity;sunshine-credentials;machine-generalize'; createdAt=[DateTime]::UtcNow.ToString('o') }
         $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $stageRoot 'manifest.json') -Encoding UTF8 -NoNewline
         New-Item -ItemType Directory -Path $OutputRoot -Force | Out-Null
         Move-Item -LiteralPath $stageRoot -Destination $finalRoot -Force

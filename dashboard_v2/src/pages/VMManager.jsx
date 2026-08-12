@@ -6,7 +6,7 @@ import VmExec from '../components/VmExec'
 import { useToasts } from '../components/ToastProvider'
 import { instanceNamesKey, pollDelayMs } from '../lib/polling'
 import { canCacheVmSettingsResponse, clearRemovedVmState, createLoadInFlightRunner, createLogSelectionTracker } from '../lib/vmManagerRaces'
-import { canUseRemotePlacement, createPlacementPayload, getEligibleRemoteHosts, getPlacementValidationReason, hostOptionLabel, normalizeHostInventory, remotePlacementDisabledReason } from '../lib/hostPlacement'
+import { canUseRemotePlacement, createPlacementPayload, getEligibleRemoteHosts, getPlacementValidationReason, hostOptionLabel, normalizeHostInventory, provisioningProfileDisabledReason, remotePlacementDisabledReason } from '../lib/hostPlacement'
 import { canClaimProvisioningJob, canOpenInventoryVm, canOpenProvisionedVm, canRetryProvisioningConsole, deprovisioningPayload, provisioningClaimPayload, provisioningConsoleRetryPayload, provisioningProgress } from '../lib/provisioningUi'
 
 function toneFor(status){
@@ -739,6 +739,9 @@ export default function VMManager(){
   const remotePlacementAvailable = canUseRemotePlacement(hosts)
   const hostsById = useMemo(() => Object.fromEntries(hosts.map(host => [host.id, host])), [hosts])
   const selectedRemoteHost = eligibleRemoteHosts.find(host => host.id === selectedHostId)
+  const gamingProfileReason = selectedRemoteHost ? provisioningProfileDisabledReason(selectedRemoteHost, 'gaming') : 'Select an eligible remote host first.'
+  const gamingProfileAvailable = !gamingProfileReason
+  const standardProfileReason = selectedRemoteHost ? provisioningProfileDisabledReason(selectedRemoteHost, 'standard') : ''
   const placementReason = placement !== 'remote'
     ? ''
     : invalidatedHostId && !selectedHostId
@@ -769,6 +772,10 @@ export default function VMManager(){
       setInvalidatedHostId('')
     }
   }, [eligibleRemoteHosts, invalidatedHostId, placement, selectedHostId])
+
+  useEffect(()=>{
+    if(provisioningProfile === 'gaming' && !gamingProfileAvailable) setProvisioningProfile('standard')
+  }, [gamingProfileAvailable, provisioningProfile])
 
   function choosePlacement(nextPlacement){
     setPlacement(nextPlacement)
@@ -869,11 +876,11 @@ export default function VMManager(){
                 <span>Provisioning profile</span>
                 <select value={provisioningProfile} onChange={e=>setProvisioningProfile(e.target.value)} disabled={createBusy}>
                   <option value="standard">Standard · 4 vCPU · 8 GB · 96 GB</option>
-                  <option value="gaming" disabled>Gaming · disabled until GPU-P pilot</option>
+                  <option value="gaming" disabled={!gamingProfileAvailable}>Gaming · 6 vCPU · 12 GB · 128 GB · 50% GPU-P</option>
                 </select>
               </label>
             ) : null}
-            <Button type="submit" disabled={createBusy || !!placementReason}>{createBusy ? 'Creating…' : 'Create VM'}</Button>
+            <Button type="submit" disabled={createBusy || !!placementReason || !!standardProfileReason}>{createBusy ? 'Creating…' : 'Create VM'}</Button>
           </div>
           <div className="vm-placement-summary">
             <span>Destination</span>
@@ -881,6 +888,8 @@ export default function VMManager(){
           </div>
           {!remotePlacementAvailable ? <div className="vm-placement-notice">Remote VM unavailable: No remote hosts connected.</div> : null}
           {placementReason ? <div id="vm-placement-reason" className="vm-placement-error" role="alert">{placementReason}</div> : null}
+          {placement === 'remote' && provisioningProfile === 'gaming' && gamingProfileReason ? <div className="vm-placement-error" role="alert">{gamingProfileReason}</div> : null}
+          {placement === 'remote' && provisioningProfile === 'standard' && standardProfileReason ? <div className="vm-placement-error" role="alert">{standardProfileReason}</div> : null}
           {provisioningJob ? (
             <div className="vm-placement-notice" style={{marginTop:12}}>
               <div style={{display:'flex',justifyContent:'space-between',gap:12,flexWrap:'wrap'}}>

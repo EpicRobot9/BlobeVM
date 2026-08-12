@@ -59,6 +59,12 @@ function Get-EpicVMDefaultConfig {
         TailscaleTailnet = ''
         TailscaleGuestTag = 'tag:epicvm-guest'
         TailscaleExecutable = 'C:\Program Files\Tailscale\tailscale.exe'
+        SunshineServiceName = 'SunshineService'
+        SunshineVersion = '2026.516.143833'
+        SunshineStatePaths = @(
+            'C:\Program Files\Sunshine\config\sunshine_state.json',
+            'C:\ProgramData\Sunshine\config\sunshine_state.json'
+        )
         EnableGamingProvisioning = $false
     }
 }
@@ -343,6 +349,15 @@ function Invoke-EpicVMApiRequest {
                 }
                 return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok=$true; job=(ConvertTo-EpicVMRedactedJob -Job $job) })
             }
+            if ($Method -eq 'POST' -and $segments.Count -eq 4 -and $segments[3] -eq 'console-credentials') {
+                try { Set-EpicVMProvisioningConsoleCredentials -State $State -Job $job -Request (Get-EpicVMRequestBody -Body $Body) }
+                catch {
+                    $code = [string](Get-EpicVMProperty -Object $_.Exception -Name 'ErrorCode' -Default 'console_credentials_failed')
+                    $status = [int](Get-EpicVMProperty -Object $_.Exception -Name 'HttpStatus' -Default 422)
+                    return ConvertTo-EpicVMJsonResponse -StatusCode $status -Body ([ordered]@{ ok=$false; error=[ordered]@{code=$code;message=[string]$_.Exception.Message}; job=(ConvertTo-EpicVMRedactedJob -Job $job) })
+                }
+                return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok=$true; job=(ConvertTo-EpicVMRedactedJob -Job $job) })
+            }
             if ($Method -eq 'POST' -and $segments.Count -eq 4 -and $segments[3] -eq 'console-complete') {
                 try { Complete-EpicVMProvisioningConsole -State $State -Job $job -Request (Get-EpicVMRequestBody -Body $Body) }
                 catch {
@@ -428,7 +443,7 @@ function Test-EpicVMMutationRequest {
         [Parameter(Mandatory)] [string] $Path
     )
     if ($Method -eq 'DELETE' -and $Path -match '^/v1/vms/[^/]+$') { return $true }
-    if ($Method -eq 'POST' -and ($Path -eq '/v1/provisioning-jobs' -or $Path -eq '/v1/deprovisioning-jobs' -or $Path -match '^/v1/provisioning-jobs/[^/]+/(claim|console-complete|console-failed)$')) { return $true }
+    if ($Method -eq 'POST' -and ($Path -eq '/v1/provisioning-jobs' -or $Path -eq '/v1/deprovisioning-jobs' -or $Path -match '^/v1/provisioning-jobs/[^/]+/(claim|console-credentials|console-complete|console-failed)$')) { return $true }
     if ($Method -eq 'POST' -and ($Path -eq '/v1/vms' -or $Path -match '^/v1/vms/[^/]+/(start|stop|restart)$' -or $Path -match '^/v1/vms/[^/]+/actions/(start|stop|restart|delete)$')) { return $true }
     return $false
 }

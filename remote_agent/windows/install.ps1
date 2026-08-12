@@ -85,6 +85,12 @@ $config = [ordered]@{
     TailscaleTailnet = ''
     TailscaleGuestTag = 'tag:epicvm-guest'
     TailscaleExecutable = 'C:\Program Files\Tailscale\tailscale.exe'
+    SunshineServiceName = 'SunshineService'
+    SunshineVersion = '2026.516.143833'
+    SunshineStatePaths = @(
+        'C:\Program Files\Sunshine\config\sunshine_state.json',
+        'C:\ProgramData\Sunshine\config\sunshine_state.json'
+    )
     EnableGamingProvisioning = $false
 }
 if (Test-Path -LiteralPath $configPath -PathType Leaf) {

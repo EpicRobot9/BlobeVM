@@ -124,4 +124,21 @@ Describe 'EpicVM provisioning safety' {
         $inFlight.state | Should -Be 'failed'
         $inFlight.errorCode | Should -Be 'agent_restarted'
     }
+
+    It 'accepts request-only Sunshine credentials only at the console gate' {
+        $config=Get-EpicVMDefaultConfig
+        $config.ProvisioningStatePath=Join-Path $TestDrive 'sunshine-jobs.json'
+        $script:sunshineReceived=$false
+        $provider=New-ProvisioningTestProvider
+        $provider | Add-Member NoteProperty ConfigureGuest { param($name,$username,$password) @{ok=$true} }
+        $provider | Add-Member NoteProperty ConfigureSunshine { param($name,$guestUsername,$guestPassword,$sunshineUsername,$sunshinePassword) $script:sunshineReceived=($sunshineUsername -eq 'sun-user' -and $sunshinePassword -eq 'sun-pass'); @{ok=$true} }
+        $state=New-EpicVMAgentState -Config $config -Token 'agent-token' -Provider $provider
+        $job=New-EpicVMProvisioningJobObject -Id 'job-sunshine' -Name 'sunshine' -Profile 'standard' -State 'awaiting_console'
+        $state.Provisioning.Jobs[$job.id]=$job
+        $response=Invoke-EpicVMApiRequest -State $state -Method 'POST' -Path '/v1/provisioning-jobs/job-sunshine/console-credentials' -Headers @{Authorization='Bearer agent-token'} -Body (@{username='operator';password='guest-pass';sunshineUsername='sun-user';sunshinePassword='sun-pass'} | ConvertTo-Json)
+        $response.StatusCode | Should -Be 200
+        $script:sunshineReceived | Should -BeTrue
+        $response.Json | Should -Not -Match 'guest-pass|sun-pass'
+        (Get-Content -LiteralPath $config.ProvisioningStatePath -Raw) | Should -Not -Match 'guest-pass|sun-pass'
+    }
 }

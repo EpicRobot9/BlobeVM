@@ -71,6 +71,34 @@ export function getPlacementValidationReason({ placement = 'local', hostId = LOC
     : 'Selected remote host is no longer available'
 }
 
+const READINESS_LABELS = {
+  template: 'golden template',
+  bootstrapCredential: 'bootstrap credential',
+  tailscaleOAuthClient: 'Tailscale OAuth client',
+  tailscaleTailnet: 'Tailscale tailnet',
+  tailscaleOAuthSecret: 'Tailscale OAuth secret',
+  gpuPartitionable: 'partitionable GPU'
+}
+
+export function provisioningProfileDisabledReason(host, profile = 'standard'){
+  const capabilities = host?.capabilities || {}
+  if(profile === 'gaming'){
+    if(capabilities.gaming_provisioning === true) return ''
+    const checks = capabilities.provisioningChecks || {}
+    const missing = Object.entries(READINESS_LABELS)
+      .filter(([key]) => checks[key] === false)
+      .map(([, label]) => label)
+    if(missing.length) return `Gaming provisioning unavailable: ${missing.join(', ')} not ready.`
+    return 'Gaming provisioning unavailable: the GPU-P pilot has not passed.'
+  }
+  if(capabilities.provisioning === true) return ''
+  const checks = capabilities.provisioningChecks || {}
+  const missing = Object.entries(READINESS_LABELS)
+    .filter(([key]) => key !== 'gpuPartitionable' && checks[key] === false)
+    .map(([, label]) => label)
+  return missing.length ? `Standard provisioning unavailable: ${missing.join(', ')} not ready.` : 'Standard provisioning unavailable: host readiness checks have not passed.'
+}
+
 export function createPlacementPayload({ name = '', placement = 'local', hostId = LOCAL_HOST_ID } = {}){
   const selectedPlacement = placement === 'remote' ? 'remote' : 'local'
   return {

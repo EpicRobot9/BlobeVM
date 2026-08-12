@@ -195,6 +195,31 @@ class RemoteAgentClient:
         result = self._request("POST", f"/v1/provisioning-jobs/{safe_id}/console-complete", payload, timeout=self.operation_timeout)
         return result if isinstance(result, dict) else {"ok": True, "job": result}
 
+    def console_credentials(
+        self,
+        job_id: str,
+        *,
+        guest_username: str,
+        guest_password: str,
+        sunshine_username: str,
+        sunshine_password: str,
+    ) -> dict[str, Any]:
+        """Send request-only guest/Sunshine credentials to the Windows agent."""
+        safe_id = quote(str(job_id), safe="")
+        payload = {
+            "username": str(guest_username),
+            "password": str(guest_password),
+            "sunshineUsername": str(sunshine_username),
+            "sunshinePassword": str(sunshine_password),
+        }
+        result = self._request(
+            "POST",
+            f"/v1/provisioning-jobs/{safe_id}/console-credentials",
+            payload,
+            timeout=self.operation_timeout,
+        )
+        return result if isinstance(result, dict) else {"ok": True, "job": result}
+
     def console_failed(self, job_id: str, *, code: str = "console_failed") -> dict[str, Any]:
         safe_id = quote(str(job_id), safe="")
         result = self._request("POST", f"/v1/provisioning-jobs/{safe_id}/console-failed", {"code": str(code)}, timeout=self.operation_timeout)
@@ -293,6 +318,26 @@ class RemoteAgentHost:
         except RemoteAgentError as exc:
             raise self._host_error(exc) from exc
 
+    def console_credentials(
+        self,
+        job_id: str,
+        *,
+        guest_username: str,
+        guest_password: str,
+        sunshine_username: str,
+        sunshine_password: str,
+    ) -> dict[str, Any]:
+        try:
+            return self.client.console_credentials(
+                job_id,
+                guest_username=guest_username,
+                guest_password=guest_password,
+                sunshine_username=sunshine_username,
+                sunshine_password=sunshine_password,
+            )
+        except RemoteAgentError as exc:
+            raise self._host_error(exc) from exc
+
     def console_failed(self, job_id: str, *, code: str = "console_failed") -> dict[str, Any]:
         try:
             return self.client.console_failed(job_id, code=code)
@@ -341,9 +386,17 @@ class RemoteAgentHost:
         return dict(result)
 
     @staticmethod
-    def _normalize_capabilities(value: Mapping[str, Any] | None) -> dict[str, bool]:
+    def _normalize_capabilities(value: Mapping[str, Any] | None) -> dict[str, Any]:
         value = value if isinstance(value, Mapping) else {}
-        result = {"create_vm": False, "start": False, "stop": False, "restart": False, "delete": False, "console": False, "provisioning": False}
+        result: dict[str, Any] = {
+            "create_vm": False,
+            "start": False,
+            "stop": False,
+            "restart": False,
+            "delete": False,
+            "console": False,
+            "provisioning": False,
+        }
         if value.get("available") is False:
             return result
         aliases = {
@@ -359,6 +412,22 @@ class RemoteAgentHost:
         for key, output in aliases.items():
             if key in value:
                 result[output] = bool(value[key])
+        if "gaming_provisioning" in value:
+            result["gaming_provisioning"] = bool(value["gaming_provisioning"])
+        checks = value.get("provisioningChecks")
+        if isinstance(checks, Mapping):
+            result["provisioningChecks"] = {
+                str(key): bool(checks[key])
+                for key in (
+                    "template",
+                    "bootstrapCredential",
+                    "tailscaleOAuthClient",
+                    "tailscaleTailnet",
+                    "tailscaleOAuthSecret",
+                    "gpuPartitionable",
+                )
+                if key in checks
+            }
         features = value.get("features", [])
         if isinstance(features, str):
             features = [features]

@@ -3664,6 +3664,15 @@ def api_provisioning_job_claim(job_id):
         guest_ip = str(job.get('tailnetIp') or '')
         name = str(job.get('name') or '')
         if _moonlight_console(orchestrator):
+            if not hasattr(host, 'console_credentials'):
+                raise ConsoleOrchestrationError('Automatic Sunshine setup is unavailable on this host.', status=503, code='sunshine_setup_unavailable')
+            host.console_credentials(
+                job_id,
+                guest_username=username,
+                guest_password=password,
+                sunshine_username=sunshine_username,
+                sunshine_password=sunshine_password,
+            )
             plan = orchestrator.build_plan(name=name, guest_ip=guest_ip)
         else:
             plan = orchestrator.build_plan(name=name, guest_ip=guest_ip, username=username, password=password)
@@ -3742,6 +3751,15 @@ def api_provisioning_job_retry_console(job_id):
         guest_ip = str(job.get('tailnetIp') or '')
         orchestrator.quarantine_staged(name)
         if _moonlight_console(orchestrator):
+            if not hasattr(host, 'console_credentials'):
+                raise ConsoleOrchestrationError('Automatic Sunshine setup is unavailable on this host.', status=503, code='sunshine_setup_unavailable')
+            host.console_credentials(
+                job_id,
+                guest_username=username,
+                guest_password=password,
+                sunshine_username=sunshine_username,
+                sunshine_password=sunshine_password,
+            )
             plan = orchestrator.build_plan(name=name, guest_ip=guest_ip)
         else:
             plan = orchestrator.build_plan(name=name, guest_ip=guest_ip, username=username, password=password)

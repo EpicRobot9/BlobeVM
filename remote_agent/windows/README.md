@@ -82,14 +82,13 @@ planned maintenance window from an elevated PowerShell 7 session; the builder
 is opt-in and has an exact `testre` source-name gate:
 
 ```powershell
-$GuestCredential = Get-Credential -Message 'Working testre administrator'
-$BootstrapCredential = Get-Credential -Message 'EpicVM bootstrap administrator'
-.\TemplateBuilder.ps1 -Run -GuestCredential $GuestCredential -BootstrapCredential $BootstrapCredential
+.\scripts\Invoke-EpicVMTemplateBuilderInteractive.ps1
 ```
 
-The command above is documentation only in this source branch. It does not run
-during installation, and no credential is accepted on the command line. Store
-the host-side OAuth secret interactively:
+The wrapper prompts in the elevated PowerShell window, passes both
+`PSCredential` objects only in memory, and never accepts a password on the
+command line. It does not run during installation. Store the host-side OAuth
+secret interactively:
 
 ```powershell
 .\Set-TailscaleOAuthSecret.ps1

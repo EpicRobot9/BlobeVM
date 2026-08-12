@@ -116,6 +116,114 @@ function Invoke-EpicVMGuestConfiguration {
     finally {$DesiredPassword=$null;$credential=$null}
 }
 
+function Get-EpicVMSunshineConfigurationScript {
+    return {
+        param($SunshineUsername,$SunshinePassword,$ServiceName,$ExpectedVersion,$StatePaths)
+        $ErrorActionPreference='Stop'
+        if([string]::IsNullOrWhiteSpace([string]$SunshineUsername) -or [string]$SunshineUsername -match '[\r\n]' -or ([string]$SunshineUsername).Length -gt 128){throw 'Invalid Sunshine username.'}
+        if([string]::IsNullOrEmpty([string]$SunshinePassword)){throw 'Invalid Sunshine password.'}
+        $service=Get-CimInstance Win32_Service -Filter ("Name='" + ([string]$ServiceName).Replace("'","''") + "'") -ErrorAction SilentlyContinue
+        if($null -eq $service){throw 'Sunshine service is not installed.'}
+        $servicePath=[string]$service.PathName
+        if($servicePath -match '^"([^"]+)"'){$servicePath=$Matches[1]}
+        elseif($servicePath -match '^([^ ]+)'){$servicePath=$Matches[1]}
+        if([string]::IsNullOrWhiteSpace($servicePath) -or -not (Test-Path -LiteralPath $servicePath -PathType Leaf)){throw 'Sunshine executable could not be located.'}
+        $installedVersion=[string]([Diagnostics.FileVersionInfo]::GetVersionInfo($servicePath).ProductVersion)
+        if(-not [string]::IsNullOrWhiteSpace([string]$ExpectedVersion) -and $installedVersion -cne [string]$ExpectedVersion){throw 'Sunshine version did not match the pinned release.'}
+        $paths=@($StatePaths | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+        $statePath=@($paths | Where-Object { Test-Path -LiteralPath ([string]$_) -PathType Leaf } | Select-Object -First 1)
+        if($statePath.Count -eq 0){
+            $statePath=@(Join-Path (Join-Path (Split-Path -Parent $servicePath) 'config') 'sunshine_state.json')
+        }
+        $statePath=[string]$statePath[0]
+        $parent=Split-Path -Parent $statePath
+        if(-not(Test-Path -LiteralPath $parent)){New-Item -ItemType Directory -Path $parent -Force|Out-Null}
+
+        # Sunshine's supported state format is username + random salt +
+        # SHA-256(UTF-8(password + salt)).  The clear password exists only in
+        # this remoting process and is never passed to an executable.
+        $saltBytes=New-Object byte[] 16
+        $hashBytes=$null
+        $rng=[Security.Cryptography.RandomNumberGenerator]::Create()
+        try{
+            $rng.GetBytes($saltBytes)
+            $salt=([BitConverter]::ToString($saltBytes)-replace '-','').ToLowerInvariant()
+            $hashBytes=[Text.Encoding]::UTF8.GetBytes(([string]$SunshinePassword)+$salt)
+            $sha=[Security.Cryptography.SHA256]::Create()
+            try{$digest=$sha.ComputeHash($hashBytes)}finally{$sha.Dispose()}
+            $passwordHash=([BitConverter]::ToString($digest)-replace '-','').ToLowerInvariant()
+            $record=[ordered]@{username=[string]$SunshineUsername;salt=$salt;password=$passwordHash}
+            $json=$record|ConvertTo-Json -Depth 4 -Compress
+            $temporary=Join-Path $parent ('.sunshine_state-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+            try{
+                [IO.File]::WriteAllText($temporary,$json,(New-Object Text.UTF8Encoding($false)))
+                Move-Item -LiteralPath $temporary -Destination $statePath -Force -ErrorAction Stop
+            }finally{if(Test-Path -LiteralPath $temporary){Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue}}
+        }finally{
+            if($null -ne $hashBytes){[Array]::Clear($hashBytes,0,$hashBytes.Length)}
+            if($null -ne $saltBytes){[Array]::Clear($saltBytes,0,$saltBytes.Length)}
+            if($null -ne $rng){$rng.Dispose()}
+            $SunshinePassword=$null;$json=$null;$passwordHash=$null;$digest=$null;$salt=$null
+        }
+
+        $acl=Get-Acl -LiteralPath $statePath
+        $acl.SetAccessRuleProtection($true,$false)
+        @($acl.Access)|ForEach-Object{[void]$acl.RemoveAccessRule($_)}
+        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new('SYSTEM','Read','Allow'))
+        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new('Administrators','Read','Allow'))
+        $serviceAccount=[string]$service.StartName
+        if($serviceAccount -and $serviceAccount -notin @('LocalSystem','NT AUTHORITY\LocalSystem','LocalService','NT AUTHORITY\LocalService','NetworkService','NT AUTHORITY\NetworkService') -and $serviceAccount -match '^(NT SERVICE\\|[A-Za-z0-9_.-]+\\)'){
+            $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($serviceAccount,'Read','Allow'))
+        }
+        Set-Acl -LiteralPath $statePath -AclObject $acl
+        Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object { [string]$_.DisplayName -match '(?i)Sunshine' } | Disable-NetFirewallRule -ErrorAction SilentlyContinue
+        Get-NetFirewallRule -Name 'EpicVM-Sunshine-Tailscale-TCP','EpicVM-Sunshine-Tailscale-UDP' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+        New-NetFirewallRule -Name 'EpicVM-Sunshine-Tailscale-TCP' -DisplayName 'EpicVM Sunshine (Tailscale TCP)' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 47984,47989,47990,48010 -RemoteAddress '100.64.0.0/10' -Profile Any -EdgeTraversalPolicy Block | Out-Null
+        New-NetFirewallRule -Name 'EpicVM-Sunshine-Tailscale-UDP' -DisplayName 'EpicVM Sunshine (Tailscale UDP)' -Direction Inbound -Action Allow -Protocol UDP -LocalPort 47998,47999,48000,48002 -RemoteAddress '100.64.0.0/10' -Profile Any -EdgeTraversalPolicy Block | Out-Null
+        Restart-Service -Name $ServiceName -Force -ErrorAction Stop
+        $deadline=[DateTime]::UtcNow.AddSeconds(15)
+        $running=$false;$listener=$false
+        while([DateTime]::UtcNow -lt $deadline){
+            $current=Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+            $running=$null -ne $current -and [string]$current.Status -eq 'Running'
+            $listener=$null -ne (Get-NetTCPConnection -LocalPort 47990 -State Listen -ErrorAction SilentlyContinue)
+            if($running -and $listener){break}
+            Start-Sleep -Milliseconds 500
+        }
+        if(-not $running -or -not $listener){throw 'Sunshine did not pass its service/listener verification.'}
+        [ordered]@{ok=$true;serviceRunning=$true;listener=$true;credentialsConfigured=$true;firewallScoped=$true}
+    }
+}
+
+function Invoke-EpicVMSunshineConfiguration {
+    param(
+        [Parameter(Mandatory)][object]$Provider,
+        [Parameter(Mandatory)][object]$Config,
+        [Parameter(Mandatory)][string]$VmName,
+        [Parameter(Mandatory)][string]$GuestUsername,
+        [Parameter(Mandatory)][string]$GuestPassword,
+        [Parameter(Mandatory)][string]$SunshineUsername,
+        [Parameter(Mandatory)][string]$SunshinePassword
+    )
+    if($GuestUsername -notmatch '^[A-Za-z][A-Za-z0-9._-]{2,31}$' -or [string]::IsNullOrEmpty($GuestPassword) -or [string]::IsNullOrEmpty($SunshineUsername) -or [string]::IsNullOrEmpty($SunshinePassword)){
+        throw (New-EpicVMHyperVError -Code 'InvalidInput' -Message 'Guest and Sunshine credentials are required.')
+    }
+    $credential=$null
+    $sunshineScript=Get-EpicVMSunshineConfigurationScript
+    $serviceName=[string](Get-EpicVMHyperVValue -Object $Config -Name 'SunshineServiceName' -Default 'SunshineService')
+    $expectedVersion=[string](Get-EpicVMHyperVValue -Object $Config -Name 'SunshineVersion' -Default '2026.516.143833')
+    $statePaths=@(Get-EpicVMHyperVValue -Object $Config -Name 'SunshineStatePaths' -Default @('C:\Program Files\Sunshine\config\sunshine_state.json','C:\ProgramData\Sunshine\config\sunshine_state.json'))
+    try{
+        $credential=[PSCredential]::new($GuestUsername,(ConvertTo-SecureString $GuestPassword -AsPlainText -Force))
+        $result=Invoke-EpicVMPowerShellDirect -Provider $Provider -VmName $VmName -Credential $credential -Script $sunshineScript -ArgumentList @($SunshineUsername,$SunshinePassword,$serviceName,$expectedVersion,$statePaths)
+        if(-not [bool](Get-EpicVMHyperVValue -Object $result -Name 'ok' -Default $false) -or -not [bool](Get-EpicVMHyperVValue -Object $result -Name 'listener' -Default $false)){
+            throw 'Sunshine configuration did not verify.'
+        }
+        return [ordered]@{ok=$true;serviceRunning=[bool](Get-EpicVMHyperVValue -Object $result -Name 'serviceRunning' -Default $false);listener=$true;credentialsConfigured=$true;firewallScoped=[bool](Get-EpicVMHyperVValue -Object $result -Name 'firewallScoped' -Default $false)}
+    }catch{throw (New-EpicVMHyperVError -Code 'SunshineConfigurationFailed' -Message 'Automatic Sunshine configuration failed.')}
+    finally{$GuestPassword=$null;$SunshinePassword=$null;$credential=$null}
+}
+
 function Test-EpicVMGuestConfiguration {
     param([Parameter(Mandatory)][object]$Provider,[Parameter(Mandatory)][string]$VmName,[Parameter(Mandatory)][PSCredential]$Credential)
     $script={
