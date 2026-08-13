@@ -206,6 +206,43 @@ function ConvertTo-EpicVMJsonResponse {
     }
 }
 
+function Write-EpicVMSafeHttpResponse {
+    <#
+    The browser/dashboard may disconnect while a request is being handled.
+    HttpListener then rejects response property writes (including
+    ContentLength64).  A transport failure must not escape the per-request
+    boundary and terminate the long-lived agent worker.
+    #>
+    param(
+        [Parameter(Mandatory)] [object] $Response,
+        [Parameter(Mandatory)] [int] $StatusCode,
+        [Parameter(Mandatory)] [string] $Json,
+        [AllowNull()] [object] $Headers = @{},
+        [AllowNull()] [string] $RequestId = ''
+    )
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes($Json)
+        $Response.StatusCode = $StatusCode
+        if (-not [string]::IsNullOrWhiteSpace($RequestId)) {
+            $Response.Headers['X-Request-Id'] = $RequestId
+        }
+        $Response.ContentType = 'application/json; charset=utf-8'
+        if ($null -ne $Headers) {
+            foreach ($headerName in $Headers.Keys) {
+                $Response.Headers[$headerName] = [string]$Headers[$headerName]
+            }
+        }
+        $Response.ContentLength64 = $bytes.Length
+        $Response.OutputStream.Write($bytes, 0, $bytes.Length)
+        return $true
+    }
+    catch {
+        # The client may already have closed/submitted the response.  Never
+        # rethrow a transport-only failure from this response boundary.
+        return $false
+    }
+}
+
 function Get-EpicVMHeader {
     param([AllowNull()] [object] $Headers, [Parameter(Mandatory)] [string] $Name)
     if ($null -eq $Headers) { return '' }
@@ -566,24 +603,15 @@ function Start-EpicVMAgent {
                     }
                 }
                 $response | Add-Member -MemberType NoteProperty -Name RequestId -Value $requestId -Force
-                $bytes = [Text.Encoding]::UTF8.GetBytes($response.Json)
-                $context.Response.StatusCode = $response.StatusCode
-                $context.Response.Headers['X-Request-Id'] = $requestId
-                $context.Response.ContentType = 'application/json; charset=utf-8'
-                foreach ($headerName in $response.Headers.Keys) { $context.Response.Headers[$headerName] = [string]$response.Headers[$headerName] }
-                $context.Response.ContentLength64 = $bytes.Length
-                $context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
+                [void](Write-EpicVMSafeHttpResponse -Response $context.Response -StatusCode $response.StatusCode -Json $response.Json -Headers $response.Headers -RequestId $requestId)
             }
             catch {
                 $body = (New-EpicVMApiError -Code 'internal_error' -Message 'The agent could not process the request.') | ConvertTo-Json -Depth 10 -Compress
-                $bytes = [Text.Encoding]::UTF8.GetBytes($body)
-                $context.Response.StatusCode = 500
-                $context.Response.Headers['X-Request-Id'] = $requestId
-                $context.Response.ContentType = 'application/json; charset=utf-8'
-                $context.Response.ContentLength64 = $bytes.Length
-                $context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
+                [void](Write-EpicVMSafeHttpResponse -Response $context.Response -StatusCode 500 -Json $body -RequestId $requestId)
             }
-            finally { $context.Response.Close() }
+            finally {
+                try { $context.Response.Close() } catch { }
+            }
         }
     }
     finally { $listener.Stop(); $listener.Close() }

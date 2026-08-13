@@ -6,6 +6,16 @@ BeforeAll {
     . (Join-Path $windowsRoot 'providers/HyperVProvider.ps1')
     . (Join-Path $windowsRoot 'EpicVM.Agent.ps1') -NoStart
 
+    Add-Type -TypeDefinition @'
+public sealed class EpicVMThrowingHttpResponse {
+    public int StatusCode { get; set; }
+    public System.Collections.Specialized.NameValueCollection Headers { get; } = new System.Collections.Specialized.NameValueCollection();
+    public string ContentType { get; set; }
+    public long ContentLength64 { set { throw new System.InvalidOperationException("response already submitted"); } }
+    public System.IO.Stream OutputStream { get; } = new System.IO.MemoryStream();
+}
+'@
+
     function New-TestProvider {
         [pscustomobject]@{
             Name = 'Mock'
@@ -115,6 +125,13 @@ Describe 'EpicVM agent binding defaults' {
         Test-EpicVMBindAddress -Address '127.0.0.1' | Should -BeTrue
         Test-EpicVMBindAddress -Address '192.168.1.20' | Should -BeFalse
         Test-EpicVMBindAddress -Address '0.0.0.0' | Should -BeFalse
+    }
+
+    It 'contains client disconnect failures without throwing from response emission' {
+        $response = [EpicVMThrowingHttpResponse]::new()
+
+        { Write-EpicVMSafeHttpResponse -Response $response -StatusCode 500 -Json '{"ok":false}' -RequestId 'request-test' } | Should -Not -Throw
+        (Write-EpicVMSafeHttpResponse -Response $response -StatusCode 500 -Json '{"ok":false}' -RequestId 'request-test') | Should -BeFalse
     }
 
     It 'ships a guided Windows setup wrapper' {
