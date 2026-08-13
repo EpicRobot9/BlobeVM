@@ -224,6 +224,18 @@ function Get-EpicVMTemplateGuestSanitizer {
             if($sysprepDetails.Length -gt 2048){$sysprepDetails=$sysprepDetails.Substring($sysprepDetails.Length-2048)}
             throw "sysprep_failed exit=$sysprepExitCode details=$sysprepDetails"
         }
+        # A few Hyper-V guest builds return success from Sysprep but do not
+        # honor /shutdown.  Only after a successful Sysprep exit do we issue
+        # this bounded, guest-local shutdown fallback; a failed Sysprep still
+        # aborts before any power operation is attempted.
+        try {
+            Stop-Computer -ComputerName 'localhost' -Force -ErrorAction Stop
+        } catch {
+            # The shutdown can tear down the remoting channel before the
+            # command reports success.  Treat only that expected transport
+            # outcome as success; surface any other shutdown error.
+            if($_.Exception.Message -notmatch '(?i)(shutdown|shutting down|connection|RPC|remoting)') { throw }
+        }
     }
 }
 
