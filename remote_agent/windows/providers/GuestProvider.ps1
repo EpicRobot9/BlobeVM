@@ -54,7 +54,11 @@ function Invoke-EpicVMPowerShellDirect {
     )
     $invoker=Get-EpicVMHyperVValue -Object $Provider -Name 'PowerShellDirectInvoker' -Default $null
     if($null -ne $invoker){return & $invoker $VmName $Credential $Script $ArgumentList}
-    return Invoke-Command -VMName $VmName -Credential $Credential -ScriptBlock $Script -ArgumentList $ArgumentList -ErrorAction Stop
+    # PowerShell Direct can otherwise wait indefinitely while a cloned guest
+    # is still in OOBE. Keep each readiness/configuration attempt bounded so
+    # the provisioning job can fail closed and retain the VM for diagnosis.
+    $sessionOption=New-PSSessionOption -OpenTimeout 5000 -OperationTimeout 5000 -IdleTimeout 30000
+    return Invoke-Command -VMName $VmName -Credential $Credential -SessionOption $sessionOption -ScriptBlock $Script -ArgumentList $ArgumentList -ErrorAction Stop
 }
 
 function Get-EpicVMGuestProviderErrorCode {
