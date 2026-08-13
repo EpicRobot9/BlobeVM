@@ -30,6 +30,7 @@ Describe 'EpicVM provisioning safety' {
         $text = Get-Content (Join-Path $windowsRoot 'Provisioning.ps1') -Raw
         $text | Should -Match 'TestBootstrapGuest'
         $text | Should -Match 'guest_bootstrap_not_ready'
+        $text | Should -Match 'Guest.*10-minute|\$Job\.name 600 1000'
     }
 
     It 'uses the locked standard and gaming resource profiles' {

@@ -427,7 +427,11 @@ function Start-EpicVMProvisioningJob {
             throw (New-EpicVMProvisioningError -Code 'bootstrap_readiness_unavailable' -Message 'The guest bootstrap readiness gate is unavailable.' -Status 503)
         }
         $ready=$false
-        try { $ready=[bool](& $bootstrapReady $Job.name 180 1000) } catch { $ready=$false }
+        # A generalized Windows 11 clone can spend several minutes completing
+        # its first boot before PowerShell Direct accepts the bootstrap account.
+        # Keep each transport probe bounded, but allow one bounded 10-minute
+        # readiness window before failing closed.
+        try { $ready=[bool](& $bootstrapReady $Job.name 600 1000) } catch { $ready=$false }
         if(-not $ready){
             throw (New-EpicVMProvisioningError -Code 'guest_bootstrap_not_ready' -Message 'The cloned guest did not become ready for secure setup.' -Status 503)
         }
