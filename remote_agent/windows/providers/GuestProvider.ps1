@@ -54,11 +54,21 @@ function Invoke-EpicVMPowerShellDirect {
     )
     $invoker=Get-EpicVMHyperVValue -Object $Provider -Name 'PowerShellDirectInvoker' -Default $null
     if($null -ne $invoker){return & $invoker $VmName $Credential $Script $ArgumentList}
-    # PowerShell Direct can otherwise wait indefinitely while a cloned guest
-    # is still in OOBE. Keep each readiness/configuration attempt bounded so
-    # the provisioning job can fail closed and retain the VM for diagnosis.
-    $sessionOption=New-PSSessionOption -OpenTimeout 5000 -OperationTimeout 5000 -IdleTimeout 30000
-    return Invoke-Command -VMName $VmName -Credential $Credential -SessionOption $sessionOption -ScriptBlock $Script -ArgumentList $ArgumentList -ErrorAction Stop
+    # The Hyper-V VMName parameter set does not accept SessionOption. Run the
+    # command as a bounded background job instead, so a guest still booting in
+    # OOBE cannot block the agent worker indefinitely.
+    $guestJob=$null
+    try {
+        $guestJob=Invoke-Command -VMName $VmName -Credential $Credential -ScriptBlock $Script -ArgumentList $ArgumentList -AsJob -ErrorAction Stop
+        $completedJob=Wait-Job -Job $guestJob -Timeout 5
+        if($null -eq $completedJob){
+            Stop-Job -Job $guestJob -ErrorAction SilentlyContinue
+            throw 'PowerShell Direct probe timed out.'
+        }
+        return Receive-Job -Job $guestJob -ErrorAction Stop
+    } finally {
+        if($null -ne $guestJob){Remove-Job -Job $guestJob -Force -ErrorAction SilentlyContinue}
+    }
 }
 
 function Get-EpicVMGuestProviderErrorCode {

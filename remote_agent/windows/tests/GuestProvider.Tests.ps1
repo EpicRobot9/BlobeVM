@@ -41,6 +41,13 @@ Describe 'PowerShell Direct guest provider' {
         (Wait-EpicVMGuestBootstrapReady -Provider $provider -Config $config -VmName 'alpha' -TimeoutSeconds 1 -PollMilliseconds 100) | Should -BeTrue
     }
 
+    It 'bounds the native Hyper-V VMName command without an incompatible session option' {
+        $text = Get-Content (Join-Path $windowsRoot 'providers/GuestProvider.ps1') -Raw
+        $text | Should -Match 'Invoke-Command -VMName \$VmName.*-AsJob'
+        $text | Should -Match 'Wait-Job -Job \$guestJob -Timeout 5'
+        $text | Should -Not -Match 'Invoke-Command -VMName \$VmName.*-SessionOption'
+    }
+
     It 'classifies PowerShell Direct failures without exposing transport text' {
         $provider = [pscustomobject]@{
             PowerShellDirectInvoker={ throw 'PowerShell Direct channel unavailable.' }
