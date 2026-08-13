@@ -57,6 +57,64 @@ function Invoke-EpicVMPowerShellDirect {
     return Invoke-Command -VMName $VmName -Credential $Credential -ScriptBlock $Script -ArgumentList $ArgumentList -ErrorAction Stop
 }
 
+function Get-EpicVMGuestProviderErrorCode {
+    param([AllowNull()][object]$ErrorRecord)
+
+    # Never return exception text to the API.  These stable classes are enough
+    # to tell the operator which trust boundary failed without exposing guest
+    # names, paths, or credential-bearing transport details.
+    $message = [string](Get-EpicVMHyperVValue -Object $ErrorRecord -Name 'Exception' -Default $ErrorRecord)
+    if($message -match '(?i)RDP/NLA/firewall|firewall verification|guest account could not be placed'){
+        return 'rdp_verification_failed'
+    }
+    if($message -match '(?i)PowerShell Direct|PSRemoting|WinRM|logon failure|access is denied|cannot connect|connection'){
+        return 'powershell_direct_failed'
+    }
+    return 'guest_configuration_failed'
+}
+
+function Get-EpicVMGuestBootstrapReadinessScript {
+    return {
+        $ErrorActionPreference='Stop'
+        $os=Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+        [ordered]@{ok=$null -ne $os; powershellDirect=$true}
+    }
+}
+
+function Test-EpicVMGuestBootstrapReady {
+    param(
+        [Parameter(Mandatory)][object]$Provider,
+        [Parameter(Mandatory)][object]$Config,
+        [Parameter(Mandatory)][string]$VmName
+    )
+    $credential=$null
+    try {
+        $loader=Get-EpicVMHyperVValue -Object $Provider -Name 'BootstrapCredentialLoader' -Default $null
+        $path=[string](Get-EpicVMHyperVValue -Object $Config -Name 'BootstrapCredentialPath' -Default 'C:\ProgramData\EpicVM\agent\bootstrap.dpapi')
+        $user=[string](Get-EpicVMHyperVValue -Object $Config -Name 'BootstrapUser' -Default 'EpicVMBootstrap')
+        $credential=if($null -ne $loader){& $loader $path $user}else{Get-EpicVMBootstrapCredential -Path $path -Username $user}
+        $result=Invoke-EpicVMPowerShellDirect -Provider $Provider -VmName $VmName -Credential $credential -Script (Get-EpicVMGuestBootstrapReadinessScript)
+        return [bool](Get-EpicVMHyperVValue -Object $result -Name 'ok' -Default $false)
+    } catch { return $false }
+    finally { $credential=$null }
+}
+
+function Wait-EpicVMGuestBootstrapReady {
+    param(
+        [Parameter(Mandatory)][object]$Provider,
+        [Parameter(Mandatory)][object]$Config,
+        [Parameter(Mandatory)][string]$VmName,
+        [int]$TimeoutSeconds=180,
+        [int]$PollMilliseconds=1000
+    )
+    $deadline=[DateTime]::UtcNow.AddSeconds([Math]::Max(1,$TimeoutSeconds))
+    do {
+        if(Test-EpicVMGuestBootstrapReady -Provider $Provider -Config $Config -VmName $VmName){ return $true }
+        if([DateTime]::UtcNow -lt $deadline){ Start-Sleep -Milliseconds ([Math]::Max(100,$PollMilliseconds)) }
+    } while([DateTime]::UtcNow -lt $deadline)
+    return $false
+}
+
 function Get-EpicVMGuestConfigurationScript {
     return {
         param($DesiredUser,$DesiredPassword,$BootstrapUser,$BootstrapCredentialPath)
@@ -124,7 +182,11 @@ function Invoke-EpicVMGuestConfiguration {
     $loader=Get-EpicVMHyperVValue -Object $Provider -Name 'BootstrapCredentialLoader' -Default $null
     $path=[string](Get-EpicVMHyperVValue -Object $Config -Name 'BootstrapCredentialPath' -Default 'C:\ProgramData\EpicVM\agent\bootstrap.dpapi')
     $user=[string](Get-EpicVMHyperVValue -Object $Config -Name 'BootstrapUser' -Default 'EpicVMBootstrap')
-    $credential=if($null -ne $loader){& $loader $path $user}else{Get-EpicVMBootstrapCredential -Path $path -Username $user}
+    try {
+        $credential=if($null -ne $loader){& $loader $path $user}else{Get-EpicVMBootstrapCredential -Path $path -Username $user}
+    } catch {
+        throw (New-EpicVMHyperVError -Code 'bootstrap_credential_unavailable' -Message 'The machine bootstrap credential could not open the guest channel.')
+    }
     $script=Get-EpicVMGuestConfigurationScript
     try {
         $result=Invoke-EpicVMPowerShellDirect -Provider $Provider -VmName $VmName -Credential $credential -Script $script -ArgumentList @($DesiredUser,$DesiredPassword,$user,$path)
@@ -132,7 +194,10 @@ function Invoke-EpicVMGuestConfiguration {
         foreach($key in @($safe.Keys)){$safe[$key]=[bool](Get-EpicVMHyperVValue -Object $result -Name $key -Default $false)}
         if(-not $safe.ok){throw 'Guest configuration did not verify.'}
         return $safe
-    } catch { throw (New-EpicVMHyperVError -Code 'GuestConfigurationFailed' -Message 'PowerShell Direct guest configuration failed.') }
+    } catch {
+        $code=Get-EpicVMGuestProviderErrorCode -ErrorRecord $_
+        throw (New-EpicVMHyperVError -Code $code -Message 'The guest configuration gate failed.')
+    }
     finally {$DesiredPassword=$null;$credential=$null}
 }
 

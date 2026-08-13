@@ -11,6 +11,7 @@ BeforeAll {
             GetVMs={ @() }
             CreateVM={ param($request) @{ name=$request.name; state='Off'; managed=$true } }
             StartVM={ param($name) @{ name=$name; state='Running'; managed=$true } }
+            TestBootstrapGuest={ param($name,$timeout,$poll) $true }
             StopVM={ param($name) @{ name=$name; state='Off'; managed=$true } }
             DeleteVM={ param($name) @{ name=$name; deleted=$true } }
         }
@@ -23,6 +24,12 @@ Describe 'EpicVM provisioning safety' {
         $text | Should -Match 'Test-EpicVMTemplateManifest -Config \$Config -SkipContentHash'
         $text | Should -Match 'if \(-not \$SkipContentHash\)'
         $text | Should -Match 'Test-EpicVMTemplateManifest -Config \$State\.Config\)'
+    }
+
+    It 'requires bootstrap readiness before issuing a one-time claim' {
+        $text = Get-Content (Join-Path $windowsRoot 'Provisioning.ps1') -Raw
+        $text | Should -Match 'TestBootstrapGuest'
+        $text | Should -Match 'guest_bootstrap_not_ready'
     }
 
     It 'uses the locked standard and gaming resource profiles' {

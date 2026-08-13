@@ -308,6 +308,12 @@ def _vm_host_error_response(exc):
         'claim_state_invalid': 'The pending claim state is invalid.',
         'claim_reissue_failed': 'The pending claim could not be reissued safely.',
         'claim_expired': 'The pending claim has expired.',
+        'bootstrap_credential_unavailable': 'The machine bootstrap channel is unavailable.',
+        'bootstrap_readiness_unavailable': 'The host lacks the secure guest-readiness check.',
+        'guest_bootstrap_not_ready': 'The cloned guest did not become ready for secure setup.',
+        'powershell_direct_failed': 'PowerShell Direct could not open the cloned guest.',
+        'rdp_verification_failed': 'Guest RDP/NLA/firewall verification failed.',
+        'guest_configuration_failed': 'Guest configuration failed at the secure setup gate.',
         'host_unavailable': 'The remote VM host is unavailable.',
     }
     response = jsonify({'ok': False, 'error': messages.get(code, 'The remote VM request failed.'), 'code': code})

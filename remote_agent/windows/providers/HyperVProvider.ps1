@@ -735,6 +735,7 @@ function New-EpicVMHyperVProvider {
         RestartVM = $null
         DeleteVM = $null
         ConfigureGuest = $null
+        TestBootstrapGuest = $null
         ConfigureSunshine = $null
         EnrollTailscale = $null
         VerifyGuest = $null
@@ -760,6 +761,9 @@ function New-EpicVMHyperVProvider {
     $provider.ConfigureGuest = ({ param($Name,$Username,$Password)
             $result = Invoke-EpicVMGuestConfiguration -Provider $provider -Config $provider.Config -VmName $Name -DesiredUser $Username -DesiredPassword $Password
             return $result
+        }.GetNewClosure())
+    $provider.TestBootstrapGuest = ({ param($Name,$TimeoutSeconds,$PollMilliseconds)
+            return Wait-EpicVMGuestBootstrapReady -Provider $provider -Config $provider.Config -VmName $Name -TimeoutSeconds ([int]$TimeoutSeconds) -PollMilliseconds ([int]$PollMilliseconds)
         }.GetNewClosure())
     $provider.ConfigureSunshine = ({ param($Name,$GuestUsername,$GuestPassword,$SunshineUsername,$SunshinePassword)
             $result = Invoke-EpicVMSunshineConfiguration -Provider $provider -Config $provider.Config -VmName $Name -GuestUsername $GuestUsername -GuestPassword $GuestPassword -SunshineUsername $SunshineUsername -SunshinePassword $SunshinePassword

@@ -333,6 +333,27 @@ def test_remote_host_lifecycle_errors_are_normalized(monkeypatch):
         host.run_manager("start", "alpha")
 
 
+def test_remote_claim_preserves_only_safe_agent_error_code():
+    host = RemoteAgentHost({
+        "id": "epic-pc",
+        "display_name": "Epic PC",
+        "agent_url": "http://100.64.0.2:8765",
+        "token": "token",
+    })
+    host.client = SimpleNamespace(
+        claim=lambda *args, **kwargs: (_ for _ in ()).throw(RemoteAgentError(
+            "opaque transport text",
+            status=422,
+            data={"error": {"code": "powershell_direct_failed", "message": "do not reflect"}},
+        ))
+    )
+    with pytest.raises(VmHostUnavailable) as caught:
+        host.claim("job-1", "operator", "secret", "one-use")
+    assert caught.value.code == "powershell_direct_failed"
+    assert "secret" not in str(caught.value)
+    assert "do not reflect" not in str(caught.value)
+
+
 def test_remote_vm_url_includes_public_origin_and_host_id(monkeypatch):
     import importlib
 

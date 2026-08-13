@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { canClaimProvisioningJob, canOpenInventoryVm, canOpenProvisionedVm, canRetryProvisioningConsole, deprovisioningPayload, provisioningClaimPayload, provisioningConsoleRetryPayload, provisioningProgress } from '../src/lib/provisioningUi.js'
+import { canClaimProvisioningJob, canOpenInventoryVm, canOpenProvisionedVm, canRetryProvisioningConsole, deprovisioningPayload, provisioningClaimPayload, provisioningConsoleRetryPayload, provisioningFailureReason, provisioningProgress } from '../src/lib/provisioningUi.js'
 
 test('claim and open gates are state-specific', () => {
   assert.equal(canClaimProvisioningJob({ state:'awaiting_claim' }), true)
@@ -26,4 +26,10 @@ test('claim payload keeps the token in the request boundary and teardown require
   assert.deepEqual(provisioningConsoleRetryPayload({ hostId:'epic-pc', username:'operator', password:'transient-password' }), {
     host_id:'epic-pc', username:'operator', password:'transient-password'
   })
+})
+
+test('safe provisioning failure codes explain the failed trust boundary', () => {
+  assert.equal(provisioningFailureReason({ errorCode:'powershell_direct_failed' }), 'PowerShell Direct could not open the cloned guest.')
+  assert.equal(provisioningFailureReason({ errorCode:'rdp_verification_failed' }), 'Guest RDP/NLA/firewall verification failed.')
+  assert.equal(provisioningFailureReason({ errorCode:'secret_leaked' }), '')
 })

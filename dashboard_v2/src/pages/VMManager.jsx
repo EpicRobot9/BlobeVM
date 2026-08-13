@@ -7,7 +7,7 @@ import { useToasts } from '../components/ToastProvider'
 import { instanceNamesKey, pollDelayMs } from '../lib/polling'
 import { canCacheVmSettingsResponse, clearRemovedVmState, createLoadInFlightRunner, createLogSelectionTracker } from '../lib/vmManagerRaces'
 import { canUseRemotePlacement, createPlacementPayload, getEligibleRemoteHosts, getPlacementValidationReason, hostOptionLabel, normalizeHostInventory, provisioningProfileDisabledReason, remotePlacementDisabledReason } from '../lib/hostPlacement'
-import { canClaimProvisioningJob, canOpenInventoryVm, canOpenProvisionedVm, canRetryProvisioningConsole, deprovisioningPayload, provisioningClaimPayload, provisioningConsoleRetryPayload, provisioningProgress } from '../lib/provisioningUi'
+import { canClaimProvisioningJob, canOpenInventoryVm, canOpenProvisionedVm, canRetryProvisioningConsole, deprovisioningPayload, provisioningClaimPayload, provisioningConsoleRetryPayload, provisioningFailureReason, provisioningProgress } from '../lib/provisioningUi'
 
 function toneFor(status){
   const s = (status || '').toLowerCase()
@@ -979,7 +979,7 @@ export default function VMManager(){
                 </div>
               ) : null}
               {canOpenProvisionedVm(provisioningJob) ? <div style={{color:'#86efac',marginTop:10}}>Ready. The VM will appear in the fleet after the next refresh.</div> : null}
-              {provisioningJob.state === 'failed' ? <div role="alert" style={{color:'#fca5a5',marginTop:10}}>Guest setup stopped safely. The VM was retained for diagnosis.</div> : null}
+              {provisioningJob.state === 'failed' ? <div role="alert" style={{color:'#fca5a5',marginTop:10}}>Guest setup stopped safely.{provisioningFailureReason(provisioningJob) ? ` ${provisioningFailureReason(provisioningJob)}` : ''} The VM was retained for diagnosis.</div> : null}
               {provisioningJob.state === 'console_failed' ? <div role="alert" style={{color:'#fca5a5',marginTop:10}}>Console setup stopped safely. Its route is down and diagnostic data was retained.</div> : null}
             </div>
           ) : null}

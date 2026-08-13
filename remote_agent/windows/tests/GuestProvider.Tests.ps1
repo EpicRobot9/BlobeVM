@@ -31,4 +31,36 @@ Describe 'PowerShell Direct guest provider' {
         $text | Should -Match 'EpicVM-RDP-Tailscale'
         $text | Should -Match 'Remove-LocalUser'
     }
+
+    It 'waits for a read-only bootstrap probe before guest mutation' {
+        $provider = [pscustomobject]@{
+            PowerShellDirectInvoker={ param($vm,$credential,$scriptBlock,$args) @{ ok=$true; powershellDirect=$true } }
+            BootstrapCredentialLoader={ param($path,$user) [PSCredential]::new($user,(ConvertTo-SecureString ('x' * 16) -AsPlainText -Force)) }
+        }
+        $config=[pscustomobject]@{BootstrapCredentialPath='mock.dpapi';BootstrapUser='EpicVMBootstrap'}
+        (Wait-EpicVMGuestBootstrapReady -Provider $provider -Config $config -VmName 'alpha' -TimeoutSeconds 1 -PollMilliseconds 100) | Should -BeTrue
+    }
+
+    It 'classifies PowerShell Direct failures without exposing transport text' {
+        $provider = [pscustomobject]@{
+            PowerShellDirectInvoker={ throw 'PowerShell Direct channel unavailable.' }
+            BootstrapCredentialLoader={ param($path,$user) [PSCredential]::new($user,(ConvertTo-SecureString ('x' * 16) -AsPlainText -Force)) }
+        }
+        $config=[pscustomobject]@{BootstrapCredentialPath='mock.dpapi';BootstrapUser='EpicVMBootstrap'}
+        $caught=$null
+        try { Invoke-EpicVMGuestConfiguration -Provider $provider -Config $config -VmName 'alpha' -DesiredUser 'operator' -DesiredPassword ('y' * 16) } catch { $caught=$_.Exception }
+        $caught.ErrorCode | Should -Be 'powershell_direct_failed'
+        $caught.Message | Should -Be 'The guest configuration gate failed.'
+    }
+
+    It 'classifies bootstrap credential failures safely' {
+        $provider = [pscustomobject]@{
+            BootstrapCredentialLoader={ throw 'DPAPI bootstrap secret unavailable.' }
+        }
+        $config=[pscustomobject]@{BootstrapCredentialPath='mock.dpapi';BootstrapUser='EpicVMBootstrap'}
+        $caught=$null
+        try { Invoke-EpicVMGuestConfiguration -Provider $provider -Config $config -VmName 'alpha' -DesiredUser 'operator' -DesiredPassword ('y' * 16) } catch { $caught=$_.Exception }
+        $caught.ErrorCode | Should -Be 'bootstrap_credential_unavailable'
+        $caught.Message | Should -Be 'The machine bootstrap credential could not open the guest channel.'
+    }
 }

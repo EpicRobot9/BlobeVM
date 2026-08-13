@@ -317,11 +317,9 @@ class RemoteAgentHost:
         try:
             return self.client.claim(job_id, username, password, claim_token)
         except RemoteAgentError as exc:
-            # Do not reflect transport/error text from a credential-bearing
-            # request; retain the normalized status/code for the API layer.
-            status = int(exc.status or 503)
-            code = {400: "invalid_request", 401: "authentication_failed", 403: "forbidden", 404: "not_found", 409: "conflict", 422: "claim_failed"}.get(status, "host_unavailable")
-            raise VmHostUnavailable("Guest claim was rejected.", status=status, code=code) from exc
+            # Preserve only an allowlisted remote error code.  Never reflect
+            # transport text from this credential-bearing request.
+            raise self._host_error(exc) from exc
 
     def console_complete(self, job_id: str, *, route_prefix: str, guest_tcp_verified: bool) -> dict[str, Any]:
         try:

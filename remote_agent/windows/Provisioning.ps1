@@ -418,6 +418,20 @@ function Start-EpicVMProvisioningJob {
         Save-EpicVMProvisioningStore -Store $State.Provisioning
         & $State.Provider.StartVM $Job.name | Out-Null
 
+        # Do not issue a one-time claim while the clone is still in OOBE or
+        # before PowerShell Direct can authenticate with the machine bootstrap
+        # account.  This is a read-only guest probe; it never receives or
+        # persists the operator's claim credentials.
+        $bootstrapReady = Get-EpicVMProperty -Object $State.Provider -Name 'TestBootstrapGuest' -Default $null
+        if($null -eq $bootstrapReady){
+            throw (New-EpicVMProvisioningError -Code 'bootstrap_readiness_unavailable' -Message 'The guest bootstrap readiness gate is unavailable.' -Status 503)
+        }
+        $ready=$false
+        try { $ready=[bool](& $bootstrapReady $Job.name 180 1000) } catch { $ready=$false }
+        if(-not $ready){
+            throw (New-EpicVMProvisioningError -Code 'guest_bootstrap_not_ready' -Message 'The cloned guest did not become ready for secure setup.' -Status 503)
+        }
+
         $claim = [guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')
         $Job.claimHash = ConvertTo-EpicVMClaimHash -Value $claim
         $Job.claimExpires = [DateTime]::UtcNow.AddMinutes(30).ToString('o')
