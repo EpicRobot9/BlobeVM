@@ -73,6 +73,8 @@ Describe 'EpicVM template builder' {
         $builder | Should -Match 'guest_sanitation_timeout'
         $builder | Should -Match 'Start-Process -FilePath .*Sysprep\.exe.*-Wait -PassThru'
         $builder | Should -Match "Stop-Computer -ComputerName 'localhost' -Force"
+        $builder | Should -Match 'guestSanitationCompleted -or \$guestShutdownRequested'
+        $builder | Should -Match 'Name ''Stop-VM''.*Force=\$true.*ErrorAction=''Stop'''
         $builder | Should -Match 'BuilderShutdownTimeoutSeconds = 300'
         $builder | Should -Match 'sysprep_failed exit='
         $builder | Should -Match 'setuperr\.log'

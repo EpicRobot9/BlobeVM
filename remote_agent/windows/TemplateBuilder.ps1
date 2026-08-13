@@ -305,17 +305,21 @@ function Invoke-EpicVMTemplateBuild {
         Invoke-EpicVMTemplateCommand -Name 'Start-VM' -Parameters @{ Name=$BuilderName; ErrorAction='Stop' } | Out-Null
         $sanitizer=Get-EpicVMTemplateGuestSanitizer
         $bootstrapBstr=[IntPtr]::Zero
+        $guestSanitationCompleted=$false
+        $guestShutdownRequested=$false
         try {
             $bootstrapBstr=[Runtime.InteropServices.Marshal]::SecureStringToBSTR($BootstrapSecret.Password)
             $bootstrapPlain=[Runtime.InteropServices.Marshal]::PtrToStringBSTR($bootstrapBstr)
             try {
                 Invoke-EpicVMTemplateGuestScript -VmName $BuilderName -Credential $SourceCredential -Script $sanitizer -ArgumentList @($BootstrapName,$bootstrapPlain,$BootstrapPath,$SunshineVersion) | Out-Null
+                $guestSanitationCompleted=$true
             }
             catch {
                 # Sysprep /shutdown can sever PowerShell Direct before the
                 # remoting layer returns.  Accept only that exact transport
                 # signature; the bounded VM-Off gate below must still pass.
                 if($_.Exception.Message -notmatch '(?i)remote session might have ended') { throw }
+                $guestShutdownRequested=$true
             }
         } finally {
             if($bootstrapBstr -ne [IntPtr]::Zero){[Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bootstrapBstr)}
@@ -325,6 +329,17 @@ function Invoke-EpicVMTemplateBuild {
         # Direct into each independent clone. Protect it on the host with
         # machine DPAPI; the value is never placed in the manifest or logs.
         Protect-EpicVMTemplateBootstrapSecret -Credential $BootstrapSecret -Path $BootstrapPath
+        # Some guests report successful Sysprep but remain Running even after
+        # the guest-local shutdown request.  At this point the sanitizer has
+        # completed or the only accepted failure was the expected Sysprep
+        # remoting disconnect, so force-stop only this disposable builder copy
+        # before the normal Off-state verification gate.
+        if($guestSanitationCompleted -or $guestShutdownRequested){
+            $builderStateBeforeStop=(Invoke-EpicVMTemplateCommand -Name 'Get-VM' -Parameters @{ Name=$BuilderName; ErrorAction='Stop' }).State
+            if([string]$builderStateBeforeStop -ieq 'Running'){
+                Invoke-EpicVMTemplateCommand -Name 'Stop-VM' -Parameters @{ Name=$BuilderName; Force=$true; ErrorAction='Stop' } | Out-Null
+            }
+        }
         $shutdownDeadline=[DateTime]::UtcNow.AddSeconds([Math]::Max(60,$BuilderShutdownTimeoutSeconds))
         while($true) {
             $builderState=(Invoke-EpicVMTemplateCommand -Name 'Get-VM' -Parameters @{ Name=$BuilderName; ErrorAction='Stop' }).State
