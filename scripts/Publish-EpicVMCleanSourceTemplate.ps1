@@ -41,7 +41,9 @@ try {
         bootstrap='machine-dpapi-encrypted-system-admin'; sunshine='installed'; sunshineVersion='2026.516.143833'
         sunshineService='SunshineService'; sunshineCredentials='request-only'; tailscale='installed-logged-out'
         gpu='none'; gpuPartition='none'; diskType='Dynamic'; sourceVm='EpicVM-CleanTemplateSource'
-        sysprep='/generalize /oobe /shutdown /mode:vm'; network='private-switch'; fullCopy=$true; immutable=$true
+        # The source must be generalized without entering interactive OOBE so
+        # the protected bootstrap account can authenticate on first clone boot.
+        sysprep='/generalize /shutdown /mode:vm'; network='private-switch'; fullCopy=$true; immutable=$true
         sanitation='manual-bitlocker-off;sunshine-credentials-cleared;tailscale-identity-cleared;sysprep-generalize'; createdAt=[DateTime]::UtcNow.ToString('o')
     }
     $manifestPath = Join-Path $stageRoot 'manifest.json'

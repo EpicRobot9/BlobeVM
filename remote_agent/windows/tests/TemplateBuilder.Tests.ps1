@@ -11,7 +11,8 @@ Describe 'EpicVM template builder' {
     It 'does not execute during dot-sourcing and exposes source-only safety gates' {
         (Get-Command Invoke-EpicVMTemplateBuild).CommandType | Should -Be 'Function'
         (Get-Content (Join-Path $windowsRoot 'TemplateBuilder.ps1') -Raw) | Should -Match 'Private'
-        (Get-Content (Join-Path $windowsRoot 'TemplateBuilder.ps1') -Raw) | Should -Match '/generalize /oobe /shutdown /mode:vm'
+        (Get-Content (Join-Path $windowsRoot 'TemplateBuilder.ps1') -Raw) | Should -Match '/generalize /shutdown /mode:vm'
+        (Get-Content (Join-Path $windowsRoot 'TemplateBuilder.ps1') -Raw) | Should -Not -Match "'/oobe'"
         (Get-Content (Join-Path $windowsRoot 'TemplateBuilder.ps1') -Raw) | Should -Match 'Export-VM'
     }
 

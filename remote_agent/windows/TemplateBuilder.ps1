@@ -210,7 +210,11 @@ function Get-EpicVMTemplateGuestSanitizer {
         Get-Service -Name Tailscale -ErrorAction SilentlyContinue | Stop-Service -Force -ErrorAction SilentlyContinue
         @('Application','System','Setup','Security') | ForEach-Object { Clear-WinEvent -LogName $_ -ErrorAction SilentlyContinue }
         Remove-Item 'C:\Windows\Panther\*','C:\Windows\Temp\*','C:\Windows\Logs\*' -Recurse -Force -ErrorAction SilentlyContinue
-        $sysprepProcess=Start-Process -FilePath "$env:SystemRoot\System32\Sysprep\Sysprep.exe" -ArgumentList @('/generalize','/oobe','/shutdown','/mode:vm') -Wait -PassThru -WindowStyle Hidden
+        # Keep the sanitized bootstrap account available for the first
+        # PowerShell Direct probe.  /oobe would stop at interactive Windows
+        # setup and make unattended provisioning impossible; generalized
+        # clones still receive a fresh machine identity on their first boot.
+        $sysprepProcess=Start-Process -FilePath "$env:SystemRoot\System32\Sysprep\Sysprep.exe" -ArgumentList @('/generalize','/shutdown','/mode:vm') -Wait -PassThru -WindowStyle Hidden
         $sysprepExitCode=$sysprepProcess.ExitCode
         if($sysprepExitCode -ne 0){
             $sysprepErrorPath=Join-Path $env:SystemRoot 'System32\Sysprep\Panther\setuperr.log'
@@ -319,7 +323,7 @@ function Invoke-EpicVMTemplateBuild {
         Copy-Item -LiteralPath $builderDisk -Destination (Join-Path $stageRoot 'win11-25h2.vhdx') -Force -ErrorAction Stop
         $imagePath=Join-Path $stageRoot 'win11-25h2.vhdx'
         $hash=(Get-FileHash -LiteralPath $imagePath -Algorithm SHA256).Hash.ToLowerInvariant()
-        $manifest=[ordered]@{ templateVersion='1.0.0'; name=$TemplateName; build=('win11-25h2-' + (Get-Date).ToUniversalTime().ToString('yyyyMMdd')); windowsBuild='Windows 11 25H2'; sha256=$hash; imagePath=(Join-Path $finalRoot 'win11-25h2.vhdx'); bootstrap='machine-dpapi-encrypted-system-admin'; sunshine='installed'; sunshineVersion=$SunshineVersion; sunshineService='SunshineService'; sunshineCredentials='request-only'; gpu='none'; gpuPartition='none'; diskType='Dynamic'; sourceVm=$SourceName; sysprep='/generalize /oobe /shutdown /mode:vm'; network='private-switch'; fullCopy=$true; immutable=$true; sanitation='accounts;profiles;browser-data;logs;tailscale-identity;sunshine-credentials;machine-generalize'; createdAt=[DateTime]::UtcNow.ToString('o') }
+        $manifest=[ordered]@{ templateVersion='1.1.0'; name=$TemplateName; build=('win11-25h2-' + (Get-Date).ToUniversalTime().ToString('yyyyMMdd')); windowsBuild='Windows 11 25H2'; sha256=$hash; imagePath=(Join-Path $finalRoot 'win11-25h2.vhdx'); bootstrap='machine-dpapi-encrypted-system-admin'; sunshine='installed'; sunshineVersion=$SunshineVersion; sunshineService='SunshineService'; sunshineCredentials='request-only'; gpu='none'; gpuPartition='none'; diskType='Dynamic'; sourceVm=$SourceName; sysprep='/generalize /shutdown /mode:vm'; network='private-switch'; fullCopy=$true; immutable=$true; sanitation='accounts;profiles;browser-data;logs;tailscale-identity;sunshine-credentials;machine-generalize'; createdAt=[DateTime]::UtcNow.ToString('o') }
         $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $stageRoot 'manifest.json') -Encoding UTF8 -NoNewline
         New-Item -ItemType Directory -Path $OutputRoot -Force | Out-Null
         Move-Item -LiteralPath $stageRoot -Destination $finalRoot -Force
