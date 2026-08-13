@@ -126,6 +126,7 @@ export default function VMManager(){
   const [busyAction, setBusyAction] = useState('')
   const [optimizer, setOptimizer] = useState({ capacity:{}, vmStates:[], profiles:{} })
   const [hosts, setHosts] = useState([])
+  const [hostsLoading, setHostsLoading] = useState(true)
   const [placement, setPlacement] = useState('local')
   const [selectedHostId, setSelectedHostId] = useState('')
   const [invalidatedHostId, setInvalidatedHostId] = useState('')
@@ -216,6 +217,8 @@ export default function VMManager(){
   const vmSettingsNamesRef = useRef(new Set())
   const loadSequenceRef = useRef(0)
   const loadInFlightRef = useRef(null)
+  const hostRequestInFlightRef = useRef(null)
+  const hostRequestSequenceRef = useRef(0)
   const logRequestSequenceRef = useRef(0)
   const logSelectionTrackerRef = useRef(null)
   const loadRunnerRef = useRef(null)
@@ -245,6 +248,31 @@ export default function VMManager(){
     return request
   }
 
+  async function loadHosts(){
+    if(hostRequestInFlightRef.current) return hostRequestInFlightRef.current
+    const requestSequence = ++hostRequestSequenceRef.current
+    const request = (async()=>{
+      try{
+        const response = await apiFetch('/hosts')
+        const body = await response.json().catch(()=>null)
+        if(!mountedRef.current || requestSequence !== hostRequestSequenceRef.current) return
+        if(response.ok && body && body.ok !== false){
+          setHosts(normalizeHostInventory(body))
+        }else if(!hosts.length){
+          setHosts([])
+        }
+      }catch(_e){
+        // Keep a previously known host list during a transient refresh error.
+        if(mountedRef.current && requestSequence === hostRequestSequenceRef.current && !hosts.length) setHosts([])
+      }finally{
+        if(mountedRef.current && requestSequence === hostRequestSequenceRef.current) setHostsLoading(false)
+        if(hostRequestInFlightRef.current === request) hostRequestInFlightRef.current = null
+      }
+    })()
+    hostRequestInFlightRef.current = request
+    return request
+  }
+
   async function loadInternal({ silent = false } = {}){
     if(!mountedRef.current) return
     const requestSequence = ++loadSequenceRef.current
@@ -254,20 +282,21 @@ export default function VMManager(){
       setInitialLoading(true)
     }
     try{
-      const [rList, rStats, rOpt, rSettings, rHosts] = await Promise.all([
+      // Host readiness is independent of the slower fleet/statistics calls.
+      // Start it immediately so placement becomes truthful as soon as the
+      // remote host responds instead of briefly claiming no hosts exist.
+      void loadHosts()
+      const [rList, rStats, rOpt, rSettings] = await Promise.all([
         apiFetch('/list?fleet=1'),
         apiFetch('/vm/stats').catch(()=>({ok:false})),
         apiFetch('/optimizer/v2/summary').catch(()=>({ok:false})),
-        apiFetch('/settings').catch(()=>({ok:false})),
-        apiFetch('/hosts').catch(()=>({ok:false}))
+        apiFetch('/settings').catch(()=>({ok:false}))
       ])
       const j = await rList.json().catch(()=>({instances:[]}))
       const statJ = rStats && rStats.ok ? await rStats.json().catch(()=>({vms:{}})) : (rStats && typeof rStats.json === 'function' ? await rStats.json().catch(()=>({vms:{}})) : {vms:{}})
       const optJ = rOpt && typeof rOpt.json === 'function' ? await rOpt.json().catch(()=>({ok:false})) : {ok:false}
       const settingsJ = rSettings && typeof rSettings.json === 'function' ? await rSettings.json().catch(()=>({})) : {}
-      const hostsJ = rHosts && rHosts.ok !== false && typeof rHosts.json === 'function' ? await rHosts.json().catch(()=>null) : null
       if(!mountedRef.current || requestSequence !== loadSequenceRef.current) return
-      if(hostsJ !== null) setHosts(normalizeHostInventory(hostsJ))
       const statsMap = (statJ && statJ.vms) ? statJ.vms : {}
       const optimizerVmMap = Object.fromEntries(((optJ && optJ.vmStates) || []).map(v => [v.name, v]))
       const profileMap = (optJ && optJ.profiles) || {}
@@ -801,6 +830,8 @@ export default function VMManager(){
     ? ''
     : invalidatedHostId && !selectedHostId
       ? 'Selected remote host is no longer available'
+      : hostsLoading
+        ? 'Checking remote host availability…'
       : !remotePlacementAvailable
         ? remotePlacementDisabledReason(hosts)
         : getPlacementValidationReason({ placement, hostId: selectedHostId, hosts })
@@ -914,7 +945,7 @@ export default function VMManager(){
               <span>VM location</span>
               <select value={placement} onChange={e=>choosePlacement(e.target.value)}>
                 <option value="local">Local VM — EpicVM Server</option>
-                <option value="remote" disabled={!remotePlacementAvailable}>Remote VM{!remotePlacementAvailable ? ' — No remote hosts connected' : ''}</option>
+                <option value="remote" disabled={hostsLoading || !remotePlacementAvailable}>Remote VM{hostsLoading ? ' — Checking connection…' : !remotePlacementAvailable ? ' — No remote hosts connected' : ''}</option>
               </select>
             </label>
             {placement === 'remote' ? (
@@ -941,7 +972,7 @@ export default function VMManager(){
             <span>Destination</span>
             <strong>{destinationSummary}</strong>
           </div>
-          {!remotePlacementAvailable ? <div className="vm-placement-notice">Remote VM unavailable: No remote hosts connected.</div> : null}
+          {hostsLoading ? <div className="vm-placement-notice">Checking remote host connection… VM status can continue loading.</div> : !remotePlacementAvailable ? <div className="vm-placement-notice">Remote VM unavailable: No remote hosts connected.</div> : null}
           {placementReason ? <div id="vm-placement-reason" className="vm-placement-error" role="alert">{placementReason}</div> : null}
           {placement === 'remote' && provisioningProfile === 'gaming' && gamingProfileReason ? <div className="vm-placement-error" role="alert">{gamingProfileReason}</div> : null}
           {placement === 'remote' && provisioningProfile === 'standard' && standardProfileReason ? <div className="vm-placement-error" role="alert">{standardProfileReason}</div> : null}
