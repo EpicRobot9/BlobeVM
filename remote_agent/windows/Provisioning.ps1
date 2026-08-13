@@ -3,10 +3,129 @@
 
 Set-StrictMode -Version Latest
 $script:EpicVMProvisioningStates = @(
-    'queued', 'cloning', 'booting', 'awaiting_claim', 'configuring_guest',
-    'enrolling_tailscale', 'awaiting_console', 'console_failed', 'verifying',
-    'ready', 'failed'
+    'queued', 'cloning', 'booting', 'unclaimed', 'claim_in_progress',
+    'guest_setup', 'network_setup', 'streaming_setup', 'ready',
+    'deprovisioning', 'quarantined', 'purged'
 )
+
+$script:EpicVMProvisioningStageOrder = @('claim', 'guest_setup', 'network_setup', 'streaming_setup')
+
+function New-EpicVMProvisioningOperationId {
+    return [Guid]::NewGuid().ToString('N')
+}
+
+function Get-EpicVMProvisioningFailureState {
+    param([AllowNull()][string]$Code)
+    $safeCode = [string]$Code
+    if ([string]::IsNullOrWhiteSpace($safeCode)) { return 'setup_failed:unknown' }
+    if ($safeCode -match '^setup_failed:') { return $safeCode }
+    if ($safeCode -in @('guest_account_failed','guest_configuration_failed','rdp_verification_failed',
+            'powershell_direct_failed','guest_account_readiness_failed','bootstrap_cleanup_failed',
+            'bootstrap_cleanup_transport_failed','guest_setup_unavailable','bootstrap_credential_unavailable')) { return 'setup_failed:guest' }
+    if ($safeCode -in @('tailscale_enrollment_failed','TailscaleEnrollmentFailed','tailscale_verification_failed','tailscale_unavailable',
+            'network_setup_failed')) { return 'setup_failed:network' }
+    if ($safeCode -in @('streaming_setup_failed','sunshine_setup_failed','SunshineConfigurationFailed','sunshine_setup_unavailable',
+            'console_verification_failed','guest_reverification_failed','console_failed')) { return 'setup_failed:streaming' }
+    if ($safeCode -in @('agent_restarted','reverification_failed')) { return 'setup_failed:agent_restart' }
+    if ($safeCode -match '^legacy_') { return 'setup_failed:legacy_state_uncertain' }
+    return 'setup_failed:unknown'
+}
+
+function Get-EpicVMProvisioningCompletedStages {
+    param([AllowNull()][object]$Value)
+    $seen = @{}
+    $result = @()
+    foreach ($stage in @($Value)) {
+        $name = [string]$stage
+        if ($script:EpicVMProvisioningStageOrder -contains $name -and -not $seen.ContainsKey($name)) {
+            $seen[$name] = $true
+            $result += $name
+        }
+    }
+    return @($script:EpicVMProvisioningStageOrder | Where-Object { $seen.ContainsKey($_) })
+}
+
+function Test-EpicVMProvisioningEvidence {
+    param([Parameter(Mandatory)][object]$Record,[Parameter(Mandatory)][string]$Stage)
+    $completed = @(Get-EpicVMProvisioningCompletedStages -Value (Get-EpicVMProperty -Object $Record -Name 'completedStages' -Default @()))
+    if ($completed -contains $Stage) { return $true }
+    switch ($Stage) {
+        'claim' { return [bool](Get-EpicVMProperty -Object $Record -Name 'claimConsumed' -Default (Get-EpicVMProperty -Object $Record -Name 'claimUsed' -Default $false)) }
+        'guest_setup' { return [bool](Get-EpicVMProperty -Object $Record -Name 'guestSetupVerified' -Default $false) }
+        'network_setup' {
+            return (-not [string]::IsNullOrWhiteSpace([string](Get-EpicVMProperty -Object $Record -Name 'tailnetIp' -Default ''))) -and
+                (-not [string]::IsNullOrWhiteSpace([string](Get-EpicVMProperty -Object $Record -Name 'tailnetDeviceId' -Default '')))
+        }
+        'streaming_setup' { return -not [string]::IsNullOrWhiteSpace([string](Get-EpicVMProperty -Object $Record -Name 'consoleVerifiedAt' -Default '')) }
+        default { return $false }
+    }
+}
+
+function ConvertTo-EpicVMCanonicalProvisioningState {
+    param([Parameter(Mandatory)][object]$Record)
+    $state = [string](Get-EpicVMProperty -Object $Record -Name 'state' -Default 'failed')
+    if ($state -match '^setup_failed:(preclaim|guest|network|streaming|agent_restart|legacy_state_uncertain|unknown)$') { return $state }
+    if ($state -in @('queued','cloning','booting','unclaimed','claim_in_progress','guest_setup','network_setup','streaming_setup','deprovisioning','quarantined','purged')) { return $state }
+    if ($state -eq 'awaiting_claim') {
+        $claimHash = [string](Get-EpicVMProperty -Object $Record -Name 'claimHash' -Default '')
+        $claimUsed = [bool](Get-EpicVMProperty -Object $Record -Name 'claimConsumed' -Default (Get-EpicVMProperty -Object $Record -Name 'claimUsed' -Default $false))
+        $expires = $null
+        try { $expires = [DateTime]::Parse([string](Get-EpicVMProperty -Object $Record -Name 'claimExpires' -Default '')) } catch { }
+        if (-not $claimUsed -and $claimHash -match '^[0-9a-fA-F]{64}$' -and $null -ne $expires -and $expires.ToUniversalTime() -gt [DateTime]::UtcNow) { return 'unclaimed' }
+        return 'setup_failed:legacy_state_uncertain'
+    }
+    if ($state -eq 'configuring_guest') { return 'guest_setup' }
+    if ($state -eq 'enrolling_tailscale') { return 'network_setup' }
+    if ($state -eq 'awaiting_console') {
+        if (Test-EpicVMProvisioningEvidence -Record $Record -Stage 'network_setup') { return 'streaming_setup' }
+        return 'setup_failed:legacy_state_uncertain'
+    }
+    if ($state -in @('console_failed','verifying')) { return 'setup_failed:streaming' }
+    if ($state -eq 'ready') {
+        if ((Test-EpicVMProvisioningEvidence -Record $Record -Stage 'claim') -and
+            (Test-EpicVMProvisioningEvidence -Record $Record -Stage 'guest_setup') -and
+            (Test-EpicVMProvisioningEvidence -Record $Record -Stage 'network_setup') -and
+            (Test-EpicVMProvisioningEvidence -Record $Record -Stage 'streaming_setup')) { return 'ready' }
+        return 'setup_failed:legacy_state_uncertain'
+    }
+    if ($state -eq 'failed') { return (Get-EpicVMProvisioningFailureState -Code ([string](Get-EpicVMProperty -Object $Record -Name 'errorCode' -Default 'legacy_unknown'))) }
+    return 'setup_failed:legacy_state_uncertain'
+}
+
+function Copy-EpicVMProvisioningJobFields {
+    param([Parameter(Mandatory)][object]$Source,[Parameter(Mandatory)][object]$Target)
+    foreach ($name in @('id','name','profile','state','createdAt','updatedAt','templateVersion','vmId',
+            'tailnetIp','tailnetDeviceId','consoleRoutePrefix','consoleVerifiedAt','quarantineUntil',
+            'errorCode','errorMessage','claimHash','claimExpires','claimUsed','claimConsumed',
+            'operationId','completedStages','failureStage','guestSetupVerified','retryCount','lastAttemptCode')) {
+        $value = Get-EpicVMProperty -Object $Source -Name $name -Default $null
+        if ($null -ne $value -or $Target.PSObject.Properties.Name -contains $name) { $Target.$name = $value }
+    }
+    return $Target
+}
+
+function Test-EpicVMProvisioningCredentialInput {
+    param([AllowNull()][string]$Username,[AllowNull()][string]$Password)
+    if ([string]::IsNullOrWhiteSpace($Username) -or $Username -notmatch '^[A-Za-z][A-Za-z0-9._-]{2,31}$') { return $false }
+    if ([string]::IsNullOrEmpty($Password) -or $Password.Length -gt 256) { return $false }
+    return $true
+}
+
+function Invoke-EpicVMProvisioningStoreLocked {
+    param([Parameter(Mandatory)][scriptblock]$Action)
+    $mutex = $null
+    $held = $false
+    try {
+        $mutex = [Threading.Mutex]::new($false, 'Local\EpicVM-ProvisioningState')
+        try { $held = $mutex.WaitOne(5000) } catch [Threading.AbandonedMutexException] { $held = $true }
+        if (-not $held) { throw (New-EpicVMProvisioningError -Code 'claim_store_busy' -Message 'The provisioning claim store is busy.' -Status 409) }
+        return & $Action
+    }
+    finally {
+        if ($held -and $null -ne $mutex) { try { $mutex.ReleaseMutex() } catch { } }
+        if ($null -ne $mutex) { $mutex.Dispose() }
+    }
+}
 
 function New-EpicVMProvisioningError {
     param(
@@ -53,7 +172,8 @@ function ConvertTo-EpicVMRedactedJob {
         'id', 'name', 'profile', 'state', 'createdAt', 'updatedAt', 'errorCode',
         'errorMessage', 'templateVersion', 'vmId', 'tailnetIp',
         'tailnetDeviceId', 'consoleRoutePrefix', 'consoleVerifiedAt',
-        'quarantineUntil'
+        'quarantineUntil', 'operationId', 'claimConsumed', 'completedStages',
+        'failureStage', 'guestSetupVerified', 'retryCount', 'lastAttemptCode'
     )) {
         $value = Get-EpicVMProperty -Object $Job -Name $name -Default $null
         if ($null -ne $value) { $safe[$name] = $value }
@@ -85,6 +205,13 @@ function New-EpicVMProvisioningJobObject {
         quarantineUntil = $null
         errorCode = $null
         errorMessage = $null
+        operationId = $null
+        claimConsumed = $false
+        completedStages = @()
+        failureStage = $null
+        guestSetupVerified = $false
+        retryCount = 0
+        lastAttemptCode = $null
         # Only the one-way verifier is persisted. The claim itself never is.
         claimHash = $null
         claimExpires = $null
@@ -122,10 +249,21 @@ function New-EpicVMProvisioningStore {
                 'createdAt', 'updatedAt', 'templateVersion', 'vmId', 'tailnetIp',
                 'tailnetDeviceId', 'consoleRoutePrefix', 'consoleVerifiedAt',
                 'quarantineUntil', 'errorCode', 'errorMessage',
-                'claimHash', 'claimExpires', 'claimUsed'
+                'claimHash', 'claimExpires', 'claimUsed', 'claimConsumed', 'operationId',
+                'completedStages', 'failureStage', 'guestSetupVerified', 'retryCount', 'lastAttemptCode'
             )) {
                 $job.$name = Get-EpicVMProperty -Object $record -Name $name -Default $job.$name
             }
+            $canonical = ConvertTo-EpicVMCanonicalProvisioningState -Record $record
+            $job.state = $canonical
+            if ($canonical -eq 'setup_failed:legacy_state_uncertain') {
+                $job.errorCode = 'legacy_state_uncertain'
+                $job.errorMessage = 'Persisted provisioning checkpoints were insufficient or contradictory.'
+                $job.failureStage = 'legacy_state_uncertain'
+            }
+            $job.completedStages = @(Get-EpicVMProvisioningCompletedStages -Value $job.completedStages)
+            $job.claimConsumed = [bool](Get-EpicVMProperty -Object $record -Name 'claimConsumed' -Default (Get-EpicVMProperty -Object $record -Name 'claimUsed' -Default $false))
+            $job.claimUsed = $job.claimConsumed
             if ([string]::IsNullOrWhiteSpace($job.id) -or -not (Test-EpicVMName $job.name)) { continue }
             if ($kind -eq 'deprovisioning') {
                 $store.Deprovisioning[$job.id] = $job
@@ -133,15 +271,16 @@ function New-EpicVMProvisioningStore {
             }
             $store.Jobs[$job.id] = $job
             $claimHashValid = [string]$job.claimHash -match '^[0-9a-fA-F]{64}$'
-            if ($job.state -eq 'awaiting_claim' -and $claimHashValid -and -not [bool]$job.claimUsed) {
+            if ($job.state -eq 'unclaimed' -and $claimHashValid -and -not [bool]$job.claimConsumed) {
                 try {
                     [void][DateTime]::Parse($job.claimExpires)
                     $store.Claims[$job.id] = $job
                 }
                 catch {
-                    $job.state = 'failed'
+                    $job.state = 'setup_failed:legacy_state_uncertain'
                     $job.errorCode = 'claim_state_invalid'
                     $job.errorMessage = 'The persisted claim state was invalid.'
+                    $job.failureStage = 'legacy_state_uncertain'
                 }
             }
         }
@@ -165,6 +304,8 @@ function Save-EpicVMProvisioningStore {
             $safe.claimHash = [string](Get-EpicVMProperty -Object $_ -Name 'claimHash' -Default '')
             $safe.claimExpires = [string](Get-EpicVMProperty -Object $_ -Name 'claimExpires' -Default '')
             $safe.claimUsed = [bool](Get-EpicVMProperty -Object $_ -Name 'claimUsed' -Default $false)
+            $safe.claimConsumed = [bool](Get-EpicVMProperty -Object $_ -Name 'claimConsumed' -Default $safe.claimUsed)
+            $safe.completedStages = @(Get-EpicVMProvisioningCompletedStages -Value (Get-EpicVMProperty -Object $_ -Name 'completedStages' -Default @()))
             $safe
         }
         $Store.Deprovisioning.Values | ForEach-Object {
@@ -333,9 +474,15 @@ function Invoke-EpicVMProvisioningRecovery {
     param([Parameter(Mandatory)] [object] $State)
     $changed = $false
     foreach ($job in @($State.Provisioning.Jobs.Values)) {
-        if ($job.state -in @('cloning', 'booting', 'configuring_guest', 'enrolling_tailscale', 'verifying')) {
-            $job.state = 'failed'
+        $canonical = ConvertTo-EpicVMCanonicalProvisioningState -Record $job
+        if ($canonical -ne [string]$job.state) {
+            $job.state = $canonical
+            $changed = $true
+        }
+        if ($job.state -in @('cloning', 'booting', 'claim_in_progress', 'guest_setup', 'network_setup', 'streaming_setup')) {
+            $job.state = 'setup_failed:agent_restart'
             $job.errorCode = 'agent_restarted'
+            $job.failureStage = 'agent_restart'
             $job.errorMessage = 'The worker restarted before verification completed.'
             $job.updatedAt = [DateTime]::UtcNow.ToString('o')
             $changed = $true
@@ -346,8 +493,9 @@ function Invoke-EpicVMProvisioningRecovery {
             $verified = $false
             if ($null -ne $verify) { try { $verified = [bool](& $verify $job.name $job.tailnetIp) } catch { $verified = $false } }
             if (-not $verified) {
-                $job.state = 'failed'
+                $job.state = 'setup_failed:agent_restart'
                 $job.errorCode = 'reverification_failed'
+                $job.failureStage = 'agent_restart'
                 $job.errorMessage = 'Readiness verification is required after agent restart.'
             }
             $job.updatedAt = [DateTime]::UtcNow.ToString('o')
@@ -441,16 +589,20 @@ function Start-EpicVMProvisioningJob {
         $Job.claimExpires = [DateTime]::UtcNow.AddMinutes(30).ToString('o')
         $Job.claimUsed = $false
         $State.Provisioning.Claims[$Job.id] = $Job
-        $Job.state = 'awaiting_claim'
+        $Job.state = 'unclaimed'
+        $Job.claimConsumed = $false
+        $Job.completedStages = @()
         $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
         Save-EpicVMProvisioningStore -Store $State.Provisioning
         return $claim
     }
     catch {
         Invoke-EpicVMProvisioningFailedCleanup -State $State -Job $Job
-        $Job.state = 'failed'
         $Job.errorCode = [string](Get-EpicVMProperty -Object $_.Exception -Name 'ErrorCode' -Default 'provisioning_failed')
-        $Job.errorMessage = 'Provisioning failed before guest configuration.'
+        $Job.state = 'setup_failed:preclaim'
+        $Job.failureStage = 'preclaim'
+        $Job.lastAttemptCode = $Job.errorCode
+        $Job.errorMessage = 'Provisioning stopped before guest claim; no claim was consumed.'
         $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
         Save-EpicVMProvisioningStore -Store $State.Provisioning
         throw
@@ -460,29 +612,67 @@ function Start-EpicVMProvisioningJob {
 function Invoke-EpicVMProvisioningClaim {
     param([Parameter(Mandatory)] [object] $State, [Parameter(Mandatory)] [object] $Job, [Parameter(Mandatory)] [object] $Request)
     $claim = [string](Get-EpicVMProperty -Object $Request -Name 'claimToken' -Default '')
-    if ($Job.state -ne 'awaiting_claim') { throw (New-EpicVMProvisioningError -Code 'claim_not_allowed' -Message 'The VM is not awaiting a claim.' -Status 409) }
-    if (-not (Test-EpicVMClaim -Job $Job -Claim $claim)) {
-        throw (New-EpicVMProvisioningError -Code 'invalid_claim' -Message 'The claim is invalid or expired.' -Status 409)
-    }
     $username = [string](Get-EpicVMProperty -Object $Request -Name 'username' -Default '')
     $password = [string](Get-EpicVMProperty -Object $Request -Name 'password' -Default '')
-    if ($username -notmatch '^[A-Za-z][A-Za-z0-9._-]{2,31}$' -or [string]::IsNullOrEmpty($password)) {
-        throw (New-EpicVMProvisioningError -Code 'invalid_credentials' -Message 'The claim credentials do not meet policy.' -Status 400)
+    if (-not (Test-EpicVMProvisioningCredentialInput -Username $username -Password $password)) {
+        throw (New-EpicVMProvisioningError -Code 'invalid_credential_input' -Message 'The credential input is empty or does not meet the request policy.' -Status 400)
     }
     $configure = Get-EpicVMProperty -Object $State.Provider -Name 'ConfigureGuest' -Default $null
     if ($null -eq $configure) { throw (New-EpicVMProvisioningError -Code 'guest_configuration_unavailable' -Message 'PowerShell Direct guest configuration is unavailable.' -Status 503) }
 
-    # Consume the verifier before touching the guest. A failed worker can never
-    # retry the same claim, and no plaintext claim value is persisted.
-    $Job.claimUsed = $true
-    $Job.claimHash = $null
-    $Job.claimExpires = $null
-    [void]$State.Provisioning.Claims.Remove($Job.id)
-    Save-EpicVMProvisioningStore -Store $State.Provisioning
+    $operation = Invoke-EpicVMProvisioningStoreLocked -Action {
+        $diskStore = New-EpicVMProvisioningStore -Config $State.Config
+        $persisted = @($diskStore.Jobs.Values | Where-Object { [string]$_.id -ceq [string]$Job.id } | Select-Object -First 1)
+        if ($persisted.Count -gt 0) { Copy-EpicVMProvisioningJobFields -Source $persisted[0] -Target $Job | Out-Null }
+        $canonical = ConvertTo-EpicVMCanonicalProvisioningState -Record $Job
+        $Job.state = $canonical
+        if ($canonical -ne 'unclaimed') {
+            if ($canonical -eq 'claim_in_progress') { throw (New-EpicVMProvisioningError -Code 'claim_in_progress' -Message 'Another request already owns this claim.' -Status 409) }
+            throw (New-EpicVMProvisioningError -Code 'claim_not_allowed' -Message 'The VM is not awaiting a claim.' -Status 409)
+        }
+        if (-not (Test-EpicVMClaim -Job $Job -Claim $claim)) {
+            throw (New-EpicVMProvisioningError -Code 'invalid_claim' -Message 'The claim is invalid or expired.' -Status 409)
+        }
+        $previous = [ordered]@{
+            state = $Job.state; claimHash = $Job.claimHash; claimExpires = $Job.claimExpires
+            claimUsed = $Job.claimUsed; claimConsumed = $Job.claimConsumed; operationId = $Job.operationId
+            completedStages = @($Job.completedStages)
+        }
+        try {
+            $Job.operationId = New-EpicVMProvisioningOperationId
+            $Job.claimHash = $null
+            $Job.claimExpires = $null
+            $Job.claimUsed = $true
+            $Job.claimConsumed = $true
+            $Job.completedStages = @('claim')
+            $Job.state = 'claim_in_progress'
+            $Job.failureStage = $null
+            $Job.errorCode = $null
+            $Job.errorMessage = $null
+            $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
+            $State.Provisioning.Jobs[$Job.id] = $Job
+            [void]$State.Provisioning.Claims.Remove($Job.id)
+            Save-EpicVMProvisioningStore -Store $State.Provisioning
+        }
+        catch {
+            $Job.state = $previous.state; $Job.claimHash = $previous.claimHash; $Job.claimExpires = $previous.claimExpires
+            $Job.claimUsed = $previous.claimUsed; $Job.claimConsumed = $previous.claimConsumed; $Job.operationId = $previous.operationId
+            $Job.completedStages = $previous.completedStages
+            $State.Provisioning.Claims[$Job.id] = $Job
+            throw (New-EpicVMProvisioningError -Code 'claim_atomic_commit_failed' -Message 'The claim could not be committed safely.' -Status 503)
+        }
+        return [ordered]@{ operationId = [string]$Job.operationId }
+    }
+
     try {
-        $Job.state = 'configuring_guest'; $Job.updatedAt = [DateTime]::UtcNow.ToString('o'); Save-EpicVMProvisioningStore -Store $State.Provisioning
-        & $configure $Job.name $username $password | Out-Null
-        $Job.state = 'enrolling_tailscale'; $Job.updatedAt = [DateTime]::UtcNow.ToString('o'); Save-EpicVMProvisioningStore -Store $State.Provisioning
+        $Job.state = 'guest_setup'; $Job.updatedAt = [DateTime]::UtcNow.ToString('o'); Save-EpicVMProvisioningStore -Store $State.Provisioning
+        $guestResult = & $configure $Job.name $username $password
+        if ($null -eq $guestResult -or -not [bool](Get-EpicVMProperty -Object $guestResult -Name 'ok' -Default $false)) {
+            throw (New-EpicVMProvisioningError -Code 'guest_account_failed' -Message 'The guest account setup did not verify.' -Status 422)
+        }
+        $Job.guestSetupVerified = $true
+        $Job.completedStages = @(Get-EpicVMProvisioningCompletedStages -Value (@($Job.completedStages) + @('guest_setup')))
+        $Job.state = 'network_setup'; $Job.updatedAt = [DateTime]::UtcNow.ToString('o'); Save-EpicVMProvisioningStore -Store $State.Provisioning
         $enroll = Get-EpicVMProperty -Object $State.Provider -Name 'EnrollTailscale' -Default $null
         if ($null -eq $enroll) { throw (New-EpicVMProvisioningError -Code 'tailscale_unavailable' -Message 'Tailscale enrollment is unavailable.' -Status 503) }
         $tailnet = & $enroll $Job.name $username $password
@@ -494,7 +684,8 @@ function Invoke-EpicVMProvisioningClaim {
         # The Windows trust boundary ends here. The HTTPS dashboard retains the
         # request credentials only long enough to build the isolated console on
         # kvm2, then calls console-complete without any credential material.
-        $Job.state = 'awaiting_console'
+        $Job.completedStages = @(Get-EpicVMProvisioningCompletedStages -Value (@($Job.completedStages) + @('network_setup')))
+        $Job.state = 'streaming_setup'
         $Job.errorCode = $null
         $Job.errorMessage = $null
         $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
@@ -503,9 +694,14 @@ function Invoke-EpicVMProvisioningClaim {
     catch {
         # Guest mutation may already have happened. Retain the exact owned VM
         # for diagnosis instead of deleting it automatically.
-        $Job.state = 'failed'
-        $Job.errorCode = [string](Get-EpicVMProperty -Object $_.Exception -Name 'ErrorCode' -Default 'claim_failed')
-        $Job.errorMessage = 'Guest configuration or Tailscale enrollment failed; the VM was retained.'
+        $code = [string](Get-EpicVMProperty -Object $_.Exception -Name 'ErrorCode' -Default 'guest_configuration_failed')
+        if ($code -eq 'guest_configuration_failed') { $code = if ($Job.state -eq 'guest_setup') { 'guest_account_failed' } else { 'network_setup_failed' } }
+        $Job.state = Get-EpicVMProvisioningFailureState -Code $code
+        $Job.failureStage = switch -Regex ($Job.state) { 'guest' { 'guest' }; 'network' { 'network' }; 'streaming' { 'streaming' }; default { 'unknown' } }
+        $Job.errorCode = $code
+        $Job.lastAttemptCode = $code
+        $Job.claimConsumed = $true
+        $Job.errorMessage = 'Guest setup stopped safely; the owned VM was retained for diagnosis.'
         $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
         Save-EpicVMProvisioningStore -Store $State.Provisioning
         throw
@@ -538,28 +734,33 @@ function Invoke-EpicVMProvisioningClaimReissue {
         }
     }
     catch { }
-    $State.Provisioning.Jobs[$Job.id] = $Job
-    if ($Job.state -ne 'awaiting_claim' -or [bool]$Job.claimUsed) {
-        throw (New-EpicVMProvisioningError -Code 'claim_reissue_not_allowed' -Message 'A claim can only be reissued while the VM is awaiting its first claim.' -Status 409)
+    return Invoke-EpicVMProvisioningStoreLocked -Action {
+        $diskStore = New-EpicVMProvisioningStore -Config $State.Config
+        $persisted = @($diskStore.Jobs.Values | Where-Object { [string]$_.id -ceq [string]$Job.id } | Select-Object -First 1)
+        if ($persisted.Count -gt 0) { Copy-EpicVMProvisioningJobFields -Source $persisted[0] -Target $Job | Out-Null }
+        $Job.state = ConvertTo-EpicVMCanonicalProvisioningState -Record $Job
+        if ($Job.state -ne 'unclaimed' -or [bool]$Job.claimConsumed) {
+            throw (New-EpicVMProvisioningError -Code 'claim_reissue_not_allowed' -Message 'A claim can only be reissued while the VM is awaiting its first claim.' -Status 409)
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$Job.claimHash) -or
+            [string]$Job.claimHash -notmatch '^[0-9a-fA-F]{64}$') {
+            throw (New-EpicVMProvisioningError -Code 'claim_state_invalid' -Message 'The pending claim state is invalid.' -Status 409)
+        }
+        # Replacing the verifier invalidates every previously issued claim. The
+        # plaintext value exists only in this request/response and is never saved.
+        $claim = [guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')
+        $Job.claimHash = ConvertTo-EpicVMClaimHash -Value $claim
+        $Job.claimExpires = [DateTime]::UtcNow.AddMinutes(30).ToString('o')
+        $Job.claimUsed = $false
+        $Job.claimConsumed = $false
+        $Job.completedStages = @()
+        $Job.operationId = $null
+        $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
+        $State.Provisioning.Jobs[$Job.id] = $Job
+        $State.Provisioning.Claims[$Job.id] = $Job
+        Save-EpicVMProvisioningStore -Store $State.Provisioning
+        return $claim
     }
-    # An authenticated operator may recover an unclaimed exact-name VM even
-    # after the old 30-minute token expired.  The old verifier is replaced
-    # immediately, so an expired or lost token can never be reused.
-    if ([string]::IsNullOrWhiteSpace([string]$Job.claimHash) -or
-        [string]$Job.claimHash -notmatch '^[0-9a-fA-F]{64}$') {
-        throw (New-EpicVMProvisioningError -Code 'claim_state_invalid' -Message 'The pending claim state is invalid.' -Status 409)
-    }
-
-    # Replacing the verifier invalidates every previously issued claim. The
-    # plaintext value exists only in this request/response and is never saved.
-    $claim = [guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')
-    $Job.claimHash = ConvertTo-EpicVMClaimHash -Value $claim
-    $Job.claimExpires = [DateTime]::UtcNow.AddMinutes(30).ToString('o')
-    $Job.claimUsed = $false
-    $State.Provisioning.Claims[$Job.id] = $Job
-    $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
-    Save-EpicVMProvisioningStore -Store $State.Provisioning
-    return $claim
 }
 
 function Set-EpicVMProvisioningConsoleCredentials {
@@ -568,7 +769,7 @@ function Set-EpicVMProvisioningConsoleCredentials {
         [Parameter(Mandatory)] [object] $Job,
         [Parameter(Mandatory)] [object] $Request
     )
-    if ($Job.state -notin @('awaiting_console', 'console_failed')) {
+    if ($Job.state -notin @('streaming_setup', 'setup_failed:streaming')) {
         throw (New-EpicVMProvisioningError -Code 'console_credentials_not_allowed' -Message 'The job is not awaiting console configuration.' -Status 409)
     }
     $guestUsername = [string](Get-EpicVMProperty -Object $Request -Name 'username' -Default '')
@@ -579,25 +780,28 @@ function Set-EpicVMProvisioningConsoleCredentials {
         [string]::IsNullOrEmpty($sunshineUsername) -or [string]::IsNullOrEmpty($sunshinePassword)) {
         throw (New-EpicVMProvisioningError -Code 'invalid_console_credentials' -Message 'Guest and Sunshine credentials are required.' -Status 400)
     }
-    $configureGuest = Get-EpicVMProperty -Object $State.Provider -Name 'ConfigureGuest' -Default $null
     $configureSunshine = Get-EpicVMProperty -Object $State.Provider -Name 'ConfigureSunshine' -Default $null
-    if ($null -eq $configureGuest -or $null -eq $configureSunshine) {
+    if ($null -eq $configureSunshine) {
         throw (New-EpicVMProvisioningError -Code 'sunshine_setup_unavailable' -Message 'Automatic Sunshine setup is unavailable.' -Status 503)
     }
     try {
-        # Re-run the idempotent guest gate for retries, then use the supplied
-        # guest credential to open PowerShell Direct for Sunshine setup. Neither
+        # This endpoint is deliberately stage-limited: guest setup and
+        # Tailscale enrollment already completed before streaming_setup. A
+        # console retry must not recreate the account, rerun bootstrap cleanup,
+        # or consume another enrollment key. The supplied guest credential is
+        # used only to open PowerShell Direct for Sunshine setup, and neither
         # credential is assigned to the persisted job or returned to the caller.
-        & $configureGuest $Job.name $guestUsername $guestPassword | Out-Null
         & $configureSunshine $Job.name $guestUsername $guestPassword $sunshineUsername $sunshinePassword | Out-Null
         $Job.errorCode = $null
         $Job.errorMessage = $null
+        $Job.lastAttemptCode = $null
         $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
         Save-EpicVMProvisioningStore -Store $State.Provisioning
     }
     catch {
         $code = [string](Get-EpicVMProperty -Object $_.Exception -Name 'ErrorCode' -Default 'sunshine_setup_failed')
-        $Job.state = 'console_failed'
+        $Job.state = 'setup_failed:streaming'
+        $Job.failureStage = 'streaming'
         $Job.errorCode = $code
         $Job.errorMessage = 'Automatic Sunshine setup failed; the VM and stopped console data were retained.'
         $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
@@ -611,12 +815,13 @@ function Set-EpicVMProvisioningConsoleCredentials {
 
 function Set-EpicVMProvisioningConsoleFailed {
     param([Parameter(Mandatory)] [object] $State, [Parameter(Mandatory)] [object] $Job, [Parameter(Mandatory)] [object] $Request)
-    if ($Job.state -notin @('awaiting_console', 'console_failed')) {
+    if ($Job.state -notin @('streaming_setup', 'setup_failed:streaming')) {
         throw (New-EpicVMProvisioningError -Code 'console_failure_not_allowed' -Message 'The job is not awaiting console configuration.' -Status 409)
     }
     $code = [string](Get-EpicVMProperty -Object $Request -Name 'code' -Default 'console_failed')
     if ($code -notmatch '^[a-z][a-z0-9_]{2,63}$') { $code = 'console_failed' }
-    $Job.state = 'console_failed'
+    $Job.state = 'setup_failed:streaming'
+    $Job.failureStage = 'streaming'
     $Job.errorCode = $code
     $Job.errorMessage = 'Console configuration failed; the VM and stopped console data were retained.'
     $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
@@ -625,7 +830,7 @@ function Set-EpicVMProvisioningConsoleFailed {
 
 function Complete-EpicVMProvisioningConsole {
     param([Parameter(Mandatory)] [object] $State, [Parameter(Mandatory)] [object] $Job, [Parameter(Mandatory)] [object] $Request)
-    if ($Job.state -notin @('awaiting_console', 'console_failed')) {
+    if ($Job.state -notin @('streaming_setup', 'setup_failed:streaming')) {
         throw (New-EpicVMProvisioningError -Code 'console_complete_not_allowed' -Message 'The job is not awaiting console verification.' -Status 409)
     }
     $expectedRoute = '/vm/' + $Job.name + '/'
@@ -634,12 +839,13 @@ function Complete-EpicVMProvisioningConsole {
     if ($route -cne $expectedRoute -or -not $serverVerified) {
         throw (New-EpicVMProvisioningError -Code 'console_verification_failed' -Message 'The kvm2 console evidence is incomplete.' -Status 422)
     }
-    $Job.state = 'verifying'
+    $Job.state = 'streaming_setup'
     $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
     Save-EpicVMProvisioningStore -Store $State.Provisioning
     $verify = Get-EpicVMProperty -Object $State.Provider -Name 'VerifyGuest' -Default $null
     if ($null -eq $verify -or -not [bool](& $verify $Job.name $Job.tailnetIp)) {
-        $Job.state = 'console_failed'
+        $Job.state = 'setup_failed:streaming'
+        $Job.failureStage = 'streaming'
         $Job.errorCode = 'guest_reverification_failed'
         $Job.errorMessage = 'The guest did not pass credential-free RDP reachability verification.'
         $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
@@ -648,6 +854,7 @@ function Complete-EpicVMProvisioningConsole {
     }
     $Job.consoleRoutePrefix = $route
     $Job.consoleVerifiedAt = [DateTime]::UtcNow.ToString('o')
+    $Job.completedStages = @(Get-EpicVMProvisioningCompletedStages -Value (@($Job.completedStages) + @('streaming_setup')))
     $Job.state = 'ready'
     $Job.errorCode = $null
     $Job.errorMessage = $null
@@ -701,7 +908,7 @@ function New-EpicVMDeprovisioningJob {
         $quarantine = Get-EpicVMProperty -Object $State.Provider -Name 'QuarantineVM' -Default $null
         if ($null -eq $quarantine) { throw (New-EpicVMProvisioningError -Code 'quarantine_unavailable' -Message 'Quarantine is unavailable.' -Status 503) }
         $quarantineResult = & $quarantine $name
-        $job.state = 'ready'
+        $job.state = 'quarantined'
         $job.quarantineUntil = [string](Get-EpicVMProperty -Object $quarantineResult -Name 'quarantineUntil' -Default ([DateTime]::UtcNow.AddDays(7).ToString('o')))
         $job.updatedAt = [DateTime]::UtcNow.ToString('o')
         Save-EpicVMProvisioningStore -Store $State.Provisioning

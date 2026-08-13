@@ -28,19 +28,19 @@ class FakeRemoteHost:
         return {"online": True, "capabilities": {"provisioning": True}}
 
     def provision(self, name, profile, idempotency_key=None):
-        return {"job": {"id": "job-1", "name": name, "profile": profile, "state": "awaiting_claim"}, "claimToken": "one-use"}
+        return {"job": {"id": "job-1", "name": name, "profile": profile, "state": "unclaimed"}, "claimToken": "one-use"}
 
     def provisioning_status(self, job_id):
-        return {"job": {"id": job_id, "state": "awaiting_claim"}}
+        return {"job": {"id": job_id, "state": "unclaimed"}}
 
     def claim(self, job_id, username, password, claim_token):
-        return {"job": {"id": job_id, "name": "alpha", "state": "awaiting_console", "tailnetIp": "100.111.82.1"}}
+        return {"job": {"id": job_id, "name": "alpha", "state": "streaming_setup", "tailnetIp": "100.111.82.1"}}
 
     def console_complete(self, job_id, route_prefix, guest_tcp_verified):
         return {"job": {"id": job_id, "name": "alpha", "state": "ready", "consoleRoutePrefix": route_prefix}}
 
     def console_failed(self, job_id, code="console_failed"):
-        return {"job": {"id": job_id, "name": "alpha", "state": "console_failed", "errorCode": code}}
+        return {"job": {"id": job_id, "name": "alpha", "state": "setup_failed:streaming", "errorCode": code}}
 
     def deprovision(self, name, confirm_name, idempotency_key=None):
         return {"job": {"id": "tear-1", "name": name, "state": "ready"}}
@@ -200,7 +200,7 @@ def test_console_retry_requires_failed_state_and_reentered_credentials(monkeypat
 
     class RetryHost(FakeRemoteHost):
         def provisioning_status(self, job_id):
-            return {"job": {"id": job_id, "name": "alpha", "state": "console_failed", "tailnetIp": "100.111.82.1"}}
+            return {"job": {"id": job_id, "name": "alpha", "state": "setup_failed:streaming", "tailnetIp": "100.111.82.1"}}
 
     module.VM_HOST_REGISTRY.get = lambda host_id="local": RetryHost()
     client = authenticated_client(module)

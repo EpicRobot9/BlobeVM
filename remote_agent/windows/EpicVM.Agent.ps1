@@ -357,8 +357,21 @@ function Invoke-EpicVMApiRequest {
                 catch {
                     $code = [string](Get-EpicVMProperty -Object $_.Exception -Name 'ErrorCode' -Default 'claim_failed')
                     $status = [int](Get-EpicVMProperty -Object $_.Exception -Name 'HttpStatus' -Default 422)
-                    if ($job.state -ne 'failed' -and $code -notin @('invalid_claim','invalid_credentials','claim_not_allowed')) { $job.state='failed'; $job.errorCode=$code; $job.errorMessage='Guest claim or readiness verification failed.'; Save-EpicVMProvisioningStore -Store $State.Provisioning }
-                    return ConvertTo-EpicVMJsonResponse -StatusCode $status -Body ([ordered]@{ ok=$false; error=[ordered]@{code=$code;message=if($code -in @('invalid_claim','invalid_credentials','claim_not_allowed')){[string]$_.Exception.Message}else{'Guest claim failed.'}}; job=(ConvertTo-EpicVMRedactedJob -Job $job) })
+                    $safeMessage = switch ($code) {
+                        'invalid_credential_input' { 'The credential input is empty or does not meet the request policy.'; break }
+                        'invalid_claim' { 'The claim is invalid or expired.'; break }
+                        'claim_expired' { 'The claim has expired.'; break }
+                        'claim_not_allowed' { 'The VM is not awaiting a claim.'; break }
+                        'claim_in_progress' { 'Another request already owns this claim.'; break }
+                        default { 'Guest setup failed at a safe, identified stage.' }
+                    }
+                    if ($job.state -notmatch '^setup_failed:' -and $code -notin @('invalid_credential_input','invalid_claim','claim_expired','claim_not_allowed','claim_in_progress','claim_atomic_commit_failed','guest_configuration_unavailable')) {
+                        $job.state = Get-EpicVMProvisioningFailureState -Code $code
+                        $job.errorCode = $code
+                        $job.errorMessage = 'Guest setup stopped safely; the owned VM was retained for diagnosis.'
+                        Save-EpicVMProvisioningStore -Store $State.Provisioning
+                    }
+                    return ConvertTo-EpicVMJsonResponse -StatusCode $status -Body ([ordered]@{ ok=$false; error=[ordered]@{code=$code;message=$safeMessage}; job=(ConvertTo-EpicVMRedactedJob -Job $job) })
                 }
                 return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok=$true; job=(ConvertTo-EpicVMRedactedJob -Job $job) })
             }

@@ -304,6 +304,10 @@ def _vm_host_error_response(exc):
         'not_found': 'The requested remote VM resource was not found.',
         'conflict': 'The remote VM request conflicts with existing state.',
         'claim_failed': 'The one-time guest claim was rejected.',
+        'invalid_credential_input': 'The credential input is empty or does not meet the request policy.',
+        'claim_in_progress': 'Another request already owns this claim.',
+        'claim_atomic_commit_failed': 'The claim could not be committed safely; no guest work was started.',
+        'guest_configuration_unavailable': 'The secure guest configuration channel is unavailable; no claim was consumed.',
         'claim_reissue_not_allowed': 'The pending claim is no longer eligible for reissue.',
         'claim_state_invalid': 'The pending claim state is invalid.',
         'claim_reissue_failed': 'The pending claim could not be reissued safely.',
@@ -314,6 +318,13 @@ def _vm_host_error_response(exc):
         'powershell_direct_failed': 'PowerShell Direct could not open the cloned guest.',
         'rdp_verification_failed': 'Guest RDP/NLA/firewall verification failed.',
         'guest_configuration_failed': 'Guest configuration failed at the secure setup gate.',
+        'guest_account_failed': 'Windows guest-account setup failed after the claim was consumed.',
+        'guest_account_readiness_failed': 'The desired Windows account did not pass readiness verification.',
+        'bootstrap_cleanup_failed': 'Guest bootstrap cleanup did not verify.',
+        'bootstrap_cleanup_transport_failed': 'The guest bootstrap cleanup channel failed.',
+        'tailscale_enrollment_failed': 'Tailscale guest enrollment failed after guest setup.',
+        'streaming_setup_failed': 'Moonlight/Sunshine setup failed after guest and network setup.',
+        'legacy_state_uncertain': 'The persisted provisioning checkpoints are inconsistent; the VM was retained for diagnosis.',
         'host_unavailable': 'The remote VM host is unavailable.',
     }
     response = jsonify({'ok': False, 'error': messages.get(code, 'The remote VM request failed.'), 'code': code})
@@ -3638,7 +3649,7 @@ def api_provisioning_job_recover():
         if not hasattr(host, 'provisioning_jobs') or not hasattr(host, 'claim_reissue'):
             return jsonify({'ok': False, 'error': 'Claim recovery is unavailable on this host'}), 409
         jobs = [item for item in host.provisioning_jobs() if isinstance(item, dict)]
-        candidates = [item for item in jobs if str(item.get('name') or '').lower() == name and str(item.get('state') or '') == 'awaiting_claim']
+        candidates = [item for item in jobs if str(item.get('name') or '').lower() == name and str(item.get('state') or '') == 'unclaimed' and not bool(item.get('claimConsumed'))]
         if not candidates:
             return jsonify({'ok': False, 'error': {'code': 'claim_recovery_not_available', 'message': 'No unclaimed pending job exists for this VM.'}}), 404
         candidates.sort(key=lambda item: str(item.get('updatedAt') or ''), reverse=True)
@@ -3713,7 +3724,7 @@ def api_provisioning_job_claim(job_id):
             return response, 409
         result = host.claim(job_id, username, password, claim_token)
         job = result.get('job') if isinstance(result, dict) else None
-        if not isinstance(job, dict) or job.get('state') != 'awaiting_console':
+        if not isinstance(job, dict) or job.get('state') != 'streaming_setup':
             raise ConsoleOrchestrationError('The Windows host did not reach the console gate.', status=422, code='console_gate_missing')
         guest_ip = str(job.get('tailnetIp') or '')
         name = str(job.get('name') or '')
@@ -3799,7 +3810,7 @@ def api_provisioning_job_retry_console(job_id):
         host = _vm_host(host_id)
         current = host.provisioning_status(job_id)
         job = current.get('job') if isinstance(current, dict) else None
-        if not isinstance(job, dict) or job.get('state') != 'console_failed':
+        if not isinstance(job, dict) or job.get('state') != 'setup_failed:streaming':
             raise ConsoleOrchestrationError('Only a failed console step may be retried.', status=409, code='console_retry_not_allowed')
         name = str(job.get('name') or '')
         guest_ip = str(job.get('tailnetIp') or '')

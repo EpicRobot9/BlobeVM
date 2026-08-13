@@ -22,16 +22,27 @@ function ConvertTo-EpicVMSecretText {
     finally { if($ptr -ne [IntPtr]::Zero){[Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)} }
 }
 
+function Test-EpicVMTailscaleTransientError {
+    param([AllowNull()][object]$ErrorRecord)
+    $exception=Get-EpicVMHyperVValue -Object $ErrorRecord -Name 'Exception' -Default $ErrorRecord
+    $response=Get-EpicVMHyperVValue -Object $exception -Name 'Response' -Default $null
+    $status=0
+    try { $status=[int](Get-EpicVMHyperVValue -Object $response -Name 'StatusCode' -Default 0) } catch { $status=0 }
+    if($status -ge 500 -and $status -lt 600){ return $true }
+    $message=[string](Get-EpicVMHyperVValue -Object $exception -Name 'Message' -Default $exception)
+    return $message -match '(?i)timeout|timed out|connection reset|connection closed|temporarily unavailable|name resolution|network is unreachable'
+}
+
 function Invoke-EpicVMTailscaleHttp {
-    param([Parameter(Mandatory)][object]$Provider,[Parameter(Mandatory)][string]$Method,[Parameter(Mandatory)][string]$Path,[AllowNull()][object]$Body=$null,[Parameter(Mandatory)][string]$AccessToken)
+    param([Parameter(Mandatory)][object]$Provider,[Parameter(Mandatory)][string]$Method,[Parameter(Mandatory)][string]$Path,[AllowNull()][object]$Body=$null,[Parameter(Mandatory)][string]$AccessToken,[int]$TimeoutSeconds=30)
     $invoker=Get-EpicVMHyperVValue -Object $Provider -Name 'TailscaleHttpInvoker' -Default $null
     $base=[string](Get-EpicVMHyperVValue -Object $Provider -Name 'TailscaleApiBaseUrl' -Default 'https://api.tailscale.com/api/v2')
     $url=$base.TrimEnd('/') + '/' + $Path.TrimStart('/')
     $headers=@{Authorization="Bearer $AccessToken";Accept='application/json'}
     if($null -ne $invoker){return & $invoker $Method $url $headers $Body}
-    if($Method -eq 'GET'){return Invoke-RestMethod -Method Get -Uri $url -Headers $headers -ErrorAction Stop}
+    if($Method -eq 'GET'){return Invoke-RestMethod -Method Get -Uri $url -Headers $headers -TimeoutSec ([Math]::Max(1,$TimeoutSeconds)) -ErrorAction Stop}
     $json=if($null -eq $Body){$null}else{$Body|ConvertTo-Json -Depth 12 -Compress}
-    return Invoke-RestMethod -Method $Method -Uri $url -Headers ($headers+@{'Content-Type'='application/json'}) -Body $json -ErrorAction Stop
+    return Invoke-RestMethod -Method $Method -Uri $url -Headers ($headers+@{'Content-Type'='application/json'}) -Body $json -TimeoutSec ([Math]::Max(1,$TimeoutSeconds)) -ErrorAction Stop
 }
 
 function Get-EpicVMTailscaleAccessToken {
@@ -45,10 +56,19 @@ function Get-EpicVMTailscaleAccessToken {
     try {
         $secretText=ConvertTo-EpicVMSecretText -Secret $secret.Password
         $body=@{grant_type='client_credentials';client_id=$clientId;client_secret=$secretText}
-        $result=if($null -ne $tokenInvoker){& $tokenInvoker $body}else{Invoke-RestMethod -Method Post -Uri 'https://api.tailscale.com/api/v2/oauth/token' -Body $body -ContentType 'application/x-www-form-urlencoded' -ErrorAction Stop}
-        $access=[string](Get-EpicVMHyperVValue -Object $result -Name 'access_token' -Default '')
-        if([string]::IsNullOrWhiteSpace($access)){throw 'Tailscale OAuth did not return an access token.'}
-        return $access
+        $attempt=0
+        while($true){
+            try {
+                $result=if($null -ne $tokenInvoker){& $tokenInvoker $body}else{Invoke-RestMethod -Method Post -Uri 'https://api.tailscale.com/api/v2/oauth/token' -Body $body -ContentType 'application/x-www-form-urlencoded' -TimeoutSec 30 -ErrorAction Stop}
+                $access=[string](Get-EpicVMHyperVValue -Object $result -Name 'access_token' -Default '')
+                if([string]::IsNullOrWhiteSpace($access)){throw 'Tailscale OAuth did not return an access token.'}
+                return $access
+            } catch {
+                if($attempt -ge 1 -or -not (Test-EpicVMTailscaleTransientError -ErrorRecord $_)){throw}
+                $attempt++
+                Start-Sleep -Milliseconds 250
+            }
+        }
     } catch { throw 'Tailscale OAuth authentication failed.' }
     finally {$secretText=$null;$secret=$null}
 }
@@ -62,10 +82,19 @@ function New-EpicVMTailscaleAuthKey {
     $access=Get-EpicVMTailscaleAccessToken -Provider $Provider
     try {
         $body=[ordered]@{capabilities=[ordered]@{devices=[ordered]@{create=[ordered]@{reusable=$false;ephemeral=$false;preauthorized=$true;tags=@($tag)}}};expirySeconds=3600;description=('EpicVM one-use ' + $VmName)}
-        $result=Invoke-EpicVMTailscaleHttp -Provider $Provider -Method 'POST' -Path ('tailnet/' + [Uri]::EscapeDataString($tailnet) + '/keys') -Body $body -AccessToken $access
-        $key=[string](Get-EpicVMHyperVValue -Object $result -Name 'key' -Default '')
-        if([string]::IsNullOrWhiteSpace($key)){throw 'Tailscale did not return an auth key.'}
-        return $key
+        $attempt=0
+        while($true){
+            try {
+                $result=Invoke-EpicVMTailscaleHttp -Provider $Provider -Method 'POST' -Path ('tailnet/' + [Uri]::EscapeDataString($tailnet) + '/keys') -Body $body -AccessToken $access -TimeoutSeconds 30
+                $key=[string](Get-EpicVMHyperVValue -Object $result -Name 'key' -Default '')
+                if([string]::IsNullOrWhiteSpace($key)){throw 'Tailscale did not return an auth key.'}
+                return $key
+            } catch {
+                if($attempt -ge 1 -or -not (Test-EpicVMTailscaleTransientError -ErrorRecord $_)){throw}
+                $attempt++
+                Start-Sleep -Milliseconds 250
+            }
+        }
     } catch { throw 'Tailscale guest key creation failed.' }
     finally {$access=$null}
 }
@@ -75,17 +104,26 @@ function Get-EpicVMTailscaleDeviceId {
     $tailnet=[string](Get-EpicVMHyperVValue -Object $Provider -Name 'TailscaleTailnet' -Default '')
     $access=Get-EpicVMTailscaleAccessToken -Provider $Provider
     try {
-        $response=Invoke-EpicVMTailscaleHttp -Provider $Provider -Method 'GET' -Path ('tailnet/' + [Uri]::EscapeDataString($tailnet) + '/devices') -AccessToken $access
-        $devices=@(Get-EpicVMHyperVValue -Object $response -Name 'devices' -Default @())
-        $matches=@($devices | Where-Object {
-            $addresses=@(Get-EpicVMHyperVValue -Object $_ -Name 'addresses' -Default @())
-            $hostname=[string](Get-EpicVMHyperVValue -Object $_ -Name 'hostname' -Default '')
-            ($addresses -contains $GuestIp) -or $hostname -ceq $VmName
-        })
-        if($matches.Count -ne 1){throw 'The enrolled Tailscale device could not be uniquely identified.'}
-        $id=[string](Get-EpicVMHyperVValue -Object $matches[0] -Name 'id' -Default '')
-        if([string]::IsNullOrWhiteSpace($id)){throw 'The enrolled Tailscale device has no revocation identifier.'}
-        return $id
+        $attempt=0
+        while($true){
+            try {
+                $response=Invoke-EpicVMTailscaleHttp -Provider $Provider -Method 'GET' -Path ('tailnet/' + [Uri]::EscapeDataString($tailnet) + '/devices') -AccessToken $access -TimeoutSeconds 20
+                $devices=@(Get-EpicVMHyperVValue -Object $response -Name 'devices' -Default @())
+                $matches=@($devices | Where-Object {
+                    $addresses=@(Get-EpicVMHyperVValue -Object $_ -Name 'addresses' -Default @())
+                    $hostname=[string](Get-EpicVMHyperVValue -Object $_ -Name 'hostname' -Default '')
+                    ($addresses -contains $GuestIp) -or $hostname -ceq $VmName
+                })
+                if($matches.Count -ne 1){throw 'The enrolled Tailscale device could not be uniquely identified.'}
+                $id=[string](Get-EpicVMHyperVValue -Object $matches[0] -Name 'id' -Default '')
+                if([string]::IsNullOrWhiteSpace($id)){throw 'The enrolled Tailscale device has no revocation identifier.'}
+                return $id
+            } catch {
+                if($attempt -ge 1 -or -not (Test-EpicVMTailscaleTransientError -ErrorRecord $_)){throw}
+                $attempt++
+                Start-Sleep -Milliseconds 250
+            }
+        }
     } finally {$access=$null}
 }
 
@@ -123,7 +161,7 @@ namespace EpicVM {
             # in the child process arguments.
             & $Executable up --authkey ("file:\\.\pipe\" + $pipeName) --hostname $Hostname --unattended --accept-dns=false --reset 2>$null | Out-Null
             if($LASTEXITCODE -ne 0){throw 'Tailscale rejected the memory-only enrollment input.'}
-            if(-not $pipeTask.Wait(30000)){throw 'Tailscale did not consume the enrollment key.'}
+            if(-not $pipeTask.Wait(60000)){throw 'Tailscale did not consume the enrollment key.'}
         }
         finally {$AuthKey=$null;$pipeTask=$null}
         $ip=[string]((& $Executable ip -4 2>$null | Select-Object -First 1)).Trim()
@@ -139,14 +177,16 @@ function Invoke-EpicVMTailscaleEnrollment {
     $script=Get-EpicVMTailscaleGuestScript
     $exe=[string](Get-EpicVMHyperVValue -Object $Config -Name 'TailscaleExecutable' -Default 'C:\Program Files\Tailscale\tailscale.exe')
     try {
-        $result=Invoke-EpicVMPowerShellDirect -Provider $Provider -VmName $VmName -Credential $credential -Script $script -ArgumentList @($key,$VmName,$exe)
+        # The auth key is one-use. Once issued, this guest operation is never
+        # retried automatically; recovery must be explicit and stage-limited.
+        $result=Invoke-EpicVMPowerShellDirectOnce -Provider $Provider -VmName $VmName -Credential $credential -Script $script -ArgumentList @($key,$VmName,$exe) -TimeoutSeconds 60
         $ip=[string](Get-EpicVMHyperVValue -Object $result -Name 'ip' -Default '')
         if($ip -notmatch '^100\.(6[4-9]|[78][0-9]|9[0-9]|1[01][0-9]|12[0-7])\.') {throw 'Guest Tailscale IP is invalid.'}
         $known=@(Get-EpicVMHyperVValue -Object $Provider -Name 'KnownTailscaleIps' -Default @())
         if($known -contains $ip){throw 'The guest received a duplicate Tailscale IP.'}
         $deviceId=Get-EpicVMTailscaleDeviceId -Provider $Provider -VmName $VmName -GuestIp $ip
         return [ordered]@{ok=$true;ip=$ip;deviceId=$deviceId;tag='tag:epicvm-guest'}
-    } catch { throw (New-EpicVMHyperVError -Code 'TailscaleEnrollmentFailed' -Message 'Tailscale guest enrollment failed.') }
+    } catch { throw (New-EpicVMHyperVError -Code 'tailscale_enrollment_failed' -Message 'Tailscale guest enrollment failed.') }
     finally {$key=$null;$Password=$null;$credential=$null}
 }
 
@@ -155,6 +195,6 @@ function Revoke-EpicVMTailscaleDevice {
     if([string]::IsNullOrWhiteSpace($DeviceId)){return [ordered]@{ok=$true;revoked=$false}}
     $access=Get-EpicVMTailscaleAccessToken -Provider $Provider
     try { Invoke-EpicVMTailscaleHttp -Provider $Provider -Method 'DELETE' -Path ('device/' + [Uri]::EscapeDataString($DeviceId)) -AccessToken $access | Out-Null; return [ordered]@{ok=$true;revoked=$true} }
-    catch { throw (New-EpicVMHyperVError -Code 'TailscaleRevokeFailed' -Message 'Tailscale device revocation failed.') }
+    catch { throw (New-EpicVMHyperVError -Code 'tailscale_revoke_failed' -Message 'Tailscale device revocation failed.') }
     finally {$access=$null}
 }

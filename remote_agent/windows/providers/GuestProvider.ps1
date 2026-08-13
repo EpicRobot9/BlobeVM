@@ -44,30 +44,62 @@ function Get-EpicVMBootstrapCredential {
     }
 }
 
-function Invoke-EpicVMPowerShellDirect {
+function Invoke-EpicVMPowerShellDirectOnce {
     param(
         [Parameter(Mandatory)][object]$Provider,
         [Parameter(Mandatory)][string]$VmName,
         [Parameter(Mandatory)][PSCredential]$Credential,
         [Parameter(Mandatory)][scriptblock]$Script,
-        [AllowNull()][object[]]$ArgumentList=@()
+        [AllowNull()][object[]]$ArgumentList=@(),
+        [int]$TimeoutSeconds=10
     )
     $invoker=Get-EpicVMHyperVValue -Object $Provider -Name 'PowerShellDirectInvoker' -Default $null
-    if($null -ne $invoker){return & $invoker $VmName $Credential $Script $ArgumentList}
+    if($null -ne $invoker){return (ConvertTo-EpicVMDirectResult -Result (& $invoker $VmName $Credential $Script $ArgumentList))}
     # The Hyper-V VMName parameter set does not accept SessionOption. Run the
     # command as a bounded background job instead, so a guest still booting in
     # OOBE cannot block the agent worker indefinitely.
     $guestJob=$null
     try {
         $guestJob=Invoke-Command -VMName $VmName -Credential $Credential -ScriptBlock $Script -ArgumentList $ArgumentList -AsJob -ErrorAction Stop
-        $completedJob=Wait-Job -Job $guestJob -Timeout 5
+        $completedJob=Wait-Job -Job $guestJob -Timeout ([Math]::Max(1,$TimeoutSeconds))
         if($null -eq $completedJob){
             Stop-Job -Job $guestJob -ErrorAction SilentlyContinue
             throw 'PowerShell Direct probe timed out.'
         }
-        return Receive-Job -Job $guestJob -ErrorAction Stop
+        return (ConvertTo-EpicVMDirectResult -Result (Receive-Job -Job $guestJob -ErrorAction Stop))
     } finally {
         if($null -ne $guestJob){Remove-Job -Job $guestJob -Force -ErrorAction SilentlyContinue}
+    }
+}
+
+function ConvertTo-EpicVMDirectResult {
+    param([AllowNull()][object]$Result)
+    $items=@($Result | Where-Object { $null -ne $_ })
+    if($items.Count -eq 0){return $null}
+    if($items.Count -eq 1){return $items[0]}
+    $withOk=@($items | Where-Object { $null -ne $_.PSObject.Properties['ok'] })
+    if($withOk.Count -gt 0){return $withOk[-1]}
+    return $items[-1]
+}
+
+function Invoke-EpicVMPowerShellDirect {
+    param(
+        [Parameter(Mandatory)][object]$Provider,
+        [Parameter(Mandatory)][string]$VmName,
+        [Parameter(Mandatory)][PSCredential]$Credential,
+        [Parameter(Mandatory)][scriptblock]$Script,
+        [AllowNull()][object[]]$ArgumentList=@(),
+        [int]$TimeoutSeconds=10
+    )
+    $attempt=0
+    while($true){
+        try { return Invoke-EpicVMPowerShellDirectOnce -Provider $Provider -VmName $VmName -Credential $Credential -Script $Script -ArgumentList $ArgumentList -TimeoutSeconds $TimeoutSeconds }
+        catch {
+            $message=[string]$_.Exception.Message
+            if($attempt -ge 1 -or $message -notmatch '(?i)timeout|timed out|disconnect|connection reset|temporarily unavailable'){throw}
+            $attempt++
+            Start-Sleep -Milliseconds 250
+        }
     }
 }
 
@@ -78,6 +110,11 @@ function Get-EpicVMGuestProviderErrorCode {
     # to tell the operator which trust boundary failed without exposing guest
     # names, paths, or credential-bearing transport details.
     $message = [string](Get-EpicVMHyperVValue -Object $ErrorRecord -Name 'Exception' -Default $ErrorRecord)
+    if($message -match '(?i)guest_account_failed'){ return 'guest_account_failed' }
+    if($message -match '(?i)guest_account_readiness_failed'){ return 'guest_account_readiness_failed' }
+    if($message -match '(?i)rdp_verification_failed'){ return 'rdp_verification_failed' }
+    if($message -match '(?i)bootstrap_cleanup_transport_failed'){ return 'bootstrap_cleanup_transport_failed' }
+    if($message -match '(?i)bootstrap_cleanup_failed'){ return 'bootstrap_cleanup_failed' }
     if($message -match '(?i)RDP/NLA/firewall|firewall verification|guest account could not be placed'){
         return 'rdp_verification_failed'
     }
@@ -135,53 +172,78 @@ function Get-EpicVMGuestConfigurationScript {
         $ErrorActionPreference='Stop'
         if($DesiredUser -notmatch '^[A-Za-z][A-Za-z0-9._-]{2,31}$'){throw 'Invalid desired user.'}
         if([string]::IsNullOrEmpty([string]$DesiredPassword)){throw 'Invalid desired password.'}
-        $secure=ConvertTo-SecureString $DesiredPassword -AsPlainText -Force
-        $user=Get-LocalUser -Name $DesiredUser -ErrorAction SilentlyContinue
-        if($null -eq $user){New-LocalUser -Name $DesiredUser -Password $secure -AccountNeverExpires -PasswordNeverExpires -UserMayNotChangePassword|Out-Null}
-        else{Set-LocalUser -Name $DesiredUser -Password $secure -AccountNeverExpires -PasswordNeverExpires}
-        $adminOk=$false
-        try { Add-LocalGroupMember -Group 'Administrators' -Member $DesiredUser -ErrorAction Stop } catch { }
         try {
-            $adminMembers=@(Get-LocalGroupMember -Group 'Administrators' -ErrorAction Stop | ForEach-Object { [string]$_.Name.Split('\')[-1] })
-            $adminOk=$adminMembers -contains $DesiredUser
-        } catch { }
-        # Some Windows images expose the built-in group through a localized
-        # alias or return an unresolved member from Get-LocalGroupMember.  The
-        # native localgroup command is a narrow, username-only fallback.
-        if(-not $adminOk){
-            try { & "$env:SystemRoot\System32\net.exe" localgroup Administrators $DesiredUser /add | Out-Null } catch { }
+            $secure=ConvertTo-SecureString $DesiredPassword -AsPlainText -Force
+            $user=Get-LocalUser -Name $DesiredUser -ErrorAction SilentlyContinue
+            if($null -eq $user){New-LocalUser -Name $DesiredUser -Password $secure -AccountNeverExpires -PasswordNeverExpires -UserMayNotChangePassword|Out-Null}
+            else{Set-LocalUser -Name $DesiredUser -Password $secure -AccountNeverExpires -PasswordNeverExpires}
+            $adminOk=$false
+            try { Add-LocalGroupMember -Group 'Administrators' -Member $DesiredUser -ErrorAction Stop } catch { }
             try {
-                $groupText=@(& "$env:SystemRoot\System32\net.exe" localgroup Administrators 2>$null)
-                $adminOk=[bool](@($groupText | Where-Object { [string]$_ -match [regex]::Escape($DesiredUser) }))
+                $adminMembers=@(Get-LocalGroupMember -Group 'Administrators' -ErrorAction Stop | ForEach-Object { [string]$_.Name.Split('\')[-1] })
+                $adminOk=$adminMembers -contains $DesiredUser
             } catch { }
-        }
-        if(-not $adminOk){throw 'Guest account could not be placed in Administrators.'}
-        New-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -PropertyType DWord -Value 0 -Force | Out-Null
-        New-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -PropertyType DWord -Value 1 -Force | Out-Null
-        Set-Service -Name TermService -StartupType Automatic
-        Start-Service -Name TermService
-        Get-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue | Disable-NetFirewallRule -ErrorAction SilentlyContinue
-        Get-NetFirewallRule -Name 'EpicVM-RDP-Tailscale' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
-        New-NetFirewallRule -Name 'EpicVM-RDP-Tailscale' -DisplayName 'EpicVM RDP (Tailscale only)' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3389 -RemoteAddress '100.64.0.0/10' -Profile Any -EdgeTraversalPolicy Block | Out-Null
-        $listener=$null
-        $listenerDeadline=[DateTime]::UtcNow.AddSeconds(20)
-        do {
-            $listener=Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue
-            if($null -ne $listener){break}
-            Start-Sleep -Milliseconds 500
-        } while([DateTime]::UtcNow -lt $listenerDeadline)
-        $rule=Get-NetFirewallRule -Name 'EpicVM-RDP-Tailscale' -ErrorAction SilentlyContinue
-        $addressFilter=if($null -ne $rule){Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule -ErrorAction SilentlyContinue}else{$null}
-        $nlaOk=(Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -ErrorAction Stop).UserAuthentication -eq 1
-        $portOk=$null -ne $listener
-        $expectedScopes=@('100.64.0.0/10','100.64.0.0/255.192.0.0')
-        $ruleOk=$null -ne $rule -and [string]$rule.Direction -eq 'Inbound' -and [string]$rule.Action -eq 'Allow' -and $null -ne $addressFilter -and [bool](@($addressFilter.RemoteAddress)|Where-Object { $expectedScopes -contains [string]$_ })
-        if(-not $adminOk -or -not $portOk -or -not $ruleOk -or -not $nlaOk){throw 'RDP/NLA/firewall verification failed.'}
-        if($BootstrapUser -and $BootstrapUser -cne $DesiredUser){
+            if(-not $adminOk){
+                try { & "$env:SystemRoot\System32\net.exe" localgroup Administrators $DesiredUser /add | Out-Null } catch { }
+                try {
+                    $groupText=@(& "$env:SystemRoot\System32\net.exe" localgroup Administrators 2>$null)
+                    $adminOk=[bool](@($groupText | Where-Object { [string]$_ -match [regex]::Escape($DesiredUser) }))
+                } catch { }
+            }
+            if(-not $adminOk){throw 'Guest account could not be placed in Administrators.'}
+        } catch { throw 'guest_account_failed' }
+        try {
+            New-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -PropertyType DWord -Value 0 -Force | Out-Null
+            New-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -PropertyType DWord -Value 1 -Force | Out-Null
+            Set-Service -Name TermService -StartupType Automatic
+            Start-Service -Name TermService
+            Get-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue | Disable-NetFirewallRule -ErrorAction SilentlyContinue
+            Get-NetFirewallRule -Name 'EpicVM-RDP-Tailscale' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+            New-NetFirewallRule -Name 'EpicVM-RDP-Tailscale' -DisplayName 'EpicVM RDP (Tailscale only)' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3389 -RemoteAddress '100.64.0.0/10' -Profile Any -EdgeTraversalPolicy Block | Out-Null
+            $listener=$null
+            $listenerDeadline=[DateTime]::UtcNow.AddSeconds(45)
+            do {
+                $listener=Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue
+                if($null -ne $listener){break}
+                Start-Sleep -Milliseconds 500
+            } while([DateTime]::UtcNow -lt $listenerDeadline)
+            $rule=Get-NetFirewallRule -Name 'EpicVM-RDP-Tailscale' -ErrorAction SilentlyContinue
+            $addressFilter=if($null -ne $rule){Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule -ErrorAction SilentlyContinue}else{$null}
+            $nlaOk=(Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -ErrorAction Stop).UserAuthentication -eq 1
+            $portOk=$null -ne $listener
+            $expectedScopes=@('100.64.0.0/10','100.64.0.0/255.192.0.0')
+            $ruleOk=$null -ne $rule -and [string]$rule.Direction -eq 'Inbound' -and [string]$rule.Action -eq 'Allow' -and $null -ne $addressFilter -and [bool](@($addressFilter.RemoteAddress)|Where-Object { $expectedScopes -contains [string]$_ })
+            if(-not $adminOk -or -not $portOk -or -not $ruleOk -or -not $nlaOk){throw 'RDP/NLA/firewall verification failed.'}
+        } catch { throw 'rdp_verification_failed' }
+        # Do not remove the account that owns this PowerShell Direct session
+        # before its result has crossed the transport boundary.  The host
+        # performs that cleanup in a second session authenticated as the new
+        # administrator below.
+        [ordered]@{ok=$true;stage='guest_setup';adminConfigured=$adminOk;listener=$portOk;nla=$nlaOk;firewallScoped=$ruleOk;bootstrapRemoved=($BootstrapUser -and $BootstrapUser -ceq $DesiredUser);bootstrapRemovalRequired=($BootstrapUser -and $BootstrapUser -cne $DesiredUser)}
+    }
+}
+
+function Get-EpicVMGuestBootstrapCleanupScript {
+    return {
+        param($BootstrapUser,$BootstrapCredentialPath,$DesiredUser)
+        $ErrorActionPreference='Stop'
+        $sameUser = $BootstrapUser -and $BootstrapUser -ceq $DesiredUser
+        if(-not $sameUser -and $BootstrapUser){
             Remove-LocalUser -Name $BootstrapUser -ErrorAction SilentlyContinue
             if($BootstrapCredentialPath){Remove-Item -LiteralPath $BootstrapCredentialPath -Force -ErrorAction SilentlyContinue}
         }
-        [ordered]@{ok=$true;adminConfigured=$adminOk;listener=$portOk;nla=$nlaOk;firewallScoped=$ruleOk;bootstrapRemoved=($BootstrapUser -cne $DesiredUser)}
+        $userGone = $sameUser -or $null -eq (Get-LocalUser -Name $BootstrapUser -ErrorAction SilentlyContinue)
+        $pathGone = $sameUser -or [string]::IsNullOrWhiteSpace([string]$BootstrapCredentialPath) -or -not (Test-Path -LiteralPath $BootstrapCredentialPath -PathType Leaf)
+        [ordered]@{ok=($userGone -and $pathGone);bootstrapRemoved=($userGone -and $pathGone)}
+    }
+}
+
+function Get-EpicVMGuestDesiredCredentialReadinessScript {
+    return {
+        $ErrorActionPreference='Stop'
+        $os=Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+        $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+        [ordered]@{ok=($null -ne $os -and $null -ne $identity);stage='guest_account_readiness'}
     }
 }
 
@@ -202,17 +264,38 @@ function Invoke-EpicVMGuestConfiguration {
         throw (New-EpicVMHyperVError -Code 'bootstrap_credential_unavailable' -Message 'The machine bootstrap credential could not open the guest channel.')
     }
     $script=Get-EpicVMGuestConfigurationScript
+    $cleanupCredential=$null
+    $cleanupPassword=$null
     try {
         $result=Invoke-EpicVMPowerShellDirect -Provider $Provider -VmName $VmName -Credential $credential -Script $script -ArgumentList @($DesiredUser,$DesiredPassword,$user,$path)
         $safe=@{ok=$false;listener=$false;firewallScoped=$false;bootstrapRemoved=$false}
         foreach($key in @($safe.Keys)){$safe[$key]=[bool](Get-EpicVMHyperVValue -Object $result -Name $key -Default $false)}
         if(-not $safe.ok){throw 'Guest configuration did not verify.'}
+        if($user -and $user -cne $DesiredUser){
+            $cleanupPassword=ConvertTo-SecureString $DesiredPassword -AsPlainText -Force
+            $cleanupCredential=[PSCredential]::new($DesiredUser,$cleanupPassword)
+            $readiness=$null
+            $readinessDeadline=[DateTime]::UtcNow.AddSeconds(30)
+            do {
+                try { $readiness=Invoke-EpicVMPowerShellDirect -Provider $Provider -VmName $VmName -Credential $cleanupCredential -Script (Get-EpicVMGuestDesiredCredentialReadinessScript) } catch { $readiness=$null }
+                if([bool](Get-EpicVMHyperVValue -Object $readiness -Name 'ok' -Default $false)){ break }
+                if([DateTime]::UtcNow -lt $readinessDeadline){ Start-Sleep -Milliseconds 500 }
+            } while([DateTime]::UtcNow -lt $readinessDeadline)
+            if(-not [bool](Get-EpicVMHyperVValue -Object $readiness -Name 'ok' -Default $false)){throw (New-EpicVMHyperVError -Code 'guest_account_readiness_failed' -Message 'The desired guest account did not pass readiness verification.')}
+            try { $cleanup=Invoke-EpicVMPowerShellDirect -Provider $Provider -VmName $VmName -Credential $cleanupCredential -Script (Get-EpicVMGuestBootstrapCleanupScript) -ArgumentList @($user,$path,$DesiredUser) }
+            catch { throw (New-EpicVMHyperVError -Code 'bootstrap_cleanup_transport_failed' -Message 'The guest bootstrap cleanup channel failed.') }
+            if(-not [bool](Get-EpicVMHyperVValue -Object $cleanup -Name 'ok' -Default $false) -or -not [bool](Get-EpicVMHyperVValue -Object $cleanup -Name 'bootstrapRemoved' -Default $false)){
+                throw (New-EpicVMHyperVError -Code 'bootstrap_cleanup_failed' -Message 'The guest bootstrap cleanup did not verify.')
+            }
+            $safe.bootstrapRemoved=$true
+        } else { $safe.bootstrapRemoved=$true }
         return $safe
     } catch {
-        $code=Get-EpicVMGuestProviderErrorCode -ErrorRecord $_
+        $existingCode=[string](Get-EpicVMHyperVValue -Object $_.Exception -Name 'ErrorCode' -Default '')
+        $code=if($existingCode -and $existingCode -ne 'InvalidOperation'){$existingCode}else{Get-EpicVMGuestProviderErrorCode -ErrorRecord $_}
         throw (New-EpicVMHyperVError -Code $code -Message 'The guest configuration gate failed.')
     }
-    finally {$DesiredPassword=$null;$credential=$null}
+    finally {$DesiredPassword=$null;$credential=$null;$cleanupCredential=$null;$cleanupPassword=$null}
 }
 
 function Get-EpicVMSunshineConfigurationScript {
@@ -283,7 +366,7 @@ function Get-EpicVMSunshineConfigurationScript {
         New-NetFirewallRule -Name 'EpicVM-Sunshine-Tailscale-TCP' -DisplayName 'EpicVM Sunshine (Tailscale TCP)' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 47984,47989,47990,48010 -RemoteAddress '100.64.0.0/10' -Profile Any -EdgeTraversalPolicy Block | Out-Null
         New-NetFirewallRule -Name 'EpicVM-Sunshine-Tailscale-UDP' -DisplayName 'EpicVM Sunshine (Tailscale UDP)' -Direction Inbound -Action Allow -Protocol UDP -LocalPort 47998,47999,48000,48002 -RemoteAddress '100.64.0.0/10' -Profile Any -EdgeTraversalPolicy Block | Out-Null
         Restart-Service -Name $ServiceName -Force -ErrorAction Stop
-        $deadline=[DateTime]::UtcNow.AddSeconds(15)
+        $deadline=[DateTime]::UtcNow.AddSeconds(45)
         $running=$false;$listener=$false
         while([DateTime]::UtcNow -lt $deadline){
             $current=Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
@@ -322,7 +405,7 @@ function Invoke-EpicVMSunshineConfiguration {
             throw 'Sunshine configuration did not verify.'
         }
         return [ordered]@{ok=$true;serviceRunning=[bool](Get-EpicVMHyperVValue -Object $result -Name 'serviceRunning' -Default $false);listener=$true;credentialsConfigured=$true;firewallScoped=[bool](Get-EpicVMHyperVValue -Object $result -Name 'firewallScoped' -Default $false)}
-    }catch{throw (New-EpicVMHyperVError -Code 'SunshineConfigurationFailed' -Message 'Automatic Sunshine configuration failed.')}
+    }catch{throw (New-EpicVMHyperVError -Code 'sunshine_setup_failed' -Message 'Automatic Sunshine configuration failed.')}
     finally{$GuestPassword=$null;$SunshinePassword=$null;$credential=$null}
 }
 

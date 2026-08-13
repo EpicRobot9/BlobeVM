@@ -195,7 +195,7 @@ export default function VMManager(){
         const body = await res.json().catch(()=>({ ok:res.ok }))
         if(!res.ok || body.ok === false) throw new Error(body.error?.message || body.error || 'Unable to resume provisioning job')
         if(!stopped){
-          if(String(body.job?.state || '') === 'awaiting_claim') await recoverPendingClaim(hostId, body.job?.name)
+          if(String(body.job?.state || '') === 'unclaimed') await recoverPendingClaim(hostId, body.job?.name)
           else { setProvisioningHostId(hostId); setProvisioningJob(body.job || null) }
         }
       })
@@ -542,7 +542,7 @@ export default function VMManager(){
   }
 
   useEffect(()=>{
-    if(!provisioningJob?.id || !provisioningHostId || ['ready','failed','console_failed'].includes(String(provisioningJob.state || ''))) return undefined
+    if(!provisioningJob?.id || !provisioningHostId || ['ready'].includes(String(provisioningJob.state || '')) || String(provisioningJob.state || '').startsWith('setup_failed:')) return undefined
     let stopped = false
     const tick = async()=>{
       try{ if(!stopped) await refreshProvisioningJob() }catch(err){ if(!stopped) addToast({title:'Provisioning status unavailable', message:String(err), type:'error', timeout:7000}) }
@@ -559,16 +559,20 @@ export default function VMManager(){
     try{
       const res = await apiFetch(`/provisioning-jobs/${encodeURIComponent(provisioningJob.id)}/claim`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(provisioningClaimPayload({hostId:provisioningHostId, username:claimDraft.username, password:claimDraft.password, claimToken:provisioningClaimToken, sunshineUsername:claimDraft.sunshineUsername, sunshinePassword:claimDraft.sunshinePassword})) })
       const body = await res.json().catch(()=>({ ok:res.ok }))
-      if(!res.ok || body.ok === false) throw new Error(body.error?.message || body.error || 'Guest claim failed')
+      if(!res.ok || body.ok === false) { const err = new Error(body.error?.message || body.error || 'Guest claim failed'); err.safeCode = body.error?.code || body.code || ''; throw err }
       setProvisioningClaimToken('')
       clearProvisioningRecovery()
       setClaimDraft({ username:'', password:'', confirm:'', sunshineUsername:'', sunshinePassword:'', sunshineConfirm:'' })
       setProvisioningJob(body.job || provisioningJob)
       addToast({title:'Guest claimed', message:'Continuing Tailscale, console, and readiness verification.', type:'success', timeout:7000})
     }catch(err){
-      setProvisioningClaimToken('')
+      if(err.safeCode !== 'invalid_credential_input') setProvisioningClaimToken('')
       clearProvisioningRecovery()
-      await refreshProvisioningJob().catch(()=>null)
+      const refreshed = await refreshProvisioningJob().catch(()=>null)
+      if(err.safeCode === 'invalid_credential_input' && refreshed?.state === 'unclaimed') {
+        addToast({title:'Credential input rejected', message:'The claim is still available; correct the request fields and try again.', type:'error', timeout:8000})
+        return
+      }
       addToast({title:'Claim failed', message:String(err), type:'error', timeout:8000})
     }
     finally{ setClaimDraft({ username:'', password:'', confirm:'', sunshineUsername:'', sunshinePassword:'', sunshineConfirm:'' }); setProvisioningBusy(false) }
@@ -979,8 +983,8 @@ export default function VMManager(){
                 </div>
               ) : null}
               {canOpenProvisionedVm(provisioningJob) ? <div style={{color:'#86efac',marginTop:10}}>Ready. The VM will appear in the fleet after the next refresh.</div> : null}
-              {provisioningJob.state === 'failed' ? <div role="alert" style={{color:'#fca5a5',marginTop:10}}>Guest setup stopped safely.{provisioningFailureReason(provisioningJob) ? ` ${provisioningFailureReason(provisioningJob)}` : ''} The VM was retained for diagnosis.</div> : null}
-              {provisioningJob.state === 'console_failed' ? <div role="alert" style={{color:'#fca5a5',marginTop:10}}>Console setup stopped safely. Its route is down and diagnostic data was retained.</div> : null}
+      {String(provisioningJob.state || '').startsWith('setup_failed:') ? <div role="alert" style={{color:'#fca5a5',marginTop:10}}>Setup stopped safely.{provisioningFailureReason(provisioningJob) ? ` ${provisioningFailureReason(provisioningJob)}` : ''} The VM was retained for diagnosis.{provisioningJob.operationId ? ` Operation ${provisioningJob.operationId}.` : ''}</div> : null}
+              {provisioningJob.state === 'setup_failed:streaming' ? <div role="alert" style={{color:'#fca5a5',marginTop:10}}>Streaming setup stopped safely. Its route is down and diagnostic data was retained.</div> : null}
             </div>
           ) : null}
         </form>

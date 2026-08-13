@@ -1,7 +1,7 @@
-export const PROVISIONING_STATES = ['queued','cloning','booting','awaiting_claim','configuring_guest','enrolling_tailscale','awaiting_console','verifying','ready']
+export const PROVISIONING_STATES = ['queued','cloning','booting','unclaimed','claim_in_progress','guest_setup','network_setup','streaming_setup','ready']
 
 export function canClaimProvisioningJob(job){
-  return String(job?.state || '') === 'awaiting_claim'
+  return String(job?.state || '') === 'unclaimed'
 }
 
 export function canOpenProvisionedVm(job){
@@ -9,7 +9,7 @@ export function canOpenProvisionedVm(job){
 }
 
 export function canRetryProvisioningConsole(job){
-  return String(job?.state || '') === 'console_failed'
+  return String(job?.state || '') === 'setup_failed:streaming'
 }
 
 export function canOpenInventoryVm(vm){
@@ -20,7 +20,7 @@ export function canOpenInventoryVm(vm){
 export function provisioningProgress(job){
   const state = String(job?.state || 'queued')
   if(state === 'ready') return 100
-  if(state === 'failed' || state === 'console_failed') return 75
+  if(state.startsWith('setup_failed:')) return 75
   const index = Math.max(0, PROVISIONING_STATES.indexOf(state))
   return Math.round((index / (PROVISIONING_STATES.length - 1)) * 100)
 }
@@ -40,6 +40,17 @@ export function provisioningFailureReason(job){
     powershell_direct_failed: 'PowerShell Direct could not open the cloned guest.',
     rdp_verification_failed: 'Guest RDP/NLA/firewall verification failed.',
     guest_configuration_failed: 'Guest configuration failed at the secure setup gate.',
+    invalid_credential_input: 'The credential input is empty or does not meet the request policy.',
+    claim_in_progress: 'Another request already owns this claim.',
+    claim_atomic_commit_failed: 'The claim could not be committed safely; no guest work was started.',
+    guest_configuration_unavailable: 'The secure guest configuration channel is unavailable; no claim was consumed.',
+    guest_account_failed: 'Windows guest-account setup failed after the claim was consumed.',
+    guest_account_readiness_failed: 'The desired Windows account did not pass readiness verification.',
+    bootstrap_cleanup_failed: 'Guest bootstrap cleanup did not verify.',
+    bootstrap_cleanup_transport_failed: 'The guest bootstrap cleanup channel failed.',
+    tailscale_enrollment_failed: 'Tailscale guest enrollment failed after guest setup.',
+    streaming_setup_failed: 'Moonlight/Sunshine setup failed after guest and network setup.',
+    legacy_state_uncertain: 'Persisted provisioning checkpoints are inconsistent; the VM was retained for diagnosis.',
   }
   return reasons[code] || ''
 }

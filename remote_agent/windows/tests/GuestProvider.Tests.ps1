@@ -12,7 +12,7 @@ Describe 'PowerShell Direct guest provider' {
         $script:invoked = $false
         $provider = [pscustomobject]@{
             Name='Mock'
-            PowerShellDirectInvoker={ param($vm,$credential,$scriptBlock,$args) $script:invoked=$true; @{ ok=$true; listener=$true; firewallScoped=$true; bootstrapRemoved=$true } }
+        PowerShellDirectInvoker={ param($vm,$credential,$scriptBlock,$args) $script:invoked=$true; if($credential.UserName -eq 'EpicVMBootstrap'){ @{ ok=$true; listener=$true; firewallScoped=$true; bootstrapRemoved=$false } } else { @{ ok=$true; bootstrapRemoved=$true } } }
             BootstrapCredentialLoader={ param($path,$user) [PSCredential]::new($user,(ConvertTo-SecureString ('x' * 16) -AsPlainText -Force)) }
         }
         $config=[pscustomobject]@{BootstrapCredentialPath='mock.dpapi';BootstrapUser='EpicVMBootstrap'}
@@ -29,7 +29,21 @@ Describe 'PowerShell Direct guest provider' {
         $text | Should -Match '100.64.0.0/10'
         $text | Should -Match '100.64.0.0/255.192.0.0'
         $text | Should -Match 'EpicVM-RDP-Tailscale'
-        $text | Should -Match 'Remove-LocalUser'
+        $cleanup = Get-EpicVMGuestBootstrapCleanupScript
+        $cleanup.ToString() | Should -Match 'Remove-LocalUser'
+        $text | Should -Match 'bootstrapRemovalRequired'
+        }
+
+    It 'defers bootstrap removal until readiness and cleanup sessions use the new administrator' {
+        $script:credentialUsers = @()
+        $provider = [pscustomobject]@{
+            PowerShellDirectInvoker={ param($vm,$credential,$scriptBlock,$args) $script:credentialUsers += $credential.UserName; if($credential.UserName -eq 'EpicVMBootstrap'){ @{ ok=$true; listener=$true; firewallScoped=$true; bootstrapRemoved=$false } } else { @{ ok=$true; bootstrapRemoved=$true } } }
+            BootstrapCredentialLoader={ param($path,$user) [PSCredential]::new($user,(ConvertTo-SecureString ('x' * 16) -AsPlainText -Force)) }
+        }
+        $config=[pscustomobject]@{BootstrapCredentialPath='mock.dpapi';BootstrapUser='EpicVMBootstrap'}
+        $result=Invoke-EpicVMGuestConfiguration -Provider $provider -Config $config -VmName 'alpha' -DesiredUser 'operator' -DesiredPassword ('y' * 16)
+        $result.bootstrapRemoved | Should -BeTrue
+        $script:credentialUsers | Should -Be @('EpicVMBootstrap','operator','operator')
     }
 
     It 'waits for a read-only bootstrap probe before guest mutation' {
@@ -44,7 +58,8 @@ Describe 'PowerShell Direct guest provider' {
     It 'bounds the native Hyper-V VMName command without an incompatible session option' {
         $text = Get-Content (Join-Path $windowsRoot 'providers/GuestProvider.ps1') -Raw
         $text | Should -Match 'Invoke-Command -VMName \$VmName.*-AsJob'
-        $text | Should -Match 'Wait-Job -Job \$guestJob -Timeout 5'
+        $text | Should -Match '\[int\]\$TimeoutSeconds=10'
+        $text | Should -Match 'Wait-Job -Job \$guestJob -Timeout \(\[Math\]::Max\(1,\$TimeoutSeconds\)\)'
         $text | Should -Not -Match 'Invoke-Command -VMName \$VmName.*-SessionOption'
     }
 
