@@ -274,6 +274,50 @@ def test_console_retry_ready_is_idempotent(monkeypatch, tmp_path):
     assert response.get_json()["job"]["state"] == "ready"
 
 
+def test_remote_console_worker_rechecks_ready_state_before_credentials(monkeypatch, tmp_path):
+    module = load_app(monkeypatch, tmp_path)
+
+    class ReadyHost(FakeRemoteHost):
+        def provisioning_status(self, job_id):
+            return {"job": {"id": job_id, "name": "alpha", "state": "ready", "consoleRoutePrefix": "/vm/alpha/"}}
+
+        def console_credentials(self, *args, **kwargs):
+            raise AssertionError("credentials must not be sent after ready")
+
+    class ShouldNotRunOrchestrator:
+        def quarantine_staged(self, name):
+            raise AssertionError("Moonlight must not be touched after ready")
+
+    host = ReadyHost()
+    key = ("epic-pc", "job-1")
+    module._CONSOLE_RETRY_TASKS[key] = {
+        "operationId": "op-ready",
+        "startedAt": time.time(),
+        "status": "pending",
+        "failureCode": "",
+        "routeReady": False,
+    }
+    module._start_remote_moonlight_console_retry(
+        host=host,
+        host_id="epic-pc",
+        job_id="job-1",
+        name="alpha",
+        guest_ip="100.111.82.1",
+        route_name="alpha--epic-pc",
+        guest_username="operator",
+        guest_password="transient-password",
+        sunshine_username="sun-user",
+        sunshine_password="sun-password",
+        orchestrator=ShouldNotRunOrchestrator(),
+        operation_id="op-ready",
+    )
+
+    task = module._CONSOLE_RETRY_TASKS[key]
+    assert task["status"] == "ready"
+    assert task["routeReady"] is True
+    assert task["failureCode"] == ""
+
+
 def test_remote_moonlight_retry_returns_pending_and_deduplicates(monkeypatch, tmp_path):
     module = load_app(monkeypatch, tmp_path)
     started = threading.Event()

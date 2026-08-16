@@ -293,6 +293,25 @@ def _start_remote_moonlight_console_retry(*, host, host_id, job_id, name, guest_
     """
     key = (str(host_id), str(job_id))
     try:
+        # Re-read the authoritative job immediately before handling any
+        # credential-bearing operation.  A concurrent agent recovery or retry
+        # may have completed the console between the public request and this
+        # worker starting.  In that case the worker must be idempotent and
+        # must not quarantine Moonlight or send credentials to a job that is
+        # no longer waiting for them.
+        current = host.provisioning_status(job_id)
+        current_job = current.get('job') if isinstance(current, dict) else None
+        current_state = str(current_job.get('state') or '') if isinstance(current_job, dict) else ''
+        if current_state == 'ready':
+            _set_console_retry_result(key, status='ready', operation_id=operation_id)
+            app.logger.info('EpicVM console retry became idempotent operation=%s status=ready', operation_id)
+            return
+        if current_state not in ('streaming_setup', 'setup_failed:streaming'):
+            raise ConsoleOrchestrationError(
+                'The console is no longer waiting for credentials.',
+                status=409,
+                code='console_retry_not_allowed',
+            )
         orchestrator.quarantine_staged(name)
         host.console_credentials(
             job_id,

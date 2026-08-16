@@ -437,7 +437,7 @@ function Invoke-EpicVMApiRequest {
                 }
             }
             if ($Method -eq 'POST' -and $segments.Count -eq 4 -and $segments[3] -eq 'claim') {
-                try { Invoke-EpicVMProvisioningClaim -State $State -Job $job -Request (Get-EpicVMRequestBody -Body $Body) }
+                try { Invoke-EpicVMProvisioningClaim -State $State -Job $job -Request (Get-EpicVMRequestBody -Body $Body) | Out-Null }
                 catch {
                     $code = [string](Get-EpicVMProperty -Object $_.Exception -Name 'ErrorCode' -Default 'claim_failed')
                     $status = [int](Get-EpicVMProperty -Object $_.Exception -Name 'HttpStatus' -Default 422)
