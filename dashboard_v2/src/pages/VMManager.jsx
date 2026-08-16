@@ -7,7 +7,7 @@ import { useToasts } from '../components/ToastProvider'
 import { instanceNamesKey, pollDelayMs } from '../lib/polling'
 import { canCacheVmSettingsResponse, clearRemovedVmState, createLoadInFlightRunner, createLogSelectionTracker } from '../lib/vmManagerRaces'
 import { canUseRemotePlacement, createPlacementPayload, getEligibleRemoteHosts, getPlacementValidationReason, hostOptionLabel, normalizeHostInventory, provisioningProfileDisabledReason, remotePlacementDisabledReason } from '../lib/hostPlacement'
-import { canClaimProvisioningJob, canOpenInventoryVm, canOpenProvisionedVm, canRetryProvisioningConsole, deprovisioningPayload, provisioningClaimPayload, provisioningConsoleRetryPayload, provisioningCreatePayload, provisioningFailureReason, provisioningProgress } from '../lib/provisioningUi'
+import { canClaimProvisioningJob, canOpenInventoryVm, canOpenProvisionedVm, canRetryProvisioningConsole, deprovisioningPayload, gamingPartitionPayload, provisioningClaimPayload, provisioningConsoleRetryPayload, provisioningCreatePayload, provisioningFailureReason, provisioningProgress } from '../lib/provisioningUi'
 
 const OPTIONAL_REQUEST_TIMEOUT_MS = 2500
 
@@ -60,9 +60,10 @@ function StatMeter({ label, value, tone='cpu' }){
   )
 }
 
-function VmCard({ vm, host, onAction, onDetails, onProfileChange, onManage, onTeardown, profileBusy, busyAction, refreshing }){
+function VmCard({ vm, host, onAction, onDetails, onProfileChange, onManage, onTeardown, onGamingPartitionChange, gamingPartitionDraft, gamingPartitionBusy, profileBusy, busyAction, refreshing }){
   const tone = toneFor(vm.status)
-  const profile = vm._profile || vm._optimizer?.profile || 'desktop'
+  const profile = vm._profile || vm._optimizer?.profile || vm.profile || 'desktop'
+  const isGaming = profile === 'gaming' || String(vm.profile || '').toLowerCase() === 'gaming' || vm.gpuPartitionPercent !== undefined
   const isRemote = vm.placement === 'remote'
   const consoleReady = canOpenInventoryVm(vm)
   const placementLabel = isRemote ? 'RemoteVM' : 'Local VM'
@@ -113,6 +114,27 @@ function VmCard({ vm, host, onAction, onDetails, onProfileChange, onManage, onTe
         </label>
       </div>
 
+      {isRemote && isGaming ? (
+        <div className="vm-placement-notice" style={{display:'flex', alignItems:'center', gap:8, flexWrap:'wrap', marginTop:10}}>
+          <span style={{fontSize:13, color:'var(--muted)'}}>GPU-P partition</span>
+          <input
+            aria-label={`GPU-P partition percent for ${vm.name}`}
+            type="number"
+            min="1"
+            max="100"
+            step="1"
+            value={gamingPartitionDraft ?? String(vm.gpuPartitionPercent ?? 50)}
+            onChange={e=>onGamingPartitionChange?.('draft', vm.name, e.target.value, vm.host_id)}
+            disabled={gamingPartitionBusy || hostUnavailable}
+            style={{width:74, background:'rgba(2,6,23,.8)', color:'#fff', border:'1px solid rgba(255,255,255,.12)', borderRadius:8, padding:'5px 7px'}}
+          />
+          <span style={{fontSize:13}}>%</span>
+          <Button disabled={gamingPartitionBusy || hostUnavailable} onClick={()=>onGamingPartitionChange?.('save', vm.name, gamingPartitionDraft ?? String(vm.gpuPartitionPercent ?? 50), vm.host_id)}>
+            {gamingPartitionBusy ? 'Applying…' : 'Apply GPU-P'}
+          </Button>
+        </div>
+      ) : null}
+
       <div className="vm-card-actions">
         <Button disabled={busyAction || hostUnavailable} onClick={()=>onAction('start', vm.name)}>Start</Button>
         <Button disabled={busyAction || hostUnavailable} onClick={()=>onAction('stop', vm.name)}>Stop</Button>
@@ -147,6 +169,9 @@ export default function VMManager(){
   const [createName, setCreateName] = useState('')
   const [provisioningProfile, setProvisioningProfile] = useState('standard')
   const [provisioningMode, setProvisioningMode] = useState('automatic')
+  const [gamingInitDraft, setGamingInitDraft] = useState({ cpuCount:'6', memoryGiB:'12', diskSizeGiB:'128', gpuPartitionPercent:'50' })
+  const [gamingPartitionDrafts, setGamingPartitionDrafts] = useState({})
+  const [gamingPartitionBusy, setGamingPartitionBusy] = useState('')
   const [provisioningJob, setProvisioningJob] = useState(null)
   const [provisioningHostId, setProvisioningHostId] = useState('')
   const [provisioningClaimToken, setProvisioningClaimToken] = useState('')
@@ -607,7 +632,13 @@ export default function VMManager(){
         if(provisioningMode === 'claim'){
           try{ window.sessionStorage.setItem('epicvm.provisioning-recovery', JSON.stringify({hostId:selectedHostId,name})) }catch(_e){}
         }
-        const provisioningPayload = provisioningCreatePayload({ hostId:selectedHostId, name, profile:provisioningProfile, mode:provisioningMode })
+        const provisioningPayload = provisioningCreatePayload({
+          hostId:selectedHostId,
+          name,
+          profile:provisioningProfile,
+          mode:provisioningMode,
+          ...gamingInitDraft,
+        })
         const res = await apiFetch('/provisioning-jobs', { method:'POST', headers:{'Content-Type':'application/json','Idempotency-Key':crypto.randomUUID()}, body: JSON.stringify(provisioningPayload) })
         const j = await res.json().catch(()=>({ ok:res.ok }))
         if(!res.ok || j.ok === false) throw new Error(j.error?.message || j.error || `Failed to start provisioning for ${name}`)
@@ -724,6 +755,36 @@ export default function VMManager(){
       await refreshProvisioningJob().catch(()=>null)
       addToast({title:'Console retry failed', message:String(err), type:'error', timeout:8000})
     }finally{ clearClaimDraft(); setProvisioningBusy(false) }
+  }
+
+  async function applyGamingPartition(actionKind, name, value, hostId){
+    const key = `${String(hostId || 'local')}:${name}`
+    if(actionKind === 'draft'){
+      setGamingPartitionDrafts(current => ({ ...current, [key]: String(value ?? '') }))
+      return
+    }
+    const parsed = Number.parseInt(String(value ?? ''), 10)
+    if(!Number.isInteger(parsed) || parsed < 1 || parsed > 100){
+      addToast({ title:name, message:'GPU-P partition must be a whole-number percentage from 1 to 100.', type:'error', timeout:6000 })
+      return
+    }
+    setGamingPartitionBusy(key)
+    try{
+      const res = await apiFetch(`/vm/${encodeURIComponent(name)}/gpu-partition`, {
+        method:'POST',
+        headers:{'Content-Type':'application/json','Idempotency-Key':crypto.randomUUID()},
+        body:JSON.stringify(gamingPartitionPayload({ hostId, percent:parsed }))
+      })
+      const body = await res.json().catch(()=>({ ok:res.ok }))
+      if(!res.ok || body.ok === false) throw new Error(body.error || `Failed to apply GPU-P to ${name}`)
+      setInstances(items => items.map(vm => vm.name === name && (vm.host_id || 'local') === (hostId || 'local') ? { ...vm, gpuPartitionPercent:body.percent || parsed } : vm))
+      setGamingPartitionDrafts(current => ({ ...current, [key]: String(body.percent || parsed) }))
+      addToast({ title:name, message:`GPU-P partition set to ${body.percent || parsed}%`, type:'success', timeout:5000 })
+    }catch(err){
+      addToast({ title:`${name} GPU-P`, message:String(err), type:'error', timeout:8000 })
+    }finally{
+      setGamingPartitionBusy('')
+    }
   }
 
   async function startTeardown(name, hostId){
@@ -1102,6 +1163,30 @@ export default function VMManager(){
                 </select>
               </label>
             ) : null}
+            {placement === 'remote' && provisioningProfile === 'gaming' ? (
+              <div className="vm-placement-notice" style={{gridColumn:'1 / -1', display:'grid', gap:10}}>
+                <strong>Gaming VM resources</strong>
+                <span style={{color:'var(--muted)', fontSize:13}}>Choose vCPU, memory, storage, and the starting GPU-P share now. vCPU, memory, and storage are initialization-only; the GPU-P percentage can be changed later from the VM card.</span>
+                <div style={{display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))', gap:10}}>
+                  <label style={{display:'grid', gap:5}}>
+                    <span>vCPU</span>
+                    <input type="number" min="1" max="16" step="1" value={gamingInitDraft.cpuCount} onChange={e=>setGamingInitDraft(s=>({ ...s, cpuCount:e.target.value }))} disabled={createBusy} />
+                  </label>
+                  <label style={{display:'grid', gap:5}}>
+                    <span>Memory (GiB)</span>
+                    <input type="number" min="1" max="16" step="1" value={gamingInitDraft.memoryGiB} onChange={e=>setGamingInitDraft(s=>({ ...s, memoryGiB:e.target.value }))} disabled={createBusy} />
+                  </label>
+                  <label style={{display:'grid', gap:5}}>
+                    <span>Storage (GiB)</span>
+                    <input type="number" min="1" max="512" step="1" value={gamingInitDraft.diskSizeGiB} onChange={e=>setGamingInitDraft(s=>({ ...s, diskSizeGiB:e.target.value }))} disabled={createBusy} />
+                  </label>
+                  <label style={{display:'grid', gap:5}}>
+                    <span>GPU-P share (%)</span>
+                    <input type="number" min="1" max="100" step="1" value={gamingInitDraft.gpuPartitionPercent} onChange={e=>setGamingInitDraft(s=>({ ...s, gpuPartitionPercent:e.target.value }))} disabled={createBusy} />
+                  </label>
+                </div>
+              </div>
+            ) : null}
             <Button type="submit" disabled={createBusy || !!placementReason || !!standardProfileReason}>{createBusy ? 'Creating…' : 'Create VM'}</Button>
           </div>
           <div className="vm-placement-summary">
@@ -1161,7 +1246,7 @@ export default function VMManager(){
             <div className="vm-card-grid">
               {instances.map(vm => {
                 const hostId = vm.host_id || 'local'
-                return <VmCard key={`${hostId}:${vm.name}`} vm={vm} host={hostsById[hostId]} onAction={(cmd, name, opts={})=>action(cmd, name, { ...opts, hostId })} onDetails={(name)=>openDetails(name, hostId, vm.url)} onManage={(name)=>openManage(name, hostId)} onTeardown={startTeardown} onProfileChange={setProfile} profileBusy={profileBusy === vm.name} busyAction={!!busyAction} refreshing={refreshing} />
+                return <VmCard key={`${hostId}:${vm.name}`} vm={vm} host={hostsById[hostId]} onAction={(cmd, name, opts={})=>action(cmd, name, { ...opts, hostId })} onDetails={(name)=>openDetails(name, hostId, vm.url)} onManage={(name)=>openManage(name, hostId)} onTeardown={startTeardown} onGamingPartitionChange={applyGamingPartition} gamingPartitionDraft={gamingPartitionDrafts[`${hostId}:${vm.name}`]} gamingPartitionBusy={gamingPartitionBusy === `${hostId}:${vm.name}`} onProfileChange={setProfile} profileBusy={profileBusy === vm.name} busyAction={!!busyAction} refreshing={refreshing} />
               })}
             </div>
           )}

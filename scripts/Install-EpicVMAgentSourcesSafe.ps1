@@ -15,7 +15,8 @@ $files = @(
     'Provisioning.ps1',
     'providers\HyperVProvider.ps1',
     'providers\GuestProvider.ps1',
-    'providers\TailscaleProvider.ps1'
+    'providers\TailscaleProvider.ps1',
+    'providers\GamingGpuPProvider.ps1'
 )
 $serviceName = 'EpicVMRemoteAgent'
 $stageRoot = Join-Path $InstallRoot ('.source-update-' + [guid]::NewGuid().ToString('N'))
@@ -55,10 +56,17 @@ try {
         $source = Join-Path $SourceRoot $relative
         $target = Get-RelativeTarget -RelativePath $relative
         if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw 'Agent source file is missing.' }
-        if (-not (Test-Path -LiteralPath $target -PathType Leaf)) { throw 'Installed agent source file is missing.' }
         $sourceHashes[$relative] = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
-        $installedHashes[$relative] = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
-        $targetAcls[$relative] = Get-Acl -LiteralPath $target
+        if (Test-Path -LiteralPath $target -PathType Leaf) {
+            $installedHashes[$relative] = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+            $targetAcls[$relative] = Get-Acl -LiteralPath $target
+        }
+        else {
+            # New provider files are allowed; the staged transaction will add
+            # them and rollback removes them if the service cannot recover.
+            $installedHashes[$relative] = $null
+            $targetAcls[$relative] = $null
+        }
     }
 
     $service = Get-CimInstance Win32_Service -Filter ("Name='" + $serviceName + "'") -ErrorAction Stop
@@ -79,10 +87,12 @@ try {
         $backup = Join-Path $backupRoot $relative
         $staged = Join-Path $stagedRoot $relative
         New-Item -ItemType Directory -Path (Split-Path -Parent $backup), (Split-Path -Parent $staged) -Force | Out-Null
-        Copy-Item -LiteralPath $target -Destination $backup -Force
-        $backupFiles[$relative] = $backup
+        if (Test-Path -LiteralPath $target -PathType Leaf) {
+            Copy-Item -LiteralPath $target -Destination $backup -Force
+            $backupFiles[$relative] = $backup
+        }
         Copy-Item -LiteralPath $source -Destination $staged -Force
-        Set-Acl -LiteralPath $staged -AclObject $targetAcls[$relative]
+        if ($null -ne $targetAcls[$relative]) { Set-Acl -LiteralPath $staged -AclObject $targetAcls[$relative] }
     }
 
     if ($serviceWasRunning) { Stop-Service -Name $serviceName -Force -ErrorAction Stop }
@@ -90,7 +100,7 @@ try {
         $target = Get-RelativeTarget -RelativePath $relative
         $staged = Join-Path $stagedRoot $relative
         Move-Item -LiteralPath $staged -Destination $target -Force
-        Set-Acl -LiteralPath $target -AclObject $targetAcls[$relative]
+        if ($null -ne $targetAcls[$relative]) { Set-Acl -LiteralPath $target -AclObject $targetAcls[$relative] }
     }
     Start-Service -Name $serviceName -ErrorAction Stop
     $serviceStarted = $true
@@ -139,10 +149,13 @@ catch {
             if ((Get-Service -Name $serviceName -ErrorAction Stop).Status -ne 'Stopped') { Stop-Service -Name $serviceName -Force -ErrorAction Stop }
             foreach ($relative in $files) {
                 $target = Get-RelativeTarget -RelativePath $relative
-                $backup = [string]$backupFiles[$relative]
+                $backup = if ($backupFiles.ContainsKey($relative)) { [string]$backupFiles[$relative] } else { '' }
                 if ($backup -and (Test-Path -LiteralPath $backup -PathType Leaf)) {
                     Copy-Item -LiteralPath $backup -Destination $target -Force
-                    Set-Acl -LiteralPath $target -AclObject $targetAcls[$relative]
+                    if ($null -ne $targetAcls[$relative]) { Set-Acl -LiteralPath $target -AclObject $targetAcls[$relative] }
+                }
+                elseif (-not $backup -and (Test-Path -LiteralPath $target -PathType Leaf)) {
+                    Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
                 }
             }
             Start-Service -Name $serviceName -ErrorAction Stop

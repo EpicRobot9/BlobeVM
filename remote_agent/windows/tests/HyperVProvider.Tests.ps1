@@ -174,3 +174,43 @@ Describe 'Hyper-V provider lifecycle safety' {
         @($script:commandCalls | Where-Object Name -eq 'Remove-VM') | Should -BeNullOrEmpty
     }
 }
+
+Describe 'Hyper-V Gaming guest validation' {
+    It 'does not revalidate credential parameters during cleanup' {
+        $script:validationCalls = @()
+        $config = [pscustomobject]@{
+            GamingGpuDeviceIdentity = 'VEN_1002&DEV_73BF'
+            SunshineServiceName = 'SunshineService'
+            SunshineStatePaths = @()
+            ManagementPort = 5985
+        }
+        $provider = New-EpicVMHyperVProvider -Config $config -CommandInvoker ${function:Invoke-MockHyperVCmdlet} -ManagementInvoker {
+            param($address, $credential, $scriptBlock, $args, $timeout, $port, $useSsl)
+            $script:validationCalls += [pscustomobject]@{
+                address = $address
+                username = $credential.UserName
+                timeout = [int]$timeout
+            }
+            return @{
+                ok = $true
+                transportOpened = $true
+                result = @{
+                    ok = $true
+                    displayOk = $true
+                    videoControllerOk = $true
+                    dxdiagOk = $true
+                    webglOk = $true
+                    sunshineEncoderOk = $true
+                }
+            }
+        }
+
+        $result = & $provider.ValidateGamingGuest 'alpha' 'operator' ('p' * 16) '100.111.82.1'
+
+        $result.ok | Should -BeTrue
+        $result.address | Should -Be '100.111.82.1'
+        $script:validationCalls.Count | Should -Be 1
+        $script:validationCalls[0].username | Should -Be '.\operator'
+        $script:validationCalls[0].timeout | Should -Be 240
+    }
+}

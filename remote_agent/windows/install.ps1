@@ -43,7 +43,7 @@ Copy-Item -LiteralPath (Join-Path $sourceRoot 'EpicVM.Agent.ps1') -Destination $
 foreach ($sourceFile in @('Provisioning.ps1','TemplateBuilder.ps1','Set-TailscaleOAuthSecret.ps1')) {
     Copy-Item -LiteralPath (Join-Path $sourceRoot $sourceFile) -Destination (Join-Path $InstallRoot $sourceFile) -Force
 }
-foreach ($providerFile in @('HyperVProvider.ps1','GuestProvider.ps1','TailscaleProvider.ps1')) {
+foreach ($providerFile in @('HyperVProvider.ps1','GuestProvider.ps1','TailscaleProvider.ps1','GamingGpuPProvider.ps1')) {
     Copy-Item -LiteralPath (Join-Path $sourceRoot ('providers/' + $providerFile)) -Destination (Join-Path $InstallRoot ('providers/' + $providerFile)) -Force
 }
 $configPath = Join-Path $InstallRoot 'config.json'
@@ -78,6 +78,10 @@ $config = [ordered]@{
     TemplateManifestPath = 'E:\EpicVM\templates\win11-25h2\manifest.json'
     ProvisioningStatePath = 'E:\EpicVM\provisioning-jobs.json'
     GamingVMNames = @('testre')
+    GamingGpuDeviceIdentity = 'VEN_1002&DEV_73BF'
+    GamingGpuPartitionPercent = 50
+    GamingDriverStoreRoot = 'C:\Windows\System32\DriverStore\FileRepository'
+    GamingDriverSourcePaths = @()
     BootstrapUser = 'EpicVMBootstrap'
     BootstrapCredentialPath = (Join-Path $InstallRoot 'bootstrap.dpapi')
     TailscaleOAuthClientId = ''

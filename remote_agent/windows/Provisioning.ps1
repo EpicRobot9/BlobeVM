@@ -4,11 +4,11 @@
 Set-StrictMode -Version Latest
 $script:EpicVMProvisioningStates = @(
     'queued', 'cloning', 'booting', 'unclaimed', 'claim_in_progress',
-    'guest_setup', 'network_setup', 'management_handoff', 'streaming_setup', 'stream_validation', 'ready',
+    'guest_setup', 'network_setup', 'management_handoff', 'gaming_gpu_validation', 'streaming_setup', 'stream_validation', 'ready',
     'deprovisioning', 'quarantined', 'purged'
 )
 
-$script:EpicVMProvisioningStageOrder = @('claim', 'guest_setup', 'network_setup', 'management_handoff', 'streaming_setup', 'stream_validation')
+$script:EpicVMProvisioningStageOrder = @('claim', 'guest_setup', 'network_setup', 'management_handoff', 'gaming_gpu', 'streaming_setup', 'stream_validation')
 $script:EpicVMProvisioningFailureDetailCodes = @(
     'account_create_failed', 'account_update_failed',
     'account_password_policy_failed', 'admin_membership_failed',
@@ -20,7 +20,10 @@ $script:EpicVMProvisioningFailureDetailCodes = @(
     'SUNSHINE_STATE_PATH',
     'SUNSHINE_STATE_WRITE', 'SUNSHINE_STATE_ACL',
     'SUNSHINE_FIREWALL_CONFIG', 'SUNSHINE_SERVICE_RESTART',
-    'SUNSHINE_LISTENER_VERIFY'
+    'SUNSHINE_LISTENER_VERIFY',
+    'GAMING_GPU_DEVICE_MISSING', 'GAMING_GPU_DEVICE_ERROR',
+    'GAMING_GPU_DRIVER_INJECTION', 'GAMING_GPU_DXDIAG',
+    'GAMING_GPU_WEBGL', 'GAMING_GPU_ENCODER'
 )
 
 function New-EpicVMProvisioningOperationId {
@@ -51,6 +54,9 @@ function Get-EpicVMProvisioningFailureState {
             'sunshine_verification_failed','powershell_direct_failed','SunshineConfigurationFailed',
             'guest_credential_rejected','sunshine_setup_unavailable','console_verification_failed','guest_reverification_failed',
             'console_failed')) { return 'setup_failed:streaming' }
+    if ($safeCode -in @('GpuUnavailable','GpuIdentityUnavailable','GpuIdentityAmbiguous','GpuQuotaUnavailable',
+            'GpuAdapterCountInvalid','GpuIdentityMismatch','GpuAdapterVerificationFailed','DriverInjectionFailed',
+                        'gaming_guest_validation_failed','gaming_guest_validation_unavailable','gaming_gpu_validation_failed','gaming_encoder_unavailable','gaming_webgl_unavailable')) { return 'setup_failed:gaming_gpu' }
     if ($safeCode -in @('agent_restarted','reverification_failed')) { return 'setup_failed:agent_restart' }
     if ($safeCode -match '^legacy_') { return 'setup_failed:legacy_state_uncertain' }
     return 'setup_failed:unknown'
@@ -85,6 +91,7 @@ function Test-EpicVMProvisioningEvidence {
             return (-not [string]::IsNullOrWhiteSpace([string](Get-EpicVMProperty -Object $Record -Name 'managementTransport' -Default ''))) -and
                 (-not [string]::IsNullOrWhiteSpace([string](Get-EpicVMProperty -Object $Record -Name 'managementReadyAt' -Default '')))
         }
+        'gaming_gpu' { return [bool](Get-EpicVMProperty -Object $Record -Name 'gamingGpuValidated' -Default $false) }
         'streaming_setup' { return -not [string]::IsNullOrWhiteSpace([string](Get-EpicVMProperty -Object $Record -Name 'consoleVerifiedAt' -Default '')) }
         'stream_validation' { return [bool](Get-EpicVMProperty -Object $Record -Name 'streamValidationVerified' -Default $false) }
         default { return $false }
@@ -94,8 +101,8 @@ function Test-EpicVMProvisioningEvidence {
 function ConvertTo-EpicVMCanonicalProvisioningState {
     param([Parameter(Mandatory)][object]$Record)
     $state = [string](Get-EpicVMProperty -Object $Record -Name 'state' -Default 'failed')
-    if ($state -match '^setup_failed:(preclaim|guest|network|management|streaming|agent_restart|legacy_state_uncertain|unknown)$') { return $state }
-    if ($state -in @('queued','cloning','booting','unclaimed','claim_in_progress','guest_setup','network_setup','management_handoff','streaming_setup','stream_validation','deprovisioning','quarantined','purged')) { return $state }
+    if ($state -match '^setup_failed:(preclaim|guest|network|management|gaming_gpu|streaming|agent_restart|legacy_state_uncertain|unknown)$') { return $state }
+    if ($state -in @('queued','cloning','booting','unclaimed','claim_in_progress','guest_setup','network_setup','management_handoff','gaming_gpu_validation','streaming_setup','stream_validation','deprovisioning','quarantined','purged')) { return $state }
     if ($state -eq 'awaiting_claim') {
         $claimHash = [string](Get-EpicVMProperty -Object $Record -Name 'claimHash' -Default '')
         $claimUsed = [bool](Get-EpicVMProperty -Object $Record -Name 'claimConsumed' -Default (Get-EpicVMProperty -Object $Record -Name 'claimUsed' -Default $false))
@@ -116,6 +123,7 @@ function ConvertTo-EpicVMCanonicalProvisioningState {
             (Test-EpicVMProvisioningEvidence -Record $Record -Stage 'guest_setup') -and
             (Test-EpicVMProvisioningEvidence -Record $Record -Stage 'network_setup') -and
             (Test-EpicVMProvisioningEvidence -Record $Record -Stage 'management_handoff') -and
+            (([string](Get-EpicVMProperty -Object $Record -Name 'profile' -Default 'standard') -ne 'gaming') -or (Test-EpicVMProvisioningEvidence -Record $Record -Stage 'gaming_gpu')) -and
             (Test-EpicVMProvisioningEvidence -Record $Record -Stage 'streaming_setup') -and
             (Test-EpicVMProvisioningEvidence -Record $Record -Stage 'stream_validation')) { return 'ready' }
         return 'setup_failed:legacy_state_uncertain'
@@ -130,7 +138,8 @@ function Copy-EpicVMProvisioningJobFields {
             'tailnetIp','tailnetDeviceId','managementTransport','managementReadyAt',
             'consoleRoutePrefix','consoleVerifiedAt','streamValidationVerified','quarantineUntil',
             'errorCode','errorMessage','claimHash','claimExpires','claimUsed','claimConsumed',
-            'operationId','completedStages','failureStage','failureDetailCode','guestSetupVerified','retryCount','lastAttemptCode')) {
+            'operationId','completedStages','failureStage','failureDetailCode','guestSetupVerified','retryCount','lastAttemptCode',
+            'cpuCount','memoryBytes','diskSizeBytes','gpuPartitionPercent','gpuDeviceIdentity','gamingGpuValidated','gamingValidationAt')) {
         $value = Get-EpicVMProperty -Object $Source -Name $name -Default $null
         if ($null -ne $value -or $Target.PSObject.Properties.Name -contains $name) { $Target.$name = $value }
     }
@@ -227,6 +236,62 @@ function Get-EpicVMProvisioningProfile {
     }
 }
 
+function ConvertTo-EpicVMProvisioningInt64 {
+    param(
+        [AllowNull()] [object] $Value,
+        [Parameter(Mandatory)] [string] $FieldName
+    )
+    try {
+        return [long][System.Convert]::ToInt64($Value)
+    }
+    catch {
+        throw (New-EpicVMProvisioningError -Code 'invalid_gaming_spec' -Message ("The Gaming field '{0}' is invalid." -f $FieldName) -Status 400)
+    }
+}
+
+function Get-EpicVMGamingProvisioningSpec {
+    param(
+        [Parameter(Mandatory)] [object] $Config,
+        [Parameter(Mandatory)] [object] $Request
+    )
+
+    $profile = Get-EpicVMProvisioningProfile -Profile 'gaming'
+    $cpuRaw = Get-EpicVMProperty -Object $Request -Name 'cpuCount' -Default $profile.cpuCount
+    $memoryRaw = Get-EpicVMProperty -Object $Request -Name 'memoryBytes' -Default $null
+    if ($null -eq $memoryRaw) {
+        $memoryGiB = Get-EpicVMProperty -Object $Request -Name 'memoryGiB' -Default $null
+        if ($null -ne $memoryGiB) { $memoryRaw = [decimal]$memoryGiB * 1GB } else { $memoryRaw = $profile.memoryBytes }
+    }
+    $diskRaw = Get-EpicVMProperty -Object $Request -Name 'diskSizeBytes' -Default $null
+    if ($null -eq $diskRaw) {
+        $diskGiB = Get-EpicVMProperty -Object $Request -Name 'diskSizeGiB' -Default $null
+        if ($null -ne $diskGiB) { $diskRaw = [decimal]$diskGiB * 1GB } else { $diskRaw = $profile.diskSizeBytes }
+    }
+    $percentRaw = Get-EpicVMProperty -Object $Request -Name 'gpuPartitionPercent' -Default (Get-EpicVMProperty -Object $Request -Name 'GpuPartitionPercent' -Default (Get-EpicVMProperty -Object $Config -Name 'GamingGpuPartitionPercent' -Default 50))
+    $cpu = ConvertTo-EpicVMProvisioningInt64 -Value $cpuRaw -FieldName 'cpuCount'
+    $memory = ConvertTo-EpicVMProvisioningInt64 -Value $memoryRaw -FieldName 'memoryBytes'
+    $disk = ConvertTo-EpicVMProvisioningInt64 -Value $diskRaw -FieldName 'diskSizeBytes'
+    $percent = ConvertTo-EpicVMProvisioningInt64 -Value $percentRaw -FieldName 'gpuPartitionPercent'
+    $minCpu = ConvertTo-EpicVMProvisioningInt64 -Value (Get-EpicVMProperty -Object $Config -Name 'MinCpuCount' -Default 1) -FieldName 'MinCpuCount'
+    $maxCpu = ConvertTo-EpicVMProvisioningInt64 -Value (Get-EpicVMProperty -Object $Config -Name 'MaxCpuCount' -Default 16) -FieldName 'MaxCpuCount'
+    $minMemory = ConvertTo-EpicVMProvisioningInt64 -Value (Get-EpicVMProperty -Object $Config -Name 'MinMemoryBytes' -Default 536870912) -FieldName 'MinMemoryBytes'
+    $maxMemory = ConvertTo-EpicVMProvisioningInt64 -Value (Get-EpicVMProperty -Object $Config -Name 'MaxMemoryBytes' -Default 17179869184) -FieldName 'MaxMemoryBytes'
+    $maxDisk = ConvertTo-EpicVMProvisioningInt64 -Value (Get-EpicVMProperty -Object $Config -Name 'MaxDiskSizeBytes' -Default 549755813888) -FieldName 'MaxDiskSizeBytes'
+    if ($cpu -lt $minCpu -or $cpu -gt $maxCpu) { throw (New-EpicVMProvisioningError -Code 'invalid_gaming_spec' -Message 'Gaming CPU count is outside the configured limits.' -Status 400) }
+    if ($memory -lt $minMemory -or $memory -gt $maxMemory) { throw (New-EpicVMProvisioningError -Code 'invalid_gaming_spec' -Message 'Gaming memory is outside the configured limits.' -Status 400) }
+    if ($disk -le 0 -or $disk -gt $maxDisk) { throw (New-EpicVMProvisioningError -Code 'invalid_gaming_spec' -Message 'Gaming storage is outside the configured limits.' -Status 400) }
+    if ($percent -lt 1 -or $percent -gt 100) { throw (New-EpicVMProvisioningError -Code 'invalid_gaming_spec' -Message 'Gaming GPU-P partition percentage must be between 1 and 100.' -Status 400) }
+    $identity = [string](Get-EpicVMProperty -Object $Request -Name 'gpuDeviceIdentity' -Default (Get-EpicVMProperty -Object $Config -Name 'GamingGpuDeviceIdentity' -Default 'VEN_1002&DEV_73BF'))
+    if ([string]::IsNullOrWhiteSpace($identity)) { throw (New-EpicVMProvisioningError -Code 'invalid_gaming_spec' -Message 'The Gaming GPU device identity is not configured.' -Status 400) }
+    return [ordered]@{
+        cpuCount = $cpu
+        memoryBytes = $memory
+        diskSizeBytes = $disk
+        gpuPartitionPercent = $percent
+        gpuDeviceIdentity = $identity
+    }
+}
+
 function ConvertTo-EpicVMRedactedJob {
     param([Parameter(Mandatory)] [object] $Job)
     $safe = [ordered]@{}
@@ -236,7 +301,9 @@ function ConvertTo-EpicVMRedactedJob {
         'tailnetDeviceId', 'managementTransport', 'managementReadyAt',
         'consoleRoutePrefix', 'consoleVerifiedAt', 'streamValidationVerified',
         'quarantineUntil', 'operationId', 'claimConsumed', 'completedStages',
-        'failureStage', 'failureDetailCode', 'guestSetupVerified', 'retryCount', 'lastAttemptCode'
+        'failureStage', 'failureDetailCode', 'guestSetupVerified', 'retryCount', 'lastAttemptCode',
+        'cpuCount', 'memoryBytes', 'diskSizeBytes', 'gpuPartitionPercent', 'gpuDeviceIdentity',
+        'gamingGpuValidated', 'gamingValidationAt'
     )) {
         $value = Get-EpicVMProperty -Object $Job -Name $name -Default $null
         if ($null -ne $value) { $safe[$name] = $value }
@@ -279,6 +346,13 @@ function New-EpicVMProvisioningJobObject {
         guestSetupVerified = $false
         retryCount = 0
         lastAttemptCode = $null
+        cpuCount = $null
+        memoryBytes = $null
+        diskSizeBytes = $null
+        gpuPartitionPercent = $null
+        gpuDeviceIdentity = $null
+        gamingGpuValidated = $false
+        gamingValidationAt = $null
         # Only the one-way verifier is persisted. The claim itself never is.
         claimHash = $null
         claimExpires = $null
@@ -318,7 +392,9 @@ function New-EpicVMProvisioningStore {
                 'consoleRoutePrefix', 'consoleVerifiedAt', 'streamValidationVerified',
                 'quarantineUntil', 'errorCode', 'errorMessage',
                 'claimHash', 'claimExpires', 'claimUsed', 'claimConsumed', 'operationId',
-                'completedStages', 'failureStage', 'guestSetupVerified', 'retryCount', 'lastAttemptCode'
+                'completedStages', 'failureStage', 'guestSetupVerified', 'retryCount', 'lastAttemptCode',
+                'cpuCount','memoryBytes','diskSizeBytes','gpuPartitionPercent','gpuDeviceIdentity',
+                'gamingGpuValidated','gamingValidationAt'
             )) {
                 $job.$name = Get-EpicVMProperty -Object $record -Name $name -Default $job.$name
             }
@@ -633,6 +709,13 @@ function Invoke-EpicVMProvisioningRecovery {
                     $job.errorMessage = 'Readiness verification is required after agent restart.'
                 }
             }
+            if ($job.state -eq 'ready') {
+                $job.failureStage = $null
+                $job.failureDetailCode = $null
+                $job.lastAttemptCode = $null
+                $job.errorCode = $null
+                $job.errorMessage = $null
+            }
             $job.updatedAt = [DateTime]::UtcNow.ToString('o')
             $changed = $true
         }
@@ -661,6 +744,50 @@ function New-EpicVMProvisioningJob {
         throw (New-EpicVMProvisioningError -Code 'gaming_not_validated' -Message 'Gaming provisioning remains disabled until a GPU-P pilot passes.' -Status 409)
     }
 
+    if ($profile.profile -eq 'gaming') {
+        $gamingSpec = Get-EpicVMGamingProvisioningSpec -Config $State.Config -Request $Request
+        $createGaming = {
+            $freshStore = New-EpicVMProvisioningStore -Config $State.Config
+            $existingJob = @($freshStore.Jobs.Values | Where-Object {
+                [string]$_.name -ceq $name -and -not (Test-EpicVMProvisioningJobRetryable -Job $_)
+            }) | Select-Object -First 1
+            if ($null -ne $existingJob) { throw (New-EpicVMProvisioningError -Code 'conflict' -Message 'The requested VM name already exists.' -Status 409) }
+            $existing = @(& $State.Provider.GetVMs | Where-Object {
+                [string](Get-EpicVMProperty -Object $_ -Name 'name' -Default '') -ceq $name
+            })
+            if ($existing.Count -gt 0) { throw (New-EpicVMProvisioningError -Code 'conflict' -Message 'The requested VM name already exists.' -Status 409) }
+
+            $activeStates = @('queued','cloning','booting','unclaimed','claim_in_progress','guest_setup','network_setup','management_handoff','gaming_gpu_validation','streaming_setup','stream_validation')
+            $activeJobs = @($freshStore.Jobs.Values | Where-Object {
+                [string](Get-EpicVMProperty -Object $_ -Name 'profile' -Default 'standard') -ieq 'gaming' -and
+                $activeStates -contains [string](Get-EpicVMProperty -Object $_ -Name 'state' -Default '')
+            })
+            if ($activeJobs.Count -gt 0) {
+                throw (New-EpicVMProvisioningError -Code 'gaming_capacity' -Message 'A Gaming VM is already being provisioned or is awaiting console completion.' -Status 409)
+            }
+            $gamingNames = @('testre') + @((Get-EpicVMProperty -Object $State.Config -Name 'GamingVMNames' -Default @()))
+            $running = @(& $State.Provider.GetVMs | Where-Object {
+                $candidateName = [string](Get-EpicVMProperty -Object $_ -Name 'name' -Default '')
+                $candidateState = [string](Get-EpicVMProperty -Object $_ -Name 'state' -Default '')
+                $candidateProfile = [string](Get-EpicVMProperty -Object $_ -Name 'profile' -Default '')
+                ($candidateState -ieq 'Running') -and (($gamingNames -contains $candidateName) -or $candidateProfile -ieq 'gaming')
+            })
+            if ($running.Count -gt 0) { throw (New-EpicVMProvisioningError -Code 'gaming_capacity' -Message 'Only one Gaming VM may be running.' -Status 409) }
+
+            $job = New-EpicVMProvisioningJobObject -Id ([guid]::NewGuid().ToString('N')) -Name $name -Profile $profile.profile
+            $job.cpuCount = [long]$gamingSpec.cpuCount
+            $job.memoryBytes = [long]$gamingSpec.memoryBytes
+            $job.diskSizeBytes = [long]$gamingSpec.diskSizeBytes
+            $job.gpuPartitionPercent = [int]$gamingSpec.gpuPartitionPercent
+            $job.gpuDeviceIdentity = [string]$gamingSpec.gpuDeviceIdentity
+            $freshStore.Jobs[$job.id] = $job
+            Save-EpicVMProvisioningStore -Store $freshStore
+            $State.Provisioning = $freshStore
+            return $job
+        }
+        return Invoke-EpicVMProvisioningStoreLocked -Action $createGaming
+    }
+
     $existingJob = @($State.Provisioning.Jobs.Values | Where-Object {
         [string]$_.name -ceq $name -and -not (Test-EpicVMProvisioningJobRetryable -Job $_)
     }) | Select-Object -First 1
@@ -670,20 +797,78 @@ function New-EpicVMProvisioningJob {
     })
     if ($existing.Count -gt 0) { throw (New-EpicVMProvisioningError -Code 'conflict' -Message 'The requested VM name already exists.' -Status 409) }
 
-    if ($profile.profile -eq 'gaming') {
-        $gamingNames = @('testre') + @((Get-EpicVMProperty -Object $State.Config -Name 'GamingVMNames' -Default @()))
-        $running = @(& $State.Provider.GetVMs | Where-Object {
-            $candidateName = [string](Get-EpicVMProperty -Object $_ -Name 'name' -Default '')
-            $candidateState = [string](Get-EpicVMProperty -Object $_ -Name 'state' -Default '')
-            ($gamingNames -contains $candidateName) -and $candidateState -ieq 'Running'
-        })
-        if ($running.Count -gt 0) { throw (New-EpicVMProvisioningError -Code 'gaming_capacity' -Message 'Only one Gaming VM may be running.' -Status 409) }
-    }
-
     $job = New-EpicVMProvisioningJobObject -Id ([guid]::NewGuid().ToString('N')) -Name $name -Profile $profile.profile
     $State.Provisioning.Jobs[$job.id] = $job
     Save-EpicVMProvisioningStore -Store $State.Provisioning
     return $job
+}
+
+function Invoke-EpicVMProvisioningGamingValidation {
+    param(
+        [Parameter(Mandatory)] [object] $State,
+        [Parameter(Mandatory)] [object] $Job,
+        [Parameter(Mandatory)] [string] $Username,
+        [Parameter(Mandatory)] [string] $Password
+    )
+
+    if ([string](Get-EpicVMProperty -Object $Job -Name 'profile' -Default 'standard') -ine 'gaming') {
+        return $Job
+    }
+
+    $validate = Get-EpicVMProperty -Object $State.Provider -Name 'ValidateGamingGuest' -Default $null
+    if ($null -eq $validate) {
+        throw (New-EpicVMProvisioningError -Code 'gaming_guest_validation_unavailable' -Message 'The Gaming GPU guest validation gate is unavailable.' -Status 503)
+    }
+
+    $Job.state = 'gaming_gpu_validation'
+    $Job.failureStage = $null
+    $Job.failureDetailCode = $null
+    $Job.errorCode = $null
+    $Job.errorMessage = $null
+    $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
+    Save-EpicVMProvisioningStore -Store $State.Provisioning
+
+    try {
+        $result = & $validate $Job.name $Username $Password ([string](Get-EpicVMProperty -Object $Job -Name 'tailnetIp' -Default ''))
+        if ($null -eq $result -or -not [bool](Get-EpicVMProperty -Object $result -Name 'ok' -Default $false)) {
+            $detail = [string](Get-EpicVMProperty -Object $result -Name 'failureDetailCode' -Default 'GAMING_GPU_DEVICE_ERROR')
+            if ($script:EpicVMProvisioningFailureDetailCodes -notcontains $detail) { $detail = 'GAMING_GPU_DEVICE_ERROR' }
+            throw (New-EpicVMProvisioningError -Code 'gaming_gpu_validation_failed' -Message 'The Gaming guest GPU validation gate failed.' -Status 422 -DetailCode $detail)
+        }
+
+        $Job.gamingGpuValidated = $true
+        $Job.gamingValidationAt = [DateTime]::UtcNow.ToString('o')
+        $Job.completedStages = @(Get-EpicVMProvisioningCompletedStages -Value (@($Job.completedStages) + @('gaming_gpu')))
+        $Job.state = 'streaming_setup'
+        $Job.failureStage = $null
+        $Job.failureDetailCode = $null
+        $Job.errorCode = $null
+        $Job.errorMessage = $null
+        $Job.lastAttemptCode = $null
+        $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
+        Save-EpicVMProvisioningStore -Store $State.Provisioning
+        return $Job
+    }
+    catch {
+        $code = [string](Get-EpicVMProperty -Object $_.Exception -Name 'ErrorCode' -Default 'gaming_guest_validation_failed')
+        if ($code -notin @('gaming_guest_validation_unavailable','gaming_guest_validation_failed','gaming_gpu_validation_failed','gaming_encoder_unavailable','gaming_webgl_unavailable')) {
+            $code = 'gaming_guest_validation_failed'
+        }
+        $Job.state = Get-EpicVMProvisioningFailureState -Code $code
+        $Job.failureStage = 'gaming_gpu'
+        $Job.errorCode = $code
+        $detail = [string](Get-EpicVMProperty -Object $_.Exception -Name 'FailureDetailCode' -Default '')
+        if ($script:EpicVMProvisioningFailureDetailCodes -contains $detail) { $Job.failureDetailCode = $detail } else { $Job.failureDetailCode = $null }
+        $Job.lastAttemptCode = $code
+        $Job.errorMessage = 'Gaming GPU validation stopped safely; the owned VM was retained for diagnosis.'
+        $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
+        Save-EpicVMProvisioningStore -Store $State.Provisioning
+        throw
+    }
+    finally {
+        $Username = $null
+        $Password = $null
+    }
 }
 
 function Start-EpicVMProvisioningJob {
@@ -700,11 +885,20 @@ function Start-EpicVMProvisioningJob {
         $manifestPath = [string](Get-EpicVMProperty -Object $State.Config -Name 'TemplateManifestPath' -Default '')
         $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
         $Job.templateVersion = [string]$manifest.templateVersion
-        $vm = & $State.Provider.CreateVM ([ordered]@{
-            name = $Job.name; profile = $profile.profile; cpuCount = $profile.cpuCount
-            memoryBytes = $profile.memoryBytes; diskSizeBytes = $profile.diskSizeBytes
+        $cpuCount = [long](Get-EpicVMProperty -Object $Job -Name 'cpuCount' -Default $profile.cpuCount)
+        $memoryBytes = [long](Get-EpicVMProperty -Object $Job -Name 'memoryBytes' -Default $profile.memoryBytes)
+        $diskSizeBytes = [long](Get-EpicVMProperty -Object $Job -Name 'diskSizeBytes' -Default $profile.diskSizeBytes)
+        $createRequest = [ordered]@{
+            name = $Job.name; profile = $profile.profile; cpuCount = $cpuCount
+            memoryBytes = $memoryBytes; diskSizeBytes = $diskSizeBytes
             fullCopy = $true; templateRequired = $true; templateDiskPath = [string]$manifest.imagePath
-        })
+        }
+        if ($profile.profile -eq 'gaming') {
+            $createRequest.gpu = $true
+            $createRequest.gpuPartitionPercent = [int](Get-EpicVMProperty -Object $Job -Name 'gpuPartitionPercent' -Default 50)
+            $createRequest.gpuDeviceIdentity = [string](Get-EpicVMProperty -Object $Job -Name 'gpuDeviceIdentity' -Default (Get-EpicVMProperty -Object $State.Config -Name 'GamingGpuDeviceIdentity' -Default 'VEN_1002&DEV_73BF'))
+        }
+        $vm = & $State.Provider.CreateVM $createRequest
         $Job.vmId = Get-EpicVMJobImmutableVmId -State $State -Job ([pscustomobject]@{ name = $Job.name; vmId = [string](Get-EpicVMProperty -Object $vm -Name 'id' -Default (Get-EpicVMProperty -Object $vm -Name 'Id' -Default '')) })
         $Job.state = 'booting'
         $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
@@ -840,11 +1034,16 @@ function Invoke-EpicVMProvisioningClaim {
         # request credentials only long enough to build the isolated console on
         # kvm2, then calls console-complete without any credential material.
         $Job.completedStages = @(Get-EpicVMProvisioningCompletedStages -Value (@($Job.completedStages) + @('network_setup','management_handoff')))
-        $Job.state = 'streaming_setup'
-        $Job.errorCode = $null
-        $Job.errorMessage = $null
-        $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
-        Save-EpicVMProvisioningStore -Store $State.Provisioning
+        if ([string]$Job.profile -ieq 'gaming') {
+            Invoke-EpicVMProvisioningGamingValidation -State $State -Job $Job -Username $username -Password $password | Out-Null
+        }
+        else {
+            $Job.state = 'streaming_setup'
+            $Job.errorCode = $null
+            $Job.errorMessage = $null
+            $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
+            Save-EpicVMProvisioningStore -Store $State.Provisioning
+        }
     }
     catch {
         # Guest mutation may already have happened. Retain the exact owned VM
@@ -852,7 +1051,7 @@ function Invoke-EpicVMProvisioningClaim {
         $code = [string](Get-EpicVMProperty -Object $_.Exception -Name 'ErrorCode' -Default 'guest_configuration_failed')
         if ($code -eq 'guest_configuration_failed') { $code = if ($Job.state -eq 'guest_setup') { 'guest_account_failed' } else { 'network_setup_failed' } }
         $Job.state = Get-EpicVMProvisioningFailureState -Code $code
-        $Job.failureStage = switch -Regex ($Job.state) { 'guest' { 'guest' }; 'network' { 'network' }; 'management' { 'management_handoff' }; 'streaming' { 'streaming' }; default { 'unknown' } }
+        $Job.failureStage = switch -Regex ($Job.state) { 'guest' { 'guest' }; 'network' { 'network' }; 'management' { 'management_handoff' }; 'gaming_gpu' { 'gaming_gpu' }; 'streaming' { 'streaming' }; default { 'unknown' } }
         $Job.errorCode = $code
         $detail = [string](Get-EpicVMProperty -Object $_.Exception -Name 'FailureDetailCode' -Default '')
         if ($script:EpicVMProvisioningFailureDetailCodes -contains $detail) { $Job.failureDetailCode = $detail } else { $Job.failureDetailCode = $null }
@@ -960,21 +1159,26 @@ function Invoke-EpicVMProvisioningGuestRecovery {
         $Job.managementTransport = $managementTransport
         $Job.managementReadyAt = [DateTime]::UtcNow.ToString('o')
         $Job.completedStages = @(Get-EpicVMProvisioningCompletedStages -Value (@($Job.completedStages) + @('network_setup','management_handoff')))
-        $Job.state = 'streaming_setup'
-        $Job.errorCode = $null
-        $Job.errorMessage = $null
-        $Job.failureStage = $null
-        $Job.failureDetailCode = $null
-        $Job.lastAttemptCode = $null
-        $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
-        Save-EpicVMProvisioningStore -Store $State.Provisioning
+        if ([string]$Job.profile -ieq 'gaming') {
+            Invoke-EpicVMProvisioningGamingValidation -State $State -Job $Job -Username $username -Password $password | Out-Null
+        }
+        else {
+            $Job.state = 'streaming_setup'
+            $Job.errorCode = $null
+            $Job.errorMessage = $null
+            $Job.failureStage = $null
+            $Job.failureDetailCode = $null
+            $Job.lastAttemptCode = $null
+            $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
+            Save-EpicVMProvisioningStore -Store $State.Provisioning
+        }
         return $Job
     }
     catch {
         $code = [string](Get-EpicVMProperty -Object $_.Exception -Name 'ErrorCode' -Default 'guest_recovery_failed')
         if ($code -eq 'guest_recovery_failed') { $code = if ($Job.state -eq 'guest_setup') { 'guest_account_failed' } else { 'network_setup_failed' } }
         $Job.state = Get-EpicVMProvisioningFailureState -Code $code
-        $Job.failureStage = switch -Regex ($Job.state) { 'guest' { 'guest' }; 'network' { 'network' }; 'management' { 'management_handoff' }; default { 'unknown' } }
+        $Job.failureStage = switch -Regex ($Job.state) { 'guest' { 'guest' }; 'network' { 'network' }; 'management' { 'management_handoff' }; 'gaming_gpu' { 'gaming_gpu' }; default { 'unknown' } }
         $Job.errorCode = $code
         $detail = [string](Get-EpicVMProperty -Object $_.Exception -Name 'FailureDetailCode' -Default '')
         if ($script:EpicVMProvisioningFailureDetailCodes -contains $detail) { $Job.failureDetailCode = $detail } else { $Job.failureDetailCode = $null }
@@ -1079,14 +1283,19 @@ function Invoke-EpicVMProvisioningGuestRecovery {
             $Job.managementTransport = 'tailscale_winrm'
             $Job.managementReadyAt = [DateTime]::UtcNow.ToString('o')
             $Job.completedStages = @(Get-EpicVMProvisioningCompletedStages -Value (@($Job.completedStages) + @('network_setup','management_handoff')))
-            $Job.state = 'streaming_setup'
-            $Job.failureStage = $null
-            $Job.failureDetailCode = $null
-            $Job.errorCode = $null
-            $Job.errorMessage = $null
-            $Job.lastAttemptCode = $null
-            $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
-            Save-EpicVMProvisioningStore -Store $State.Provisioning
+            if ([string]$Job.profile -ieq 'gaming') {
+                Invoke-EpicVMProvisioningGamingValidation -State $State -Job $Job -Username $username -Password $password | Out-Null
+            }
+            else {
+                $Job.state = 'streaming_setup'
+                $Job.failureStage = $null
+                $Job.failureDetailCode = $null
+                $Job.errorCode = $null
+                $Job.errorMessage = $null
+                $Job.lastAttemptCode = $null
+                $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
+                Save-EpicVMProvisioningStore -Store $State.Provisioning
+            }
             return $Job
         }
         catch {
@@ -1094,7 +1303,7 @@ function Invoke-EpicVMProvisioningGuestRecovery {
                 $code = [string](Get-EpicVMProperty -Object $_.Exception -Name 'ErrorCode' -Default 'network_recovery_failed')
                 if ([string]::IsNullOrWhiteSpace($code) -or $code -in @('network_recovery_not_allowed','network_recovery_vm_missing')) { $code = 'network_recovery_failed' }
                 $Job.state = Get-EpicVMProvisioningFailureState -Code $code
-                $Job.failureStage = switch -Regex ($Job.state) { 'network' { 'network' }; 'management' { 'management_handoff' }; default { 'network' } }
+                $Job.failureStage = switch -Regex ($Job.state) { 'network' { 'network' }; 'management' { 'management_handoff' }; 'gaming_gpu' { 'gaming_gpu' }; default { 'network' } }
                 $Job.errorCode = $code
                 $Job.failureDetailCode = $null
                 $Job.lastAttemptCode = $code
@@ -1307,6 +1516,9 @@ function Complete-EpicVMProvisioningConsole {
     $Job.streamValidationVerified = $true
     $Job.completedStages = @(Get-EpicVMProvisioningCompletedStages -Value (@($Job.completedStages) + @('streaming_setup','stream_validation')))
     $Job.state = 'ready'
+    $Job.failureStage = $null
+    $Job.failureDetailCode = $null
+    $Job.lastAttemptCode = $null
     $Job.errorCode = $null
     $Job.errorMessage = $null
     $Job.updatedAt = [DateTime]::UtcNow.ToString('o')

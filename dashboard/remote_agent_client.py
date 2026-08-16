@@ -181,13 +181,47 @@ class RemoteAgentClient:
         )
         return self._result(result)
 
-    def provision(self, name: str, profile: str = "standard", *, idempotency_key: str | None = None) -> dict[str, Any]:
+    def provision(
+        self,
+        name: str,
+        profile: str = "standard",
+        spec: Mapping[str, Any] | None = None,
+        *,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
         """Create a validated full-copy VM provisioning job."""
+        payload: dict[str, Any] = {"name": str(name), "profile": str(profile)}
+        if spec:
+            payload.update(dict(spec))
+        # The method arguments remain authoritative even when a caller passes
+        # a reusable spec dictionary containing stale identity fields.
+        payload["name"] = str(name)
+        payload["profile"] = str(profile)
         result = self._request(
-            "POST", "/v1/provisioning-jobs", {"name": str(name), "profile": str(profile)},
+            "POST", "/v1/provisioning-jobs", payload,
             idempotency_key=idempotency_key or uuid.uuid4().hex, timeout=self.operation_timeout,
         )
         return result if isinstance(result, dict) else {"ok": True, "job": result}
+
+    def set_gaming_gpu_percent(
+        self,
+        name: str,
+        percent: int,
+        *,
+        idempotency_key: str | None = None,
+    ) -> RemoteOperationResult:
+        percent = int(percent)
+        if percent < 1 or percent > 100:
+            raise ValueError("Gaming GPU-P partition percent must be between 1 and 100")
+        safe_name = quote(str(name), safe="")
+        result = self._request(
+            "POST",
+            f"/v1/vms/{safe_name}/gpu-partition",
+            {"percent": percent},
+            idempotency_key=idempotency_key or uuid.uuid4().hex,
+            timeout=self.operation_timeout,
+        )
+        return self._result(result)
 
     def provisioning_status(self, job_id: str) -> dict[str, Any]:
         safe_id = quote(str(job_id), safe="")
@@ -313,9 +347,28 @@ class RemoteAgentHost:
     def id(self) -> str:
         return self.host_id
 
-    def provision(self, name: str, profile: str = "standard", *, idempotency_key: str | None = None) -> dict[str, Any]:
+    def provision(
+        self,
+        name: str,
+        profile: str = "standard",
+        spec: Mapping[str, Any] | None = None,
+        *,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
         try:
-            return self.client.provision(name, profile, idempotency_key=idempotency_key)
+            return self.client.provision(name, profile, spec=spec, idempotency_key=idempotency_key)
+        except RemoteAgentError as exc:
+            raise self._host_error(exc) from exc
+
+    def set_gaming_gpu_percent(
+        self,
+        name: str,
+        percent: int,
+        *,
+        idempotency_key: str | None = None,
+    ) -> RemoteOperationResult:
+        try:
+            return self.client.set_gaming_gpu_percent(name, percent, idempotency_key=idempotency_key)
         except RemoteAgentError as exc:
             raise self._host_error(exc) from exc
 

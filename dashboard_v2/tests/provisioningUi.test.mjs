@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { canClaimProvisioningJob, canOpenInventoryVm, canOpenProvisionedVm, canRetryProvisioningConsole, deprovisioningPayload, provisioningClaimPayload, provisioningConsoleRetryPayload, provisioningCreatePayload, provisioningFailureReason, provisioningProgress } from '../src/lib/provisioningUi.js'
+import { canClaimProvisioningJob, canOpenInventoryVm, canOpenProvisionedVm, canRetryProvisioningConsole, deprovisioningPayload, gamingPartitionPayload, provisioningClaimPayload, provisioningConsoleRetryPayload, provisioningCreatePayload, provisioningFailureReason, provisioningProgress } from '../src/lib/provisioningUi.js'
 
 test('claim and open gates are state-specific', () => {
   assert.equal(canClaimProvisioningJob({ state:'unclaimed' }), true)
@@ -35,6 +35,17 @@ test('claim payload keeps the token in the request boundary and teardown require
   assert.deepEqual(provisioningClaimPayload({ hostId:'epic-pc', username:'operator', password:'transient-password', claimToken:'one-use', sunshineUsername:'ignored', sunshinePassword:'ignored' }), {
     host_id:'epic-pc', username:'operator', password:'transient-password', claimToken:'one-use'
   })
+})
+
+test('Gaming create payload carries initialization resources but standard payload stays unchanged', () => {
+  assert.deepEqual(provisioningCreatePayload({ hostId:'epic-pc', name:' gamer ', profile:'gaming', mode:'claim', cpuCount:'8', memoryGiB:'16', diskSizeGiB:'256', gpuPartitionPercent:'65' }), {
+    host_id:'epic-pc', name:'gamer', profile:'gaming', mode:'claim', cpuCount:8, memoryGiB:16, diskSizeGiB:256, gpuPartitionPercent:65
+  })
+  assert.deepEqual(provisioningCreatePayload({ hostId:'epic-pc', name:'standard', profile:'standard', cpuCount:16, memoryGiB:16, diskSizeGiB:512, gpuPartitionPercent:90 }), {
+    host_id:'epic-pc', name:'standard', profile:'standard', mode:'automatic'
+  })
+  assert.deepEqual(gamingPartitionPayload({ hostId:'epic-pc', percent:'72' }), { host_id:'epic-pc', percent:72 })
+  assert.deepEqual(gamingPartitionPayload({ hostId:'epic-pc', percent:999 }), { host_id:'epic-pc', percent:100 })
 })
 
 test('safe provisioning failure codes explain the failed trust boundary', () => {

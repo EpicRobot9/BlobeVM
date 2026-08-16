@@ -461,7 +461,9 @@ function Invoke-EpicVMManagementTransportOnce {
         'EPICVM_SUNSHINE_FIREWALL_FAILED',
         'EPICVM_SUNSHINE_SERVICE_RESTART_FAILED',
         'EPICVM_SUNSHINE_LISTENER_FAILED',
-        'EPICVM_SUNSHINE_VERIFICATION_FAILED'
+        'EPICVM_SUNSHINE_VERIFICATION_FAILED',
+        'EPICVM_GAMING_GPU_VALIDATION_FAILED',
+        'EPICVM_GAMING_ENCODER_UNAVAILABLE'
     )
     $transportScript={
         param($Target,$GuestCredential,$GuestScript,$GuestArguments,$TargetPort,$Ssl,$SafeMarkers)
@@ -724,6 +726,12 @@ function Get-EpicVMGuestProviderFailure {
     $code = [string](Get-EpicVMHyperVValue -Object $exception -Name 'ErrorCode' -Default '')
     $detail = [string](Get-EpicVMHyperVValue -Object $exception -Name 'FailureDetailCode' -Default '')
     if ($script:EpicVMGuestFailureDetailCodes -notcontains $detail) { $detail = $null }
+    if ($message -match '(?i)EPICVM_GAMING_ENCODER_UNAVAILABLE') {
+        return [pscustomobject]@{ Code = 'gaming_encoder_unavailable'; DetailCode = 'GAMING_GPU_ENCODER' }
+    }
+    if ($message -match '(?i)EPICVM_GAMING_GPU_VALIDATION_FAILED') {
+        return [pscustomobject]@{ Code = 'gaming_gpu_validation_failed'; DetailCode = 'GAMING_GPU_DEVICE_ERROR' }
+    }
 
     $marker = [regex]::Match($message, '(?i)\bguest_account_failed\|([a-z_]+)\b')
     if ($marker.Success -and $script:EpicVMGuestFailureDetailCodes -contains $marker.Groups[1].Value.ToLowerInvariant()) {

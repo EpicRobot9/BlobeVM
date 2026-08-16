@@ -52,6 +52,10 @@ function Get-EpicVMDefaultConfig {
         TemplateManifestPath = 'E:\EpicVM\templates\win11-25h2\manifest.json'
         ProvisioningStatePath = 'E:\EpicVM\provisioning-jobs.json'
         GamingVMNames = @('testre')
+        GamingGpuDeviceIdentity = 'VEN_1002&DEV_73BF'
+        GamingGpuPartitionPercent = 50
+        GamingDriverStoreRoot = 'C:\Windows\System32\DriverStore\FileRepository'
+        GamingDriverSourcePaths = @()
         BootstrapUser = 'EpicVMBootstrap'
         BootstrapCredentialPath = 'C:\ProgramData\EpicVM\agent\bootstrap.dpapi'
         TailscaleOAuthClientId = ''
@@ -571,6 +575,26 @@ function Invoke-EpicVMApiRequest {
                 $result = Invoke-EpicVMProviderAction -Provider $State.Provider -Action $segments[3] -Name $name
                 return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok = $true; vm = $result })
             }
+            if ($Method -eq 'POST' -and $segments.Count -eq 4 -and $segments[3] -eq 'gpu-partition') {
+                $request = Get-EpicVMRequestBody -Body $Body
+                $rawPercent = Get-EpicVMProperty -Object $request -Name 'percent' -Default $null
+                if ($null -eq $rawPercent) {
+                    return ConvertTo-EpicVMJsonResponse -StatusCode 400 -Body (New-EpicVMApiError -Code 'invalid_input' -Message 'The GPU-P partition percentage is required.')
+                }
+                try { $percent = [int][System.Convert]::ToInt32($rawPercent) }
+                catch {
+                    return ConvertTo-EpicVMJsonResponse -StatusCode 400 -Body (New-EpicVMApiError -Code 'invalid_input' -Message 'The GPU-P partition percentage must be an integer between 1 and 100.')
+                }
+                if ($percent -lt 1 -or $percent -gt 100) {
+                    return ConvertTo-EpicVMJsonResponse -StatusCode 400 -Body (New-EpicVMApiError -Code 'invalid_input' -Message 'The GPU-P partition percentage must be between 1 and 100.')
+                }
+                $setter = Get-EpicVMProperty -Object $State.Provider -Name 'SetGamingGpuPercent' -Default $null
+                if ($null -eq $setter) {
+                    return ConvertTo-EpicVMJsonResponse -StatusCode 409 -Body (New-EpicVMApiError -Code 'gaming_unavailable' -Message 'Gaming GPU-P controls are unavailable for this provider.')
+                }
+                $result = & $setter $name $percent
+                return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok = $true; vm = $result })
+            }
             # Keep the first draft's action route as a compatibility alias for
             # already-installed clients; new clients use the documented REST
             # lifecycle paths above and DELETE /v1/vms/{name}.
@@ -601,7 +625,7 @@ function Test-EpicVMMutationRequest {
     )
     if ($Method -eq 'DELETE' -and $Path -match '^/v1/vms/[^/]+$') { return $true }
     if ($Method -eq 'POST' -and ($Path -eq '/v1/provisioning-jobs' -or $Path -eq '/v1/deprovisioning-jobs' -or $Path -match '^/v1/provisioning-jobs/[^/]+/(claim|claim-reissue|guest-recovery|network-recovery|direct-diagnostic|console-credentials|console-complete|console-failed)$')) { return $true }
-    if ($Method -eq 'POST' -and ($Path -eq '/v1/vms' -or $Path -match '^/v1/vms/[^/]+/(start|stop|restart)$' -or $Path -match '^/v1/vms/[^/]+/actions/(start|stop|restart|delete)$')) { return $true }
+    if ($Method -eq 'POST' -and ($Path -eq '/v1/vms' -or $Path -match '^/v1/vms/[^/]+/(start|stop|restart|gpu-partition)$' -or $Path -match '^/v1/vms/[^/]+/actions/(start|stop|restart|delete)$')) { return $true }
     return $false
 }
 

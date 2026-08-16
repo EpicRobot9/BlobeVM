@@ -123,7 +123,17 @@ Describe 'EpicVM provisioning safety' {
         $job.completedStages | Should -Be @('claim','guest_setup','network_setup','management_handoff')
         $job.claimHash | Should -BeNullOrEmpty
         { Invoke-EpicVMProvisioningClaim -State $state -Job $job -Request @{claimToken='single-use';username='operator';password='transient-password'} } | Should -Throw
+        $job.failureStage='streaming'
+        $job.failureDetailCode='GAMING_GPU_WEBGL'
+        $job.lastAttemptCode='guest_reverification_failed'
+        $job.errorCode='guest_reverification_failed'
+        $job.errorMessage='stale console failure'
         Complete-EpicVMProvisioningConsole -State $state -Job $job -Request @{routePrefix='/vm/alpha/';guestTcpVerified=$true}
+        $job.failureStage | Should -BeNullOrEmpty
+        $job.failureDetailCode | Should -BeNullOrEmpty
+        $job.lastAttemptCode | Should -BeNullOrEmpty
+        $job.errorCode | Should -BeNullOrEmpty
+        $job.errorMessage | Should -BeNullOrEmpty
         $job.state | Should -Be 'ready'
         $job.consoleRoutePrefix | Should -Be '/vm/alpha/'
         $job.streamValidationVerified | Should -BeTrue
@@ -280,6 +290,11 @@ Describe 'EpicVM provisioning safety' {
         $job.consoleVerifiedAt=[DateTime]::UtcNow.AddMinutes(-2).ToString('o')
         $job.streamValidationVerified=$true
         $job.completedStages=@('claim','guest_setup','network_setup','management_handoff','streaming_setup','stream_validation')
+        $job.failureStage='streaming'
+        $job.failureDetailCode='GAMING_GPU_WEBGL'
+        $job.lastAttemptCode='guest_reverification_failed'
+        $job.errorCode='guest_reverification_failed'
+        $job.errorMessage='stale console failure'
         $state.Provisioning.Jobs[$job.id]=$job
 
         Invoke-EpicVMProvisioningRecovery -State $state
@@ -287,6 +302,9 @@ Describe 'EpicVM provisioning safety' {
         $job.state | Should -Be 'ready'
         $job.errorCode | Should -BeNullOrEmpty
         $job.failureStage | Should -BeNullOrEmpty
+        $job.failureDetailCode | Should -BeNullOrEmpty
+        $job.lastAttemptCode | Should -BeNullOrEmpty
+        $job.errorMessage | Should -BeNullOrEmpty
         $job.consoleRoutePrefix | Should -Be '/vm/alpha--epic-pc/'
     }
 
@@ -536,5 +554,86 @@ Describe 'EpicVM claim state and migration boundaries' {
         $legacy.claimHash='a' * 64
         $legacy.claimExpires=[DateTime]::UtcNow.AddMinutes(-1).ToString('o')
         (ConvertTo-EpicVMCanonicalProvisioningState -Record $legacy) | Should -Be 'setup_failed:legacy_state_uncertain'
+    }
+}
+
+Describe 'EpicVM Gaming provisioning contract' {
+    It 'persists requested CPU, memory, storage, and GPU-P percentage at initialization' {
+        $config=Get-EpicVMDefaultConfig
+        $config.EnableGamingProvisioning=$true
+        $config.ProvisioningStatePath=Join-Path $TestDrive 'gaming-spec.json'
+        $state=New-EpicVMAgentState -Config $config -Token 'agent-token' -Provider (New-ProvisioningTestProvider)
+
+        $job=New-EpicVMProvisioningJob -State $state -Request @{
+            name='gaming-spec'
+            profile='gaming'
+            cpuCount=8
+            memoryGiB=14
+            diskSizeGiB=160
+            gpuPartitionPercent=65
+        }
+
+        $job.cpuCount | Should -Be 8
+        $job.memoryBytes | Should -Be (14 * 1GB)
+        $job.diskSizeBytes | Should -Be (160 * 1GB)
+        $job.gpuPartitionPercent | Should -Be 65
+        $job.gpuDeviceIdentity | Should -Be 'VEN_1002&DEV_73BF'
+    }
+
+    It 'reserves the single Gaming slot and counts active Gaming jobs' {
+        $config=Get-EpicVMDefaultConfig
+        $config.EnableGamingProvisioning=$true
+        $config.ProvisioningStatePath=Join-Path $TestDrive 'gaming-capacity.json'
+        $state=New-EpicVMAgentState -Config $config -Token 'agent-token' -Provider (New-ProvisioningTestProvider)
+
+        New-EpicVMProvisioningJob -State $state -Request @{name='gaming-one';profile='gaming'} | Out-Null
+        { New-EpicVMProvisioningJob -State $state -Request @{name='gaming-two';profile='gaming'} } | Should -Throw
+    }
+
+    It 'requires and records the Gaming guest GPU validation gate before streaming setup' {
+        $config=Get-EpicVMDefaultConfig
+        $config.EnableGamingProvisioning=$true
+        $config.ProvisioningStatePath=Join-Path $TestDrive 'gaming-validation.json'
+        $provider=New-ProvisioningTestProvider
+        $provider | Add-Member NoteProperty ConfigureGuest { param($name,$username,$password) @{ok=$true} }
+        $provider | Add-Member NoteProperty EnrollTailscale { param($name,$username,$password) @{ok=$true;ip='100.111.82.1';deviceId='gaming-device';managementReady=$true;managementTransport='tailscale_winrm'} }
+        $provider | Add-Member NoteProperty ValidateGamingGuest { param($name,$username,$password,$address) @{ok=$true;name=$name;address=$address} }
+        $state=New-EpicVMAgentState -Config $config -Token 'agent-token' -Provider $provider
+        $job=New-EpicVMProvisioningJobObject -Id 'gaming-validation' -Name 'gaming-validation' -Profile 'gaming' -State 'unclaimed'
+        $job.claimHash=ConvertTo-EpicVMClaimHash 'gaming-claim'
+        $job.claimExpires=[DateTime]::UtcNow.AddMinutes(5).ToString('o')
+        $state.Provisioning.Jobs[$job.id]=$job
+        $state.Provisioning.Claims[$job.id]=$job
+
+        Invoke-EpicVMProvisioningClaim -State $state -Job $job -Request @{claimToken='gaming-claim';username='operator';password='transient-password'}
+
+        $job.state | Should -Be 'streaming_setup'
+        $job.gamingGpuValidated | Should -BeTrue
+        $job.gamingValidationAt | Should -Not -BeNullOrEmpty
+        $job.completedStages | Should -Be @('claim','guest_setup','network_setup','management_handoff','gaming_gpu')
+    }
+
+    It 'fails the Gaming job at the GPU stage when validation is not clean' {
+        $config=Get-EpicVMDefaultConfig
+        $config.EnableGamingProvisioning=$true
+        $config.ProvisioningStatePath=Join-Path $TestDrive 'gaming-validation-failed.json'
+        $provider=New-ProvisioningTestProvider
+        $provider | Add-Member NoteProperty ConfigureGuest { param($name,$username,$password) @{ok=$true} }
+        $provider | Add-Member NoteProperty EnrollTailscale { param($name,$username,$password) @{ok=$true;ip='100.111.82.1';deviceId='gaming-device';managementReady=$true;managementTransport='tailscale_winrm'} }
+        $provider | Add-Member NoteProperty ValidateGamingGuest { param($name,$username,$password,$address) @{ok=$false;failureDetailCode='GAMING_GPU_ENCODER'} }
+        $state=New-EpicVMAgentState -Config $config -Token 'agent-token' -Provider $provider
+        $job=New-EpicVMProvisioningJobObject -Id 'gaming-validation-failed' -Name 'gaming-validation-failed' -Profile 'gaming' -State 'unclaimed'
+        $job.claimHash=ConvertTo-EpicVMClaimHash 'gaming-failed-claim'
+        $job.claimExpires=[DateTime]::UtcNow.AddMinutes(5).ToString('o')
+        $state.Provisioning.Jobs[$job.id]=$job
+        $state.Provisioning.Claims[$job.id]=$job
+
+        { Invoke-EpicVMProvisioningClaim -State $state -Job $job -Request @{claimToken='gaming-failed-claim';username='operator';password='transient-password'} } | Should -Throw
+
+        $job.state | Should -Be 'setup_failed:gaming_gpu'
+        $job.failureStage | Should -Be 'gaming_gpu'
+        $job.failureDetailCode | Should -Be 'GAMING_GPU_ENCODER'
+        $job.completedStages | Should -Not -Contain 'gaming_gpu'
+        $job.state | Should -Not -Be 'streaming_setup'
     }
 }

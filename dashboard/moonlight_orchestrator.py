@@ -57,6 +57,13 @@ def _yaml_quote(value: str) -> str:
     return json.dumps(str(value), ensure_ascii=False)
 
 
+def _strip_shell_quotes(value: Any) -> str:
+    text = str(value or "").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+        return text[1:-1].strip()
+    return text
+
+
 @dataclass(frozen=True)
 class MoonlightPlan:
     name: str
@@ -109,9 +116,9 @@ class MoonlightOrchestrator:
 
     def _image(self) -> str:
         if "moonlight" in self.digests:
-            value = str(self.digests.get("moonlight") or "")
+            value = _strip_shell_quotes(self.digests.get("moonlight"))
         else:
-            value = str(os.environ.get("EPICVM_MOONLIGHT_IMAGE", "") or DEFAULT_MOONLIGHT_IMAGE)
+            value = _strip_shell_quotes(os.environ.get("EPICVM_MOONLIGHT_IMAGE", "") or DEFAULT_MOONLIGHT_IMAGE)
         if not SHA256_IMAGE_RE.fullmatch(value):
             raise ConsoleOrchestrationError("Digest-pinned moonlight image is not configured.", status=503, code="digest_required")
         return value

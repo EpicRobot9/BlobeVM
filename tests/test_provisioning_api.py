@@ -29,10 +29,18 @@ class FakeRemoteHost:
     def public_record(self):
         return {"online": True, "capabilities": {"provisioning": True}}
 
-    def provision(self, name, profile, idempotency_key=None):
+    def provision(self, name, profile, spec=None, idempotency_key=None):
         self.provision_calls = getattr(self, "provision_calls", [])
-        self.provision_calls.append({"name": name, "profile": profile, "idempotency_key": idempotency_key})
+        self.provision_calls.append({"name": name, "profile": profile, "spec": spec, "idempotency_key": idempotency_key})
         return {"job": {"id": "job-1", "name": name, "profile": profile, "state": "unclaimed"}, "claimToken": "one-use"}
+
+    def list_vms(self):
+        return [{"name": "alpha"}]
+
+    def set_gaming_gpu_percent(self, name, percent, idempotency_key=None):
+        self.gpu_partition_calls = getattr(self, "gpu_partition_calls", [])
+        self.gpu_partition_calls.append({"name": name, "percent": percent, "idempotency_key": idempotency_key})
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     def provisioning_status(self, job_id):
         return {"job": {"id": job_id, "state": "unclaimed"}}
@@ -126,6 +134,16 @@ def authenticated_client(module):
     client = module.app.test_client()
     client.set_cookie("Dashboard-Auth", "session")
     return client
+
+
+def test_console_backend_accepts_shell_quoted_environment_value(monkeypatch, tmp_path):
+    module = load_app(monkeypatch, tmp_path)
+    monkeypatch.setenv("EPICVM_CONSOLE_BACKEND", "'moonlight'")
+    module._CONSOLE_ORCHESTRATOR = None
+
+    orchestrator = module._console_orchestrator()
+
+    assert getattr(orchestrator, "backend", "") == "moonlight"
 
 
 def test_dashboard_api_unauthorized_does_not_emit_browser_basic_challenge(monkeypatch, tmp_path):
@@ -749,3 +767,61 @@ def test_automatic_mode_claims_with_protected_defaults_and_returns_no_claim_secr
         'sunshine_username': 'sun-default',
         'sunshine_password': 'sun-default-password',
     }
+
+
+def test_gaming_provisioning_forwards_only_initialization_resources(monkeypatch, tmp_path):
+    module = load_app(monkeypatch, tmp_path)
+    attach_host(module)
+    client = authenticated_client(module)
+    csrf = client.get('/dashboard/api/auth/csrf').get_json()['csrfToken']
+    response = client.post(
+        '/dashboard/api/provisioning-jobs',
+        json={
+            'host_id': 'epic-pc',
+            'name': 'gaming-alpha',
+            'profile': 'gaming',
+            'mode': 'claim',
+            'cpuCount': 8,
+            'memoryGiB': 16,
+            'diskSizeGiB': 256,
+            'gpuPartitionPercent': 65,
+            'sunshinePassword': 'must-not-forward',
+        },
+        headers={'Origin': 'http://localhost', 'X-CSRF-Token': csrf},
+    )
+    assert response.status_code == 202
+    host = module.VM_HOST_REGISTRY.get('epic-pc')
+    call = host.provision_calls[-1]
+    assert call['profile'] == 'gaming'
+    assert call['spec'] == {
+        'cpuCount': 8,
+        'memoryGiB': 16,
+        'diskSizeGiB': 256,
+        'gpuPartitionPercent': 65,
+    }
+    assert 'must-not-forward' not in response.get_data(as_text=True)
+
+
+def test_gaming_partition_endpoint_updates_only_percent(monkeypatch, tmp_path):
+    module = load_app(monkeypatch, tmp_path)
+    attach_host(module)
+    client = authenticated_client(module)
+    csrf = client.get('/dashboard/api/auth/csrf').get_json()['csrfToken']
+    headers = {'Origin': 'http://localhost', 'X-CSRF-Token': csrf}
+    response = client.post(
+        '/dashboard/api/vm/alpha/gpu-partition',
+        json={'host_id': 'epic-pc', 'percent': 72},
+        headers=headers,
+    )
+    assert response.status_code == 200
+    assert response.get_json() == {'ok': True, 'host_id': 'epic-pc', 'name': 'alpha', 'percent': 72}
+    host = module.VM_HOST_REGISTRY.get('epic-pc')
+    assert host.gpu_partition_calls[-1]['percent'] == 72
+
+    invalid = client.post(
+        '/dashboard/api/vm/alpha/gpu-partition',
+        json={'host_id': 'epic-pc', 'percent': 101},
+        headers=headers,
+    )
+    assert invalid.status_code == 400
+    assert host.gpu_partition_calls[-1]['percent'] == 72

@@ -200,6 +200,57 @@ def test_remote_provisioning_status_has_bounded_store_read_timeout():
     assert calls[0] == 30
 
 
+def test_remote_gaming_provision_forwards_initial_resources_and_partition_percent():
+    calls = []
+
+    class FakeResponse:
+        status = 202
+
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self): return b'{"ok": true, "job": {"id": "job-1"}}'
+
+    def fake_open(req, timeout):
+        calls.append(req)
+        return FakeResponse()
+
+    RemoteAgentClient("http://100.64.0.2:8765", "token", opener=fake_open).provision(
+        "game", "gaming", spec={"cpuCount": 6, "memoryBytes": 12884901888, "diskSizeBytes": 137438953472, "gpuPartitionPercent": 62}
+    )
+
+    payload = json.loads(calls[0].data.decode("utf-8"))
+    assert payload == {
+        "name": "game",
+        "profile": "gaming",
+        "cpuCount": 6,
+        "memoryBytes": 12884901888,
+        "diskSizeBytes": 137438953472,
+        "gpuPartitionPercent": 62,
+    }
+
+
+def test_remote_gaming_partition_update_uses_dedicated_route():
+    calls = []
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self): return b'{"ok": true, "vm": {"name": "game"}}'
+
+    def fake_open(req, timeout):
+        calls.append(req)
+        return FakeResponse()
+
+    RemoteAgentClient("http://100.64.0.2:8765", "token", opener=fake_open).set_gaming_gpu_percent("game", 75)
+
+    assert calls[0].get_method() == "POST"
+    assert calls[0].full_url == "http://100.64.0.2:8765/v1/vms/game/gpu-partition"
+    assert json.loads(calls[0].data.decode("utf-8")) == {"percent": 75}
+    assert calls[0].get_header("Idempotency-key")
+
+
 def test_remote_lifecycle_uses_explicit_agent_contract_routes():
     calls = []
 

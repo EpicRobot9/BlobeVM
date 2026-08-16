@@ -1,4 +1,4 @@
-export const PROVISIONING_STATES = ['queued','cloning','booting','unclaimed','claim_in_progress','guest_setup','network_setup','management_handoff','streaming_setup','stream_validation','ready']
+export const PROVISIONING_STATES = ['queued','cloning','booting','unclaimed','claim_in_progress','guest_setup','network_setup','management_handoff','gaming_gpu_validation','streaming_setup','stream_validation','ready']
 export const PROVISIONING_MODES = ['automatic','claim']
 
 export function canClaimProvisioningJob(job){
@@ -26,13 +26,34 @@ export function provisioningProgress(job){
   return Math.round((index / (PROVISIONING_STATES.length - 1)) * 100)
 }
 
-export function provisioningCreatePayload({ hostId, name, profile = 'standard', mode = 'automatic' } = {}){
+export function provisioningCreatePayload({ hostId, name, profile = 'standard', mode = 'automatic', cpuCount = 6, memoryGiB = 12, diskSizeGiB = 128, gpuPartitionPercent = 50 } = {}){
   const safeMode = PROVISIONING_MODES.includes(String(mode || '').toLowerCase()) ? String(mode).toLowerCase() : 'automatic'
-  return {
+  const safeProfile = String(profile || 'standard').trim().toLowerCase()
+  const payload = {
     host_id:String(hostId || ''),
     name:String(name || '').trim().toLowerCase(),
-    profile:String(profile || 'standard').trim().toLowerCase(),
+    profile:safeProfile,
     mode:safeMode,
+  }
+  if(safeProfile === 'gaming'){
+    payload.cpuCount = normalizeGamingInteger(cpuCount, 6, 1, 16)
+    payload.memoryGiB = normalizeGamingInteger(memoryGiB, 12, 1, 16)
+    payload.diskSizeGiB = normalizeGamingInteger(diskSizeGiB, 128, 1, 512)
+    payload.gpuPartitionPercent = normalizeGamingInteger(gpuPartitionPercent, 50, 1, 100)
+  }
+  return payload
+}
+
+function normalizeGamingInteger(value, fallback, min, max){
+  const parsed = Number.parseInt(String(value ?? ''), 10)
+  if(!Number.isFinite(parsed)) return fallback
+  return Math.max(min, Math.min(max, parsed))
+}
+
+export function gamingPartitionPayload({ hostId, percent } = {}){
+  return {
+    host_id:String(hostId || ''),
+    percent:normalizeGamingInteger(percent, 50, 1, 100),
   }
 }
 
@@ -68,6 +89,11 @@ export function provisioningFailureReason(job){
     management_handoff_failed: 'The private management handoff did not verify after Tailscale enrollment.',
     management_transport_failed: 'The private guest management channel failed safely; the VM was retained for diagnosis.',
     management_transport_unavailable: 'The private guest management channel is unavailable; the VM was retained for diagnosis.',
+    gaming_guest_validation_failed: 'The Gaming guest GPU validation did not pass.',
+    gaming_guest_validation_unavailable: 'The Gaming guest GPU validation channel is unavailable.',
+    gaming_gpu_validation_failed: 'The GPU-P guest validation gate failed; the VM was retained for diagnosis.',
+    gaming_encoder_unavailable: 'Sunshine did not report an AMD hardware encoder for the Gaming VM.',
+    gaming_webgl_unavailable: 'The Gaming guest did not report WebGL hardware acceleration.',
      streaming_setup_failed: 'Moonlight/Sunshine setup failed after guest and network setup.',
      sunshine_invalid_input: 'The Sunshine credential input was rejected before guest setup.',
      sunshine_service_missing: 'The retained guest does not have the pinned Sunshine service.',

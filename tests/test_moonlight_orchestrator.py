@@ -30,6 +30,23 @@ def make_orchestrator(root, **overrides):
     return MoonlightOrchestrator(**options)
 
 
+def test_shell_quoted_environment_image_is_accepted(tmp_path, monkeypatch):
+    monkeypatch.delenv("EPICVM_MOONLIGHT_IMAGE", raising=False)
+    monkeypatch.setenv("EPICVM_MOONLIGHT_IMAGE", f"'{IMAGE}'")
+    orch = MoonlightOrchestrator(
+        root=str(tmp_path),
+        public_host="techexplore.us",
+        tls_resolver="myresolver",
+        router_priority=600,
+        tcp_probe=lambda *_: True,
+        disk_probe=lambda: True,
+        route_owner_probe=lambda *_: True,
+        routing_probe=lambda: True,
+        auth_status_probe=lambda *_: True,
+    )
+    assert orch._image() == IMAGE
+
+
 def test_plan_is_digest_pinned_path_correct_and_does_not_contain_credentials(tmp_path):
     orch = make_orchestrator(tmp_path)
     plan = orch.build_plan(name="alpha", guest_ip="100.111.82.1")

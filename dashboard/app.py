@@ -151,8 +151,22 @@ def _safe_provisioning_job(job: object) -> dict:
         'consoleRepairPending', 'consoleRepairOutcome', 'consoleOperationId',
         'autonomousPending', 'autonomousOperationId', 'autonomousStage',
         'autonomousOutcome', 'autonomousErrorCode',
+        'cpuCount', 'memoryBytes', 'diskSizeBytes', 'gpuPartitionPercent',
+        'gpuDeviceIdentity', 'gamingGpuValidated', 'gamingValidationAt',
     )
     return {key: job[key] for key in allowed if key in job and job[key] is not None}
+
+
+def _gaming_provisioning_spec(payload: object) -> dict:
+    """Return only initialization-time Gaming resource fields for the agent."""
+    if not isinstance(payload, dict):
+        return {}
+    allowed = ('cpuCount', 'memoryGiB', 'memoryBytes', 'diskSizeGiB', 'diskSizeBytes', 'gpuPartitionPercent')
+    return {
+        key: payload[key]
+        for key in allowed
+        if key in payload and payload[key] not in (None, '')
+    }
 
 
 def _is_pending_provisioning_job(job: object) -> bool:
@@ -592,25 +606,33 @@ def _remote_console_route_name(name: str, host_id: str) -> str:
     return f'{safe_name[:keep]}--{digest}'
 
 
+def _env_text(name: str, default: str = '') -> str:
+    """Read an environment value while tolerating shell-style quote wrappers."""
+    value = str(os.environ.get(name, default) or default).strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        value = value[1:-1].strip()
+    return value
+
+
 def _console_orchestrator():
     global _CONSOLE_ORCHESTRATOR
     if _CONSOLE_ORCHESTRATOR is None:
-        backend = os.environ.get('EPICVM_CONSOLE_BACKEND', 'moonlight').strip().lower()
+        backend = _env_text('EPICVM_CONSOLE_BACKEND', 'moonlight').lower()
         common = dict(
-            proxy_network=os.environ.get('EPICVM_TRAEFIK_NETWORK', 'proxy'),
-            public_host=os.environ.get('EPICVM_PUBLIC_HOST', ''),
-            tls_resolver=os.environ.get('EPICVM_TRAEFIK_CERTRESOLVER', ''),
-            auth_middleware=os.environ.get('EPICVM_TRAEFIK_AUTH_MIDDLEWARE', ''),
-            router_priority=os.environ.get('EPICVM_TRAEFIK_ROUTER_PRIORITY', ''),
+            proxy_network=_env_text('EPICVM_TRAEFIK_NETWORK', 'proxy'),
+            public_host=_env_text('EPICVM_PUBLIC_HOST', ''),
+            tls_resolver=_env_text('EPICVM_TRAEFIK_CERTRESOLVER', ''),
+            auth_middleware=_env_text('EPICVM_TRAEFIK_AUTH_MIDDLEWARE', ''),
+            router_priority=_env_text('EPICVM_TRAEFIK_ROUTER_PRIORITY', ''),
         )
         if backend in ('moonlight', 'sunshine'):
             _CONSOLE_ORCHESTRATOR = MoonlightOrchestrator(
-                root=os.environ.get('EPICVM_MOONLIGHT_ROOT', '/opt/epicvm/moonlight-instances'),
+                root=_env_text('EPICVM_MOONLIGHT_ROOT', '/opt/epicvm/moonlight-instances'),
                 **common,
             )
         else:
             _CONSOLE_ORCHESTRATOR = GuacamoleOrchestrator(
-                root=os.environ.get('EPICVM_CONSOLE_ROOT', '/opt/epicvm/instances'),
+                root=_env_text('EPICVM_CONSOLE_ROOT', '/opt/epicvm/instances'),
                 credential_secret=_dashboard_secret(),
                 **common,
             )
@@ -4065,7 +4087,16 @@ def api_provisioning_job_create():
                     return response, 503
             else:
                 sunshine_credentials = ('', '')
-        result = host.provision(name, profile, idempotency_key=request.headers.get('Idempotency-Key'))
+        gaming_spec = _gaming_provisioning_spec(payload) if profile == 'gaming' else None
+        if gaming_spec is not None:
+            result = host.provision(
+                name,
+                profile,
+                spec=gaming_spec,
+                idempotency_key=request.headers.get('Idempotency-Key'),
+            )
+        else:
+            result = host.provision(name, profile, idempotency_key=request.headers.get('Idempotency-Key'))
         if mode == 'automatic':
             job = result.get('job') if isinstance(result, dict) else None
             job_id = str(job.get('id') or '') if isinstance(job, dict) else ''
@@ -4824,6 +4855,43 @@ def api_vm_status(name):
         return _vm_host_error_response(exc)
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.post('/dashboard/api/vm/<name>/gpu-partition')
+@auth_required
+def api_vm_gpu_partition(name):
+    """Change only the live GPU-P partition percentage for a Gaming VM."""
+    payload = request.get_json(silent=True) if request.is_json else request.form.to_dict(flat=True)
+    payload = payload if isinstance(payload, dict) else {}
+    host_id = str(payload.get('host_id') or payload.get('host') or '').strip()
+    raw_percent = payload.get('percent')
+    if not host_id or raw_percent in (None, ''):
+        return jsonify({'ok': False, 'error': 'host_id and percent are required'}), 400
+    try:
+        percent = int(raw_percent)
+    except (TypeError, ValueError):
+        return jsonify({'ok': False, 'error': 'percent must be an integer between 1 and 100'}), 400
+    if percent < 1 or percent > 100:
+        return jsonify({'ok': False, 'error': 'percent must be between 1 and 100'}), 400
+    try:
+        host = _vm_host(host_id)
+        if getattr(host, 'kind', 'local') != 'remote' or not callable(getattr(host, 'set_gaming_gpu_percent', None)):
+            return jsonify({'ok': False, 'error': 'GPU-P partition updates are available only on an enrolled Windows host'}), 409
+        _ensure_remote_vm_exists(host, name)
+        result = host.set_gaming_gpu_percent(
+            name,
+            percent,
+            idempotency_key=request.headers.get('Idempotency-Key'),
+        )
+        if getattr(result, 'returncode', 0) != 0:
+            return jsonify({'ok': False, 'error': 'The remote GPU-P partition update failed'}), 502
+        return jsonify({'ok': True, 'host_id': host_id, 'name': name, 'percent': percent})
+    except VmHostUnavailable as exc:
+        return _vm_host_error_response(exc)
+    except ValueError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 400
+    except Exception:
+        return jsonify({'ok': False, 'error': 'Unable to update the Gaming GPU-P partition'}), 502
 
 
 @app.post('/dashboard/api/vm/<name>/recover')
