@@ -1,4 +1,5 @@
 export const PROVISIONING_STATES = ['queued','cloning','booting','unclaimed','claim_in_progress','guest_setup','network_setup','management_handoff','streaming_setup','stream_validation','ready']
+export const PROVISIONING_MODES = ['automatic','claim']
 
 export function canClaimProvisioningJob(job){
   return String(job?.state || '') === 'unclaimed'
@@ -25,9 +26,18 @@ export function provisioningProgress(job){
   return Math.round((index / (PROVISIONING_STATES.length - 1)) * 100)
 }
 
-export function provisioningClaimPayload({ hostId, username, password, claimToken, sunshineUsername, sunshinePassword } = {}){
+export function provisioningCreatePayload({ hostId, name, profile = 'standard', mode = 'automatic' } = {}){
+  const safeMode = PROVISIONING_MODES.includes(String(mode || '').toLowerCase()) ? String(mode).toLowerCase() : 'automatic'
+  return {
+    host_id:String(hostId || ''),
+    name:String(name || '').trim().toLowerCase(),
+    profile:String(profile || 'standard').trim().toLowerCase(),
+    mode:safeMode,
+  }
+}
+
+export function provisioningClaimPayload({ hostId, username, password, claimToken } = {}){
   const payload = { host_id:String(hostId || ''), username:String(username || ''), password:String(password || ''), claimToken:String(claimToken || '') }
-  if(sunshineUsername || sunshinePassword) { payload.sunshineUsername = String(sunshineUsername || ''); payload.sunshinePassword = String(sunshinePassword || '') }
   return payload
 }
 
@@ -89,10 +99,8 @@ export function provisioningFailureReason(job){
   return base
 }
 
-export function provisioningConsoleRetryPayload({ hostId, username, password, sunshineUsername, sunshinePassword } = {}){
-  const payload = { host_id:String(hostId || ''), username:String(username || ''), password:String(password || '') }
-  if(sunshineUsername || sunshinePassword) { payload.sunshineUsername = String(sunshineUsername || ''); payload.sunshinePassword = String(sunshinePassword || '') }
-  return payload
+export function provisioningConsoleRetryPayload({ hostId, username, password } = {}){
+  return { host_id:String(hostId || ''), username:String(username || ''), password:String(password || '') }
 }
 
 export function deprovisioningPayload({ hostId, name } = {}){

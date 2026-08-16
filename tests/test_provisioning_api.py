@@ -30,13 +30,40 @@ class FakeRemoteHost:
         return {"online": True, "capabilities": {"provisioning": True}}
 
     def provision(self, name, profile, idempotency_key=None):
+        self.provision_calls = getattr(self, "provision_calls", [])
+        self.provision_calls.append({"name": name, "profile": profile, "idempotency_key": idempotency_key})
         return {"job": {"id": "job-1", "name": name, "profile": profile, "state": "unclaimed"}, "claimToken": "one-use"}
 
     def provisioning_status(self, job_id):
         return {"job": {"id": job_id, "state": "unclaimed"}}
 
+    def provisioning_jobs(self):
+        return [{
+            "id": "job-1",
+            "name": "alpha",
+            "profile": "standard",
+            "state": "unclaimed",
+            "claimConsumed": False,
+            "claimToken": "do-not-return",
+            "claimHash": "do-not-return",
+            "updatedAt": "2026-08-16T00:00:00Z",
+        }]
+
+    def claim_reissue(self, job_id):
+        return {"job": {"id": job_id, "name": "alpha", "state": "unclaimed"}, "claimToken": "reissued-once"}
+
     def claim(self, job_id, username, password, claim_token):
         return {"job": {"id": job_id, "name": "alpha", "state": "streaming_setup", "tailnetIp": "100.111.82.1"}}
+
+    def console_credentials(self, job_id, *, guest_username, guest_password, sunshine_username, sunshine_password):
+        self.last_console_credentials = {
+            "job_id": job_id,
+            "guest_username": guest_username,
+            "guest_password": guest_password,
+            "sunshine_username": sunshine_username,
+            "sunshine_password": sunshine_password,
+        }
+        return {"ok": True}
 
     def console_complete(self, job_id, route_prefix, guest_tcp_verified):
         return {"job": {"id": job_id, "name": "alpha", "state": "ready", "consoleRoutePrefix": route_prefix}}
@@ -55,6 +82,10 @@ def attach_host(module):
     host = FakeRemoteHost()
 
     class Registry:
+        @property
+        def providers(self):
+            return {host.host_id: host}
+
         def refresh(self):
             return None
 
@@ -394,6 +425,7 @@ def test_remote_console_worker_rechecks_ready_state_before_credentials(monkeypat
 
 def test_remote_moonlight_retry_returns_pending_and_deduplicates(monkeypatch, tmp_path):
     module = load_app(monkeypatch, tmp_path)
+    module._default_sunshine_credentials = lambda: ('sun-user', 'sun-password')
     started = threading.Event()
     release = threading.Event()
     finished = threading.Event()
@@ -469,6 +501,7 @@ def test_remote_moonlight_retry_returns_pending_and_deduplicates(monkeypatch, tm
 
 def test_remote_moonlight_retry_publishes_safe_terminal_failure(monkeypatch, tmp_path):
     module = load_app(monkeypatch, tmp_path)
+    module._default_sunshine_credentials = lambda: ('sun', 'sun-secret')
 
     class FailedHost(FakeRemoteHost):
         def provisioning_status(self, job_id):
@@ -537,3 +570,182 @@ def test_admin_can_enable_and_launch_automatic_console_without_password_reflecti
     assert 'localStorage.setItem("GUAC_AUTH_TOKEN",JSON.stringify(result.authToken))' in body
     assert '/vm/alpha/?data=' not in body
     assert launch.headers['Cache-Control'] == 'no-store'
+
+
+def test_pending_remote_jobs_are_safe_and_survive_inventory_refresh(monkeypatch, tmp_path):
+    module = load_app(monkeypatch, tmp_path)
+    attach_host(module)
+    client = authenticated_client(module)
+
+    response = client.get('/dashboard/api/provisioning-jobs/pending')
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body['ok'] is True
+    assert body['sunshineDefaultConfigured'] is False
+    assert len(body['jobs']) == 1
+    entry = body['jobs'][0]
+    assert entry['host_id'] == 'epic-pc'
+    assert entry['job']['id'] == 'job-1'
+    assert entry['job']['state'] == 'unclaimed'
+    assert 'claimToken' not in response.get_data(as_text=True)
+    assert 'claimHash' not in response.get_data(as_text=True)
+
+
+def test_claim_recovery_accepts_exact_job_id_without_relying_on_vm_name(monkeypatch, tmp_path):
+    module = load_app(monkeypatch, tmp_path)
+    attach_host(module)
+    client = authenticated_client(module)
+    csrf = client.get('/dashboard/api/auth/csrf').get_json()['csrfToken']
+    response = client.post(
+        '/dashboard/api/provisioning-jobs/recover',
+        json={'host_id': 'epic-pc', 'job_id': 'job-1'},
+        headers={'Origin': 'http://localhost', 'X-Forwarded-Proto': 'https', 'X-CSRF-Token': csrf},
+    )
+    assert response.status_code == 200
+    assert response.get_json()['claimToken'] == 'reissued-once'
+    assert 'claimHash' not in response.get_data(as_text=True)
+
+
+def test_claim_uses_protected_default_sunshine_credentials(monkeypatch, tmp_path):
+    module = load_app(monkeypatch, tmp_path)
+    attach_host(module)
+    host = module.VM_HOST_REGISTRY.get('epic-pc')
+    module._default_sunshine_credentials = lambda: ('sun-default', 'sun-default-password')
+
+    class MoonlightConsole:
+        backend = 'moonlight'
+
+        def build_plan(self, name, guest_ip, route_name=None):
+            return SimpleNamespace(route_prefix=f'/vm/{route_name or name}/')
+
+        def stage_plan(self, plan):
+            return None
+
+        def start_staged(self, name):
+            return {'routePrefix': f'/vm/{name}/', 'guestTcpVerified': True}
+
+        def pair_staged(self, name, sunshine_username, sunshine_password):
+            assert sunshine_username == 'sun-default'
+            assert sunshine_password == 'sun-default-password'
+            return {'routePrefix': f'/vm/{name}/', 'guestTcpVerified': True}
+
+        def stop_staged(self, name):
+            return None
+
+        def quarantine_staged(self, name):
+            return None
+
+    module._CONSOLE_ORCHESTRATOR = MoonlightConsole()
+    client = authenticated_client(module)
+    csrf = client.get('/dashboard/api/auth/csrf').get_json()['csrfToken']
+    response = client.post(
+        '/dashboard/api/provisioning-jobs/job-1/claim',
+        json={'host_id': 'epic-pc', 'username': 'chosen-user', 'password': 'chosen-password', 'claimToken': 'one-use', 'sunshineUsername': 'attacker', 'sunshinePassword': 'attacker-secret'},
+        headers={'Origin': 'http://localhost', 'X-Forwarded-Proto': 'https', 'X-CSRF-Token': csrf},
+    )
+    assert response.status_code == 200
+    assert response.get_json()['job']['state'] == 'ready'
+    assert host.last_console_credentials == {
+        'job_id': 'job-1',
+        'guest_username': 'chosen-user',
+        'guest_password': 'chosen-password',
+        'sunshine_username': 'sun-default',
+        'sunshine_password': 'sun-default-password',
+    }
+    assert 'chosen-password' not in response.get_data(as_text=True)
+    assert 'sun-default-password' not in response.get_data(as_text=True)
+
+
+def test_automatic_mode_claims_with_protected_defaults_and_returns_no_claim_secret(monkeypatch, tmp_path):
+    module = load_app(monkeypatch, tmp_path)
+    attach_host(module)
+    host = module.VM_HOST_REGISTRY.get('epic-pc')
+    host.claimed = False
+    module._default_guest_credentials = lambda: ('default-user', 'default-password')
+    module._default_sunshine_credentials = lambda: ('sun-default', 'sun-default-password')
+    started = threading.Event()
+
+    def provision(name, profile, idempotency_key=None):
+        return {
+            'job': {'id': 'job-auto', 'name': name, 'profile': profile, 'state': 'unclaimed'},
+            'claimToken': 'auto-one-use',
+        }
+
+    def claim(job_id, username, password, claim_token):
+        assert username == 'default-user'
+        assert password == 'default-password'
+        assert claim_token == 'auto-one-use'
+        host.claimed = True
+        return {'job': {'id': job_id, 'name': 'alpha', 'state': 'streaming_setup', 'tailnetIp': '100.111.82.1'}}
+
+    def status(job_id):
+        state = 'streaming_setup' if host.claimed else 'unclaimed'
+        return {'job': {'id': job_id, 'name': 'alpha', 'state': state, 'tailnetIp': '100.111.82.1'}}
+
+    host.provision = provision
+    host.claim = claim
+    host.provisioning_status = status
+    original_console_credentials = host.console_credentials
+
+    def console_credentials(*args, **kwargs):
+        started.set()
+        return original_console_credentials(*args, **kwargs)
+
+    host.console_credentials = console_credentials
+
+    class MoonlightConsole:
+        backend = 'moonlight'
+
+        def quarantine_staged(self, name):
+            return None
+
+        def build_plan(self, name, guest_ip, route_name=None):
+            return SimpleNamespace(route_prefix=f'/vm/{route_name or name}/')
+
+        def stage_plan(self, plan):
+            return None
+
+        def start_staged(self, name):
+            return {'routePrefix': f'/vm/{name}/', 'guestTcpVerified': True}
+
+        def pair_staged(self, name, sunshine_username, sunshine_password):
+            assert sunshine_username == 'sun-default'
+            assert sunshine_password == 'sun-default-password'
+            return {'routePrefix': f'/vm/{name}/', 'guestTcpVerified': True}
+
+        def stop_staged(self, name):
+            return None
+
+    module._CONSOLE_ORCHESTRATOR = MoonlightConsole()
+    module.VM_HOST_REGISTRY.get = lambda host_id='local': host
+    client = authenticated_client(module)
+    csrf = client.get('/dashboard/api/auth/csrf').get_json()['csrfToken']
+    response = client.post(
+        '/dashboard/api/provisioning-jobs',
+        json={'host_id': 'epic-pc', 'name': 'alpha', 'profile': 'standard', 'mode': 'automatic'},
+        headers={'Origin': 'http://localhost', 'X-Forwarded-Proto': 'https', 'X-CSRF-Token': csrf},
+    )
+    assert response.status_code == 202
+    body = response.get_json()
+    assert body['pending'] is True
+    assert body['mode'] == 'automatic'
+    assert body['job']['autonomousPending'] is True
+    assert 'claimToken' not in response.get_data(as_text=True)
+    assert 'default-password' not in response.get_data(as_text=True)
+    assert 'sun-default-password' not in response.get_data(as_text=True)
+    assert started.wait(1)
+
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        task = module._CONSOLE_RETRY_TASKS.get(('epic-pc', 'job-auto'))
+        if task and task.get('status') == 'ready':
+            break
+        time.sleep(0.01)
+    assert task['status'] == 'ready'
+    assert host.last_console_credentials == {
+        'job_id': 'job-auto',
+        'guest_username': 'default-user',
+        'guest_password': 'default-password',
+        'sunshine_username': 'sun-default',
+        'sunshine_password': 'sun-default-password',
+    }

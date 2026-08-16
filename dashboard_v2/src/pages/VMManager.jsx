@@ -7,7 +7,7 @@ import { useToasts } from '../components/ToastProvider'
 import { instanceNamesKey, pollDelayMs } from '../lib/polling'
 import { canCacheVmSettingsResponse, clearRemovedVmState, createLoadInFlightRunner, createLogSelectionTracker } from '../lib/vmManagerRaces'
 import { canUseRemotePlacement, createPlacementPayload, getEligibleRemoteHosts, getPlacementValidationReason, hostOptionLabel, normalizeHostInventory, provisioningProfileDisabledReason, remotePlacementDisabledReason } from '../lib/hostPlacement'
-import { canClaimProvisioningJob, canOpenInventoryVm, canOpenProvisionedVm, canRetryProvisioningConsole, deprovisioningPayload, provisioningClaimPayload, provisioningConsoleRetryPayload, provisioningFailureReason, provisioningProgress } from '../lib/provisioningUi'
+import { canClaimProvisioningJob, canOpenInventoryVm, canOpenProvisionedVm, canRetryProvisioningConsole, deprovisioningPayload, provisioningClaimPayload, provisioningConsoleRetryPayload, provisioningCreatePayload, provisioningFailureReason, provisioningProgress } from '../lib/provisioningUi'
 
 const OPTIONAL_REQUEST_TIMEOUT_MS = 2500
 
@@ -146,10 +146,13 @@ export default function VMManager(){
   const [profileBusy, setProfileBusy] = useState('')
   const [createName, setCreateName] = useState('')
   const [provisioningProfile, setProvisioningProfile] = useState('standard')
+  const [provisioningMode, setProvisioningMode] = useState('automatic')
   const [provisioningJob, setProvisioningJob] = useState(null)
   const [provisioningHostId, setProvisioningHostId] = useState('')
   const [provisioningClaimToken, setProvisioningClaimToken] = useState('')
-  const [claimDraft, setClaimDraft] = useState({ username:'', password:'', confirm:'', sunshineUsername:'', sunshinePassword:'', sunshineConfirm:'' })
+  const [claimDraft, setClaimDraft] = useState({ username:'', password:'', confirm:'' })
+  const [pendingProvisioningJobs, setPendingProvisioningJobs] = useState([])
+  const [sunshineDefaultConfigured, setSunshineDefaultConfigured] = useState(false)
   const [provisioningBusy, setProvisioningBusy] = useState(false)
   const consoleRetryOutcomeRef = useRef('')
   const [createBusy, setCreateBusy] = useState(false)
@@ -170,32 +173,90 @@ export default function VMManager(){
   const vmSettingsInFlightRef = useRef(new Map())
   const vmSettingsGenerationRef = useRef(0)
   const provisioningRecoveryInFlightRef = useRef(new Map())
+  const provisioningClaimTokensRef = useRef(new Map())
+
+  function clearClaimDraft(){
+    setClaimDraft({ username:'', password:'', confirm:'' })
+  }
+
+  function provisioningJobKey(hostId, jobId){
+    return `${String(hostId || '')}\u0000${String(jobId || '')}`
+  }
 
   function clearProvisioningRecovery(){
     try{ window.sessionStorage.removeItem('epicvm.provisioning-recovery') }catch(_e){}
   }
 
-  async function recoverPendingClaim(hostId, name){
+  async function recoverPendingClaim(hostId, name, jobId = ''){
     const safeHostId = String(hostId || '')
     const safeName = String(name || '').trim().toLowerCase()
-    if(!safeHostId || !safeName) return false
-    const key = `${safeHostId}\u0000${safeName}`
+    const safeJobId = String(jobId || '').trim()
+    if(!safeHostId || (!safeName && !safeJobId)) return false
+    const tokenKey = provisioningJobKey(safeHostId, safeJobId)
+    if(safeJobId && provisioningClaimTokensRef.current.has(tokenKey)) return true
+    const key = `${safeHostId}\u0000${safeJobId || safeName}`
     const existing = provisioningRecoveryInFlightRef.current.get(key)
     if(existing) return existing
+    const recoveryPayload = safeJobId ? { host_id:safeHostId, job_id:safeJobId } : { host_id:safeHostId, name:safeName }
     const request = (async()=>{
-      const res = await apiFetch('/provisioning-jobs/recover', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({host_id:safeHostId, name:safeName}) })
+      const res = await apiFetch('/provisioning-jobs/recover', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(recoveryPayload) })
       const body = await res.json().catch(()=>({ ok:res.ok }))
       if(!res.ok || body.ok === false || !body.claimToken || !body.job) throw new Error(body.error?.message || body.error || 'No pending claim is available')
+      const jobKey = provisioningJobKey(safeHostId, body.job.id || safeJobId)
+      provisioningClaimTokensRef.current.set(jobKey, String(body.claimToken))
       setProvisioningHostId(safeHostId)
       setProvisioningJob(body.job)
       setProvisioningClaimToken(String(body.claimToken))
-      setClaimDraft({ username:'', password:'', confirm:'', sunshineUsername:'', sunshinePassword:'', sunshineConfirm:'' })
+      setProvisioningMode('claim')
+      clearClaimDraft()
       return true
     })()
     provisioningRecoveryInFlightRef.current.set(key, request)
     try{ return await request }
     finally{
       if(provisioningRecoveryInFlightRef.current.get(key) === request) provisioningRecoveryInFlightRef.current.delete(key)
+    }
+  }
+
+  async function loadPendingProvisioningJobs({ recoverUnclaimed = false } = {}){
+    try{
+      const res = await apiFetch('/provisioning-jobs/pending')
+      const body = await res.json().catch(()=>({ ok:res.ok, jobs:[] }))
+      if(!res.ok || body.ok === false) throw new Error(body.error?.message || body.error || 'Unable to list pending provisioning jobs')
+      const jobs = Array.isArray(body.jobs) ? body.jobs : []
+      setPendingProvisioningJobs(jobs)
+      setSunshineDefaultConfigured(Boolean(body.sunshineDefaultConfigured))
+      if(recoverUnclaimed){
+        const recoveries = jobs
+          .filter(entry => entry?.job?.claimAvailable && entry?.job?.id)
+          .map(entry => recoverPendingClaim(entry.host_id, entry.job.name, entry.job.id).catch(()=>false))
+        await Promise.all(recoveries)
+      }
+    }catch(_e){
+      // A transient inventory failure must not erase a queue already shown to the user.
+    }
+  }
+
+  useEffect(()=>{
+    let stopped = false
+    const refresh = async(recover = false) => { if(!stopped) await loadPendingProvisioningJobs({ recoverUnclaimed:recover }) }
+    void refresh(true)
+    const timer = setInterval(()=>void refresh(false), 5000)
+    return ()=>{ stopped=true; clearInterval(timer) }
+  }, [])
+
+  async function selectPendingProvisioningJob(entry){
+    const hostId = String(entry?.host_id || '')
+    const job = entry?.job || null
+    if(!hostId || !job?.id) return
+    setProvisioningHostId(hostId)
+    setProvisioningJob(job)
+    const token = provisioningClaimTokensRef.current.get(provisioningJobKey(hostId, job.id)) || ''
+    setProvisioningClaimToken(token)
+    setProvisioningMode(job.autonomousPending ? 'automatic' : 'claim')
+    clearClaimDraft()
+    if(String(job.state || '') === 'unclaimed' && !token){
+      try{ await recoverPendingClaim(hostId, job.name, job.id) }catch(_e){}
     }
   }
 
@@ -543,17 +604,25 @@ export default function VMManager(){
     setCreateBusy(true)
     try{
       if(placement === 'remote'){
-        try{ window.sessionStorage.setItem('epicvm.provisioning-recovery', JSON.stringify({hostId:selectedHostId,name})) }catch(_e){}
-        const res = await apiFetch('/provisioning-jobs', { method:'POST', headers:{'Content-Type':'application/json','Idempotency-Key':crypto.randomUUID()}, body: JSON.stringify({ host_id:selectedHostId, name, profile:provisioningProfile }) })
+        if(provisioningMode === 'claim'){
+          try{ window.sessionStorage.setItem('epicvm.provisioning-recovery', JSON.stringify({hostId:selectedHostId,name})) }catch(_e){}
+        }
+        const provisioningPayload = provisioningCreatePayload({ hostId:selectedHostId, name, profile:provisioningProfile, mode:provisioningMode })
+        const res = await apiFetch('/provisioning-jobs', { method:'POST', headers:{'Content-Type':'application/json','Idempotency-Key':crypto.randomUUID()}, body: JSON.stringify(provisioningPayload) })
         const j = await res.json().catch(()=>({ ok:res.ok }))
         if(!res.ok || j.ok === false) throw new Error(j.error?.message || j.error || `Failed to start provisioning for ${name}`)
-        setProvisioningJob(j.job || null)
+        const nextJob = j.job || null
+        const nextJobId = String(nextJob?.id || '')
+        const nextToken = String(j.claimToken || '')
+        if(nextToken && nextJobId) provisioningClaimTokensRef.current.set(provisioningJobKey(selectedHostId, nextJobId), nextToken)
+        setProvisioningJob(nextJob)
         setProvisioningHostId(selectedHostId)
-        setProvisioningClaimToken(String(j.claimToken || ''))
-        setClaimDraft({ username:'', password:'', confirm:'', sunshineUsername:'', sunshinePassword:'', sunshineConfirm:'' })
-        addToast({ title:'Provisioning started', message:`${name} is moving through the EpicVM setup gates`, type:'success', timeout:6000 })
+        setProvisioningClaimToken(provisioningMode === 'claim' ? nextToken : '')
+        clearClaimDraft()
+        addToast({ title:provisioningMode === 'claim' ? 'Claim job created' : 'Automatic provisioning started', message:provisioningMode === 'claim' ? `${name} is waiting for the Windows account details.` : `${name} is moving through the EpicVM setup gates without further input.`, type:'success', timeout:7000 })
         setCreateName('')
         setCreateBusy(false)
+        void loadPendingProvisioningJobs()
         return
       }
       const body = new URLSearchParams(payload)
@@ -565,10 +634,10 @@ export default function VMManager(){
       setTimeout(()=>load({ silent:true }), 1000)
     }catch(err){
       let recovered = false
-      if(placement === 'remote'){
+      if(placement === 'remote' && provisioningMode === 'claim'){
         try{ recovered = await recoverPendingClaim(selectedHostId, name) }catch(_recoveryError){}
       }
-      if(recovered) addToast({ title:'Pending claim recovered', message:'The one-use guest claim is ready again.', type:'success', timeout:7000 })
+      if(recovered) addToast({ title:'Pending claim recovered', message:'The claim job is still available below; enter the Windows account details when ready.', type:'success', timeout:7000 })
       else addToast({ title:'Create failed', message:String(err), type:'error', timeout:8000 })
     }
     setCreateBusy(false)
@@ -611,15 +680,16 @@ export default function VMManager(){
   async function claimProvisioningJob(e){
     e?.preventDefault?.()
     if(!provisioningJob || !canClaimProvisioningJob(provisioningJob) || !provisioningClaimToken) return
-    if(claimDraft.password !== claimDraft.confirm || claimDraft.sunshinePassword !== claimDraft.sunshineConfirm) { addToast({title:'Claim rejected', message:'Passwords do not match.', type:'error', timeout:6000}); return }
+    if(claimDraft.password !== claimDraft.confirm) { addToast({title:'Claim rejected', message:'Windows passwords do not match.', type:'error', timeout:6000}); return }
     setProvisioningBusy(true)
     try{
-      const res = await apiFetch(`/provisioning-jobs/${encodeURIComponent(provisioningJob.id)}/claim`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(provisioningClaimPayload({hostId:provisioningHostId, username:claimDraft.username, password:claimDraft.password, claimToken:provisioningClaimToken, sunshineUsername:claimDraft.sunshineUsername, sunshinePassword:claimDraft.sunshinePassword})) })
+      const res = await apiFetch(`/provisioning-jobs/${encodeURIComponent(provisioningJob.id)}/claim`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(provisioningClaimPayload({hostId:provisioningHostId, username:claimDraft.username, password:claimDraft.password, claimToken:provisioningClaimToken})) })
       const body = await res.json().catch(()=>({ ok:res.ok }))
       if(!res.ok || body.ok === false) { const err = new Error(body.error?.message || body.error || 'Guest claim failed'); err.safeCode = body.error?.code || body.code || ''; throw err }
+      provisioningClaimTokensRef.current.delete(provisioningJobKey(provisioningHostId, provisioningJob.id))
       setProvisioningClaimToken('')
       clearProvisioningRecovery()
-      setClaimDraft({ username:'', password:'', confirm:'', sunshineUsername:'', sunshinePassword:'', sunshineConfirm:'' })
+      setClaimDraft({ username:'', password:'', confirm:'' })
       setProvisioningJob(body.job || provisioningJob)
       addToast({title:'Guest claimed', message:'Continuing Tailscale, console, and readiness verification.', type:'success', timeout:7000})
     }catch(err){
@@ -632,16 +702,16 @@ export default function VMManager(){
       }
       addToast({title:'Claim failed', message:String(err), type:'error', timeout:8000})
     }
-    finally{ setClaimDraft({ username:'', password:'', confirm:'', sunshineUsername:'', sunshinePassword:'', sunshineConfirm:'' }); setProvisioningBusy(false) }
+    finally{ clearClaimDraft(); setProvisioningBusy(false) }
   }
 
   async function retryProvisioningConsole(e){
     e?.preventDefault?.()
     if(!provisioningJob || !canRetryProvisioningConsole(provisioningJob)) return
-    if(claimDraft.password !== claimDraft.confirm || claimDraft.sunshinePassword !== claimDraft.sunshineConfirm) { addToast({title:'Retry rejected', message:'Passwords do not match.', type:'error', timeout:6000}); return }
+    if(claimDraft.password !== claimDraft.confirm) { addToast({title:'Retry rejected', message:'Windows passwords do not match.', type:'error', timeout:6000}); return }
     setProvisioningBusy(true)
     try{
-      const res = await apiFetch(`/provisioning-jobs/${encodeURIComponent(provisioningJob.id)}/retry-console`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(provisioningConsoleRetryPayload({hostId:provisioningHostId, username:claimDraft.username, password:claimDraft.password, sunshineUsername:claimDraft.sunshineUsername, sunshinePassword:claimDraft.sunshinePassword})) })
+      const res = await apiFetch(`/provisioning-jobs/${encodeURIComponent(provisioningJob.id)}/retry-console`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(provisioningConsoleRetryPayload({hostId:provisioningHostId, username:claimDraft.username, password:claimDraft.password})) })
       const body = await res.json().catch(()=>({ ok:res.ok }))
       if(!res.ok || body.ok === false) throw new Error(body.error?.message || body.error || 'Console retry failed')
       setProvisioningJob(body.job || provisioningJob)
@@ -653,7 +723,7 @@ export default function VMManager(){
     }catch(err){
       await refreshProvisioningJob().catch(()=>null)
       addToast({title:'Console retry failed', message:String(err), type:'error', timeout:8000})
-    }finally{ setClaimDraft({ username:'', password:'', confirm:'', sunshineUsername:'', sunshinePassword:'', sunshineConfirm:'' }); setProvisioningBusy(false) }
+    }finally{ clearClaimDraft(); setProvisioningBusy(false) }
   }
 
   async function startTeardown(name, hostId){
@@ -967,6 +1037,31 @@ export default function VMManager(){
           </div>
         </form>
 
+        {pendingProvisioningJobs.length ? (
+          <div className="vm-placement-notice" style={{marginTop:16}}>
+            <div style={{display:'flex',justifyContent:'space-between',gap:12,alignItems:'baseline',flexWrap:'wrap'}}>
+              <div>
+                <strong>Provisioning queue</strong>
+                <div style={{color:'var(--muted)',fontSize:13,marginTop:4}}>Unfinished remote jobs stay here across refreshes and dashboard sessions. Select one to continue; no claim link is required.</div>
+              </div>
+              <span className="vm-meta-chip">{pendingProvisioningJobs.length} active</span>
+            </div>
+            <div style={{display:'grid',gap:8,marginTop:12}}>
+              {pendingProvisioningJobs.map(entry => {
+                const job = entry.job || {}
+                const automatic = Boolean(job.autonomousPending || job.autonomousOperationId)
+                const selectedJob = provisioningJob?.id === job.id && provisioningHostId === entry.host_id
+                return (
+                  <button key={`${entry.host_id}:${job.id}`} type="button" onClick={()=>selectPendingProvisioningJob(entry)} aria-pressed={selectedJob} style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:12,textAlign:'left',width:'100%',padding:'11px 13px',borderRadius:12,border:selectedJob ? '1px solid rgba(59,130,246,.75)' : '1px solid rgba(255,255,255,.1)',background:selectedJob ? 'rgba(30,64,175,.25)' : 'rgba(2,6,23,.45)',color:'#fff',cursor:'pointer'}}>
+                    <span style={{display:'grid',gap:3}}><strong>{job.name || 'Unnamed VM'}</strong><span style={{fontSize:12,color:'var(--muted)'}}>{entry.host_name || entry.host_id} · {automatic ? 'Automatic' : 'Claim mode'}</span></span>
+                    <span style={{fontSize:12,color:job.claimAvailable ? '#fbbf24' : 'var(--muted)'}}>{job.claimAvailable ? 'Awaiting Windows account' : (job.autonomousStage || job.state || 'In progress')}</span>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        ) : null}
+
         <form onSubmit={createVm} className="vm-create-form">
           <div className="vm-create-fields">
             <label className="vm-placement-field vm-name-field">
@@ -998,6 +1093,15 @@ export default function VMManager(){
                 </select>
               </label>
             ) : null}
+            {placement === 'remote' ? (
+              <label className="vm-placement-field">
+                <span>Provisioning mode</span>
+                <select value={provisioningMode} onChange={e=>setProvisioningMode(e.target.value)} disabled={createBusy}>
+                  <option value="automatic">Automatic · use protected defaults</option>
+                  <option value="claim">Claim · choose the Windows account</option>
+                </select>
+              </label>
+            ) : null}
             <Button type="submit" disabled={createBusy || !!placementReason || !!standardProfileReason}>{createBusy ? 'Creating…' : 'Create VM'}</Button>
           </div>
           <div className="vm-placement-summary">
@@ -1008,6 +1112,8 @@ export default function VMManager(){
           {placementReason ? <div id="vm-placement-reason" className="vm-placement-error" role="alert">{placementReason}</div> : null}
           {placement === 'remote' && provisioningProfile === 'gaming' && gamingProfileReason ? <div className="vm-placement-error" role="alert">{gamingProfileReason}</div> : null}
           {placement === 'remote' && provisioningProfile === 'standard' && standardProfileReason ? <div className="vm-placement-error" role="alert">{standardProfileReason}</div> : null}
+          {placement === 'remote' && provisioningMode === 'automatic' ? <div className="vm-placement-notice">{sunshineDefaultConfigured ? 'Automatic mode uses the protected dashboard Windows and Sunshine defaults. Nothing else is requested from you.' : 'Automatic mode uses protected defaults. The dashboard is still checking the protected Sunshine configuration.'}</div> : null}
+          {placement === 'remote' && provisioningMode === 'claim' ? <div className="vm-placement-notice">Claim mode asks only for the Windows username and password you want. Sunshine pairing continues with the protected dashboard default.</div> : null}
           {provisioningJob ? (
             <div className="vm-placement-notice" style={{marginTop:12}}>
               <div style={{display:'flex',justifyContent:'space-between',gap:12,flexWrap:'wrap'}}>
@@ -1015,33 +1121,25 @@ export default function VMManager(){
                 <span>{provisioningJob.state}</span>
               </div>
               <div style={{height:8,background:'rgba(255,255,255,.1)',borderRadius:999,marginTop:10,overflow:'hidden'}}><div style={{height:'100%',width:`${provisioningProgress(provisioningJob)}%`,background:'#22c55e',transition:'width .25s'}} /></div>
+              {provisioningJob.autonomousPending ? <div style={{color:'var(--muted)',fontSize:13,marginTop:10}}>Automatic setup is running with protected defaults. Current stage: {provisioningJob.autonomousStage || 'claim'}.</div> : null}
+              {provisioningJob.autonomousOutcome === 'failed' ? <div role="alert" style={{color:'#fca5a5',marginTop:10}}>Automatic setup stopped safely. The VM was retained for diagnosis.</div> : null}
               {canClaimProvisioningJob(provisioningJob) && provisioningClaimToken ? (
                 <div style={{display:'grid',gap:8,marginTop:12}}>
-                  <strong>One-time guest claim</strong>
-                  <span style={{color:'var(--muted)',fontSize:13}}>Use an administrator username and password for this guest. The claim is single-use and is not shown again.</span>
-                  <input value={claimDraft.username} onChange={e=>setClaimDraft(s=>({...s,username:e.target.value}))} placeholder="Guest admin username" autoComplete="username" required />
-                  <input value={claimDraft.password} onChange={e=>setClaimDraft(s=>({...s,password:e.target.value}))} placeholder="Guest admin password" type="password" autoComplete="new-password" required />
-                  <input value={claimDraft.confirm} onChange={e=>setClaimDraft(s=>({...s,confirm:e.target.value}))} placeholder="Repeat password" type="password" autoComplete="new-password" required />
-                  <strong style={{marginTop:8}}>Sunshine pairing account</strong>
-                  <span style={{color:'var(--muted)',fontSize:13}}>Use the existing Sunshine web account on the guest. These fields are request-only and are cleared after pairing.</span>
-                  <input value={claimDraft.sunshineUsername} onChange={e=>setClaimDraft(s=>({...s,sunshineUsername:e.target.value}))} placeholder="Sunshine username" autoComplete="username" required />
-                  <input value={claimDraft.sunshinePassword} onChange={e=>setClaimDraft(s=>({...s,sunshinePassword:e.target.value}))} placeholder="Sunshine password" type="password" autoComplete="current-password" required />
-                  <input value={claimDraft.sunshineConfirm} onChange={e=>setClaimDraft(s=>({...s,sunshineConfirm:e.target.value}))} placeholder="Repeat Sunshine password" type="password" autoComplete="current-password" required />
+                  <strong>Choose the Windows account</strong>
+                  <span style={{color:'var(--muted)',fontSize:13}}>Enter only the Windows username and password you want on this VM. Sunshine pairing uses the protected dashboard default automatically.</span>
+                  <input value={claimDraft.username} onChange={e=>setClaimDraft(s=>({...s,username:e.target.value}))} placeholder="Windows username" autoComplete="username" required />
+                  <input value={claimDraft.password} onChange={e=>setClaimDraft(s=>({...s,password:e.target.value}))} placeholder="Windows password" type="password" autoComplete="new-password" required />
+                  <input value={claimDraft.confirm} onChange={e=>setClaimDraft(s=>({...s,confirm:e.target.value}))} placeholder="Repeat Windows password" type="password" autoComplete="new-password" required />
                   <Button type="button" onClick={claimProvisioningJob} disabled={provisioningBusy}>{provisioningBusy ? 'Claiming…' : 'Claim guest securely'}</Button>
                 </div>
               ) : null}
               {canRetryProvisioningConsole(provisioningJob) ? (
                 <div style={{display:'grid',gap:8,marginTop:12}}>
                   <strong>Retry retained console</strong>
-                  <span style={{color:'var(--muted)',fontSize:13}}>The VM was retained. Re-enter its credentials to rebuild only the stopped console bundle.</span>
-                  <input value={claimDraft.username} onChange={e=>setClaimDraft(s=>({...s,username:e.target.value}))} placeholder="Guest administrator" autoComplete="username" required />
-                  <input value={claimDraft.password} onChange={e=>setClaimDraft(s=>({...s,password:e.target.value}))} placeholder="Guest password" type="password" autoComplete="current-password" required />
-                  <input value={claimDraft.confirm} onChange={e=>setClaimDraft(s=>({...s,confirm:e.target.value}))} placeholder="Repeat password" type="password" autoComplete="current-password" required />
-                  <strong style={{marginTop:8}}>Sunshine pairing account</strong>
-                  <span style={{color:'var(--muted)',fontSize:13}}>Re-enter the existing Sunshine web account to pair the retained VM. No password is stored.</span>
-                  <input value={claimDraft.sunshineUsername} onChange={e=>setClaimDraft(s=>({...s,sunshineUsername:e.target.value}))} placeholder="Sunshine username" autoComplete="username" required />
-                  <input value={claimDraft.sunshinePassword} onChange={e=>setClaimDraft(s=>({...s,sunshinePassword:e.target.value}))} placeholder="Sunshine password" type="password" autoComplete="current-password" required />
-                  <input value={claimDraft.sunshineConfirm} onChange={e=>setClaimDraft(s=>({...s,sunshineConfirm:e.target.value}))} placeholder="Repeat Sunshine password" type="password" autoComplete="current-password" required />
+                  <span style={{color:'var(--muted)',fontSize:13}}>The VM was retained. Re-enter only the Windows credentials to rebuild the stopped console bundle; Sunshine uses the protected dashboard default.</span>
+                  <input value={claimDraft.username} onChange={e=>setClaimDraft(s=>({...s,username:e.target.value}))} placeholder="Windows username" autoComplete="username" required />
+                  <input value={claimDraft.password} onChange={e=>setClaimDraft(s=>({...s,password:e.target.value}))} placeholder="Windows password" type="password" autoComplete="current-password" required />
+                  <input value={claimDraft.confirm} onChange={e=>setClaimDraft(s=>({...s,confirm:e.target.value}))} placeholder="Repeat Windows password" type="password" autoComplete="current-password" required />
                   <Button type="button" onClick={retryProvisioningConsole} disabled={provisioningBusy}>{provisioningBusy ? 'Retrying…' : 'Retry console securely'}</Button>
                 </div>
               ) : null}

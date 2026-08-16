@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { canClaimProvisioningJob, canOpenInventoryVm, canOpenProvisionedVm, canRetryProvisioningConsole, deprovisioningPayload, provisioningClaimPayload, provisioningConsoleRetryPayload, provisioningFailureReason, provisioningProgress } from '../src/lib/provisioningUi.js'
+import { canClaimProvisioningJob, canOpenInventoryVm, canOpenProvisionedVm, canRetryProvisioningConsole, deprovisioningPayload, provisioningClaimPayload, provisioningConsoleRetryPayload, provisioningCreatePayload, provisioningFailureReason, provisioningProgress } from '../src/lib/provisioningUi.js'
 
 test('claim and open gates are state-specific', () => {
   assert.equal(canClaimProvisioningJob({ state:'unclaimed' }), true)
@@ -25,6 +25,15 @@ test('claim payload keeps the token in the request boundary and teardown require
   assert.deepEqual(deprovisioningPayload({ hostId:'epic-pc', name:' Alpha ' }), { host_id:'epic-pc', name:'alpha', confirmName:'alpha' })
   assert.deepEqual(provisioningConsoleRetryPayload({ hostId:'epic-pc', username:'operator', password:'transient-password' }), {
     host_id:'epic-pc', username:'operator', password:'transient-password'
+  })
+  assert.deepEqual(provisioningCreatePayload({ hostId:'epic-pc', name:' Alpha ', profile:'standard', mode:'claim' }), {
+    host_id:'epic-pc', name:'alpha', profile:'standard', mode:'claim'
+  })
+  assert.deepEqual(provisioningCreatePayload({ hostId:'epic-pc', name:' Alpha ', mode:'unknown' }), {
+    host_id:'epic-pc', name:'alpha', profile:'standard', mode:'automatic'
+  })
+  assert.deepEqual(provisioningClaimPayload({ hostId:'epic-pc', username:'operator', password:'transient-password', claimToken:'one-use', sunshineUsername:'ignored', sunshinePassword:'ignored' }), {
+    host_id:'epic-pc', username:'operator', password:'transient-password', claimToken:'one-use'
   })
 })
 

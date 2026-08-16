@@ -85,6 +85,86 @@ def _dashboard_secret() -> str:
     # Never mint or verify a protected session with a public/default secret.
     return os.environ.get('DASH_V2_SECRET', '').strip()
 
+
+def _provisioning_defaults_path() -> str:
+    return os.environ.get(
+        'EPICVM_PROVISIONING_CREDENTIALS_FILE',
+        '/opt/epicvm/secrets/provisioning-defaults.json',
+    ).strip()
+
+
+def _load_provisioning_defaults() -> dict[str, str]:
+    """Load the protected dashboard-side credential bundle without logging it."""
+    path = _provisioning_defaults_path()
+    if not path:
+        return {}
+    try:
+        mode = os.stat(path).st_mode & 0o777
+        if os.name != 'nt' and mode & 0o077:
+            return {}
+        with open(path, 'r', encoding='utf-8') as handle:
+            raw = json.load(handle)
+        if not isinstance(raw, dict):
+            return {}
+        values = {
+            'guest_username': str(raw.get('guestUsername') or raw.get('guest_username') or ''),
+            'guest_password': str(raw.get('guestPassword') or raw.get('guest_password') or ''),
+            'sunshine_username': str(raw.get('sunshineUsername') or raw.get('sunshine_username') or ''),
+            'sunshine_password': str(raw.get('sunshinePassword') or raw.get('sunshine_password') or ''),
+        }
+        if not all(values.values()):
+            return {}
+        return values
+    except (OSError, TypeError, ValueError, UnicodeError):
+        return {}
+
+
+def _default_sunshine_credentials() -> tuple[str, str] | None:
+    defaults = _load_provisioning_defaults()
+    if not defaults.get('sunshine_username') or not defaults.get('sunshine_password'):
+        return None
+    return defaults['sunshine_username'], defaults['sunshine_password']
+
+
+def _default_guest_credentials() -> tuple[str, str] | None:
+    defaults = _load_provisioning_defaults()
+    if not defaults.get('guest_username') or not defaults.get('guest_password'):
+        return None
+    return defaults['guest_username'], defaults['guest_password']
+
+
+def _resolve_sunshine_credentials(username: str, password: str) -> tuple[str, str] | None:
+    if username and password:
+        return username, password
+    return _default_sunshine_credentials()
+
+
+def _safe_provisioning_job(job: object) -> dict:
+    """Return only non-secret provisioning metadata for browser clients."""
+    if not isinstance(job, dict):
+        return {}
+    allowed = (
+        'id', 'name', 'profile', 'state', 'errorCode', 'failureStage',
+        'failureDetailCode', 'tailnetIp', 'vmId', 'consoleRoutePrefix',
+        'completedStages', 'claimConsumed', 'claimUsed', 'updatedAt',
+        'createdAt', 'operationId', 'consoleRetryPending', 'consoleRetryOutcome',
+        'consoleRepairPending', 'consoleRepairOutcome', 'consoleOperationId',
+        'autonomousPending', 'autonomousOperationId', 'autonomousStage',
+        'autonomousOutcome', 'autonomousErrorCode',
+    )
+    return {key: job[key] for key in allowed if key in job and job[key] is not None}
+
+
+def _is_pending_provisioning_job(job: object) -> bool:
+    if not isinstance(job, dict):
+        return False
+    state = str(job.get('state') or '')
+    if state == 'unclaimed' and not bool(job.get('claimConsumed')):
+        return True
+    if not bool(job.get('claimConsumed')):
+        return False
+    return state not in {'ready', 'failed'} and not state.startswith('setup_failed:')
+
 def _request_is_https() -> bool:
     forwarded = request.headers.get('X-Forwarded-Proto', '').split(',', 1)[0].strip().lower()
     return bool(request.is_secure or forwarded == 'https')
@@ -375,6 +455,61 @@ def _start_remote_moonlight_console_retry(*, host, host_id, job_id, name, guest_
         guest_username = guest_password = sunshine_username = sunshine_password = ''
 
 
+def _start_remote_autonomous_provisioning(*, host, host_id, job_id, name,
+                                          claim_token, guest_username,
+                                          guest_password, sunshine_username,
+                                          sunshine_password, orchestrator,
+                                          operation_id):
+    """Finish an automatic dashboard provisioning request without browser input."""
+    key = (str(host_id), str(job_id))
+    try:
+        token = str(claim_token or '')
+        if not token:
+            reissued = host.claim_reissue(job_id)
+            token = str(reissued.get('claimToken') or '') if isinstance(reissued, dict) else ''
+        if not token:
+            raise ConsoleOrchestrationError('The host did not return a one-time claim.', status=502, code='claim_token_missing')
+        claimed = host.claim(job_id, guest_username, guest_password, token)
+        job = claimed.get('job') if isinstance(claimed, dict) else None
+        state = str(job.get('state') or '') if isinstance(job, dict) else ''
+        if state != 'streaming_setup':
+            raise ConsoleOrchestrationError('The host did not reach the console gate.', status=422, code='console_gate_missing')
+        guest_ip = str(job.get('tailnetIp') or '')
+        if not guest_ip:
+            raise ConsoleOrchestrationError('The host did not return a verified Tailscale address.', status=422, code='tailnet_ip_missing')
+        with _CONSOLE_RETRY_LOCK:
+            current = _CONSOLE_RETRY_TASKS.get(key) or {}
+            current['stage'] = 'console'
+            _CONSOLE_RETRY_TASKS[key] = current
+        _start_remote_moonlight_console_retry(
+            host=host,
+            host_id=host_id,
+            job_id=job_id,
+            name=name,
+            guest_ip=guest_ip,
+            route_name=_remote_console_route_name(name, host_id),
+            guest_username=guest_username,
+            guest_password=guest_password,
+            sunshine_username=sunshine_username,
+            sunshine_password=sunshine_password,
+            orchestrator=orchestrator,
+            operation_id=operation_id,
+        )
+    except ConsoleOrchestrationError as exc:
+        failure_code = _safe_console_retry_code(getattr(exc, 'code', 'autonomous_provisioning_failed'))
+        _set_console_retry_result(key, status='failed', operation_id=operation_id, failure_code=failure_code)
+        app.logger.warning('EpicVM autonomous provisioning failed operation=%s code=%s', operation_id, failure_code)
+    except VmHostUnavailable as exc:
+        failure_code = _safe_console_retry_code(getattr(exc, 'code', 'autonomous_provisioning_failed'))
+        _set_console_retry_result(key, status='failed', operation_id=operation_id, failure_code=failure_code)
+        app.logger.warning('EpicVM autonomous provisioning failed operation=%s code=%s', operation_id, failure_code)
+    except Exception:
+        _set_console_retry_result(key, status='failed', operation_id=operation_id, failure_code='autonomous_provisioning_failed')
+        app.logger.warning('EpicVM autonomous provisioning failed operation=%s code=autonomous_provisioning_failed', operation_id)
+    finally:
+        guest_username = guest_password = sunshine_username = sunshine_password = claim_token = ''
+
+
 def _start_remote_moonlight_console_repair(*, host, host_id, job_id, name, guest_ip,
                                              route_name, sunshine_username,
                                              sunshine_password, orchestrator,
@@ -547,6 +682,12 @@ def _vm_host_error_response(exc):
         'claim_state_invalid': 'The pending claim state is invalid.',
         'claim_reissue_failed': 'The pending claim could not be reissued safely.',
         'claim_expired': 'The pending claim has expired.',
+        'provisioning_defaults_unavailable': 'The protected automatic provisioning defaults are not configured on this dashboard.',
+        'sunshine_credentials_unavailable': 'The protected Sunshine default is not configured on this dashboard.',
+        'claim_token_missing': 'The host did not return a one-time guest claim.',
+        'console_gate_missing': 'The host did not reach the console setup gate.',
+        'tailnet_ip_missing': 'The host did not return a verified Tailscale address.',
+        'autonomous_provisioning_failed': 'Automatic provisioning stopped safely; the VM was retained for diagnosis.',
         'bootstrap_credential_unavailable': 'The machine bootstrap channel is unavailable.',
         'bootstrap_readiness_unavailable': 'The host lacks the secure guest-readiness check.',
         'guest_bootstrap_not_ready': 'The cloned guest did not become ready for secure setup.',
@@ -2723,8 +2864,10 @@ def dashboard_console_credentials(name):
     try:
         orchestrator = _console_for_vm(name)
         if _moonlight_console(orchestrator):
-            if not sunshine_username or not sunshine_password:
-                return jsonify({'ok': False, 'error': {'code': 'sunshine_credentials_required', 'message': 'Sunshine credentials are required for pairing.'}}), 400
+            resolved_sunshine = _resolve_sunshine_credentials(sunshine_username, sunshine_password)
+            if not resolved_sunshine:
+                return jsonify({'ok': False, 'error': {'code': 'sunshine_credentials_unavailable', 'message': 'The protected Sunshine default is not configured on this dashboard.'}}), 503
+            sunshine_username, sunshine_password = resolved_sunshine
             orchestrator.enable_auto_login(name=name, username='', password='', sunshine_username=sunshine_username, sunshine_password=sunshine_password)
         else:
             orchestrator.enable_auto_login(name=name, username=username, password=password)
@@ -3888,7 +4031,8 @@ def api_provisioning_job_create():
     host_id = str(payload.get('host_id') or payload.get('host') or '').strip()
     name = str(payload.get('name') or '').strip()
     profile = str(payload.get('profile') or 'standard').strip().lower()
-    if not host_id or not name or profile not in {'standard', 'gaming'}:
+    mode = str(payload.get('mode') or 'claim').strip().lower()
+    if not host_id or not name or profile not in {'standard', 'gaming'} or mode not in {'claim', 'automatic'}:
         response = jsonify({'ok': False, 'error': 'host_id, name, and a valid profile are required'})
         response.headers['Cache-Control'] = 'no-store'
         return response, 400
@@ -3903,14 +4047,150 @@ def api_provisioning_job_create():
             response = jsonify({'ok': False, 'error': 'Provisioning prerequisites are not ready on this host', 'code': 'provisioning_unavailable'})
             response.headers['Cache-Control'] = 'no-store'
             return response, 409
+        guest_credentials = None
+        sunshine_credentials = None
+        orchestrator = None
+        if mode == 'automatic':
+            guest_credentials = _default_guest_credentials()
+            if not guest_credentials:
+                response = jsonify({'ok': False, 'error': {'code': 'provisioning_defaults_unavailable', 'message': 'The protected automatic provisioning defaults are not configured on this dashboard.'}})
+                response.headers['Cache-Control'] = 'no-store'
+                return response, 503
+            orchestrator = _console_orchestrator()
+            if _moonlight_console(orchestrator):
+                sunshine_credentials = _default_sunshine_credentials()
+                if not sunshine_credentials:
+                    response = jsonify({'ok': False, 'error': {'code': 'sunshine_credentials_unavailable', 'message': 'The protected Sunshine default is not configured on this dashboard.'}})
+                    response.headers['Cache-Control'] = 'no-store'
+                    return response, 503
+            else:
+                sunshine_credentials = ('', '')
         result = host.provision(name, profile, idempotency_key=request.headers.get('Idempotency-Key'))
-        response = jsonify({'ok': True, 'host_id': host_id, **result})
+        if mode == 'automatic':
+            job = result.get('job') if isinstance(result, dict) else None
+            job_id = str(job.get('id') or '') if isinstance(job, dict) else ''
+            if not job_id:
+                raise ConsoleOrchestrationError('The host did not return a provisioning job id.', status=502, code='autonomous_provisioning_failed')
+            operation_id = secrets.token_hex(16)
+            task_key = (host_id, job_id)
+            task_created = False
+            with _CONSOLE_RETRY_LOCK:
+                existing = _CONSOLE_RETRY_TASKS.get(task_key)
+                if not (isinstance(existing, dict) and str(existing.get('status') or 'pending') == 'pending' and existing.get('autonomous')):
+                    _CONSOLE_RETRY_TASKS[task_key] = {
+                        'operationId': operation_id,
+                        'startedAt': time.time(),
+                        'status': 'pending',
+                        'failureCode': '',
+                        'routeReady': False,
+                        'autonomous': True,
+                        'stage': 'claim',
+                    }
+                    task_created = True
+                else:
+                    operation_id = str(existing.get('operationId') or operation_id)
+            if task_created:
+                worker = threading.Thread(
+                    target=_start_remote_autonomous_provisioning,
+                    kwargs={
+                        'host': host,
+                        'host_id': host_id,
+                        'job_id': job_id,
+                        'name': str(job.get('name') or name) if isinstance(job, dict) else name,
+                        'claim_token': str(result.get('claimToken') or '') if isinstance(result, dict) else '',
+                        'guest_username': guest_credentials[0],
+                        'guest_password': guest_credentials[1],
+                        'sunshine_username': sunshine_credentials[0],
+                        'sunshine_password': sunshine_credentials[1],
+                        'orchestrator': orchestrator,
+                        'operation_id': operation_id,
+                    },
+                    name=f'epicvm-autonomous-provision-{operation_id[:8]}',
+                    daemon=True,
+                )
+                worker.start()
+            safe_job = _safe_provisioning_job(job)
+            safe_job.update({
+                'autonomousPending': True,
+                'autonomousOperationId': operation_id,
+                'autonomousStage': 'claim',
+            })
+            response = jsonify({
+                'ok': True,
+                'host_id': host_id,
+                'mode': mode,
+                'pending': True,
+                'operationId': operation_id,
+                'job': safe_job,
+            })
+        else:
+            response = jsonify({'ok': True, 'host_id': host_id, 'mode': mode, **result})
         response.headers['Cache-Control'] = 'no-store'
         return response, 202
     except VmHostUnavailable as exc:
         return _vm_host_error_response(exc)
     except Exception:
         response = jsonify({'ok': False, 'error': 'Unable to start the provisioning job'})
+        response.headers['Cache-Control'] = 'no-store'
+        return response, 502
+
+
+@app.get('/dashboard/api/provisioning-jobs/pending')
+@auth_required
+def api_provisioning_jobs_pending():
+    """List safe, unfinished remote jobs so the dashboard can recover itself."""
+    entries = []
+    try:
+        VM_HOST_REGISTRY.refresh()
+        providers = getattr(VM_HOST_REGISTRY, 'providers', {})
+        provider_items = providers.items() if isinstance(providers, dict) else []
+        for provider_id, host in provider_items:
+            provider_id = str(provider_id)
+            if provider_id == 'local' or getattr(host, 'kind', 'remote') != 'remote':
+                continue
+            if not hasattr(host, 'provisioning_jobs'):
+                continue
+            try:
+                jobs = host.provisioning_jobs()
+            except VmHostUnavailable:
+                continue
+            for raw_job in jobs if isinstance(jobs, list) else []:
+                if not _is_pending_provisioning_job(raw_job):
+                    continue
+                safe_job = _safe_provisioning_job(raw_job)
+                task = None
+                with _CONSOLE_RETRY_LOCK:
+                    task = _CONSOLE_RETRY_TASKS.get((provider_id, str(safe_job.get('id') or '')))
+                if task and task.get('autonomous'):
+                    safe_job.update({
+                        'autonomousPending': str(task.get('status') or 'pending') == 'pending',
+                        'autonomousOperationId': str(task.get('operationId') or ''),
+                        'autonomousStage': str(task.get('stage') or 'claim'),
+                    })
+                safe_job['claimAvailable'] = (
+                    str(safe_job.get('state') or '') == 'unclaimed'
+                    and not bool(safe_job.get('claimConsumed'))
+                    and not bool(safe_job.get('autonomousPending'))
+                )
+                entries.append({
+                    'host_id': provider_id,
+                    'host_name': str(getattr(host, 'host_name', provider_id) or provider_id),
+                    'job': safe_job,
+                })
+        entries.sort(key=lambda item: str(item.get('job', {}).get('updatedAt') or ''), reverse=True)
+        response = jsonify({
+            'ok': True,
+            'jobs': entries,
+            'sunshineDefaultConfigured': bool(_default_sunshine_credentials()),
+        })
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+    except VmHostUnavailable:
+        response = jsonify({'ok': True, 'jobs': [], 'sunshineDefaultConfigured': bool(_default_sunshine_credentials())})
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+    except Exception:
+        response = jsonify({'ok': False, 'error': 'Unable to list pending provisioning jobs'})
         response.headers['Cache-Control'] = 'no-store'
         return response, 502
 
@@ -3929,15 +4209,27 @@ def api_provisioning_job_recover():
     payload = request.get_json(silent=True) if request.is_json else request.form.to_dict(flat=True)
     payload = payload if isinstance(payload, dict) else {}
     host_id = str(payload.get('host_id') or '').strip()
+    requested_job_id = str(payload.get('job_id') or payload.get('jobId') or '').strip()
     name = str(payload.get('name') or '').strip().lower()
-    if not host_id or not re.fullmatch(r'[a-z0-9][a-z0-9._-]{0,62}', name):
-        return jsonify({'ok': False, 'error': 'host_id and a valid VM name are required'}), 400
+    if not host_id or (not requested_job_id and not re.fullmatch(r'[a-z0-9][a-z0-9._-]{0,62}', name)):
+        return jsonify({'ok': False, 'error': 'host_id and either a valid job_id or VM name are required'}), 400
+    if requested_job_id and not re.fullmatch(r'[A-Za-z0-9._:-]{1,128}', requested_job_id):
+        return jsonify({'ok': False, 'error': 'job_id is invalid'}), 400
     try:
         host = _vm_host(host_id)
         if not hasattr(host, 'provisioning_jobs') or not hasattr(host, 'claim_reissue'):
             return jsonify({'ok': False, 'error': 'Claim recovery is unavailable on this host'}), 409
         jobs = [item for item in host.provisioning_jobs() if isinstance(item, dict)]
-        candidates = [item for item in jobs if str(item.get('name') or '').lower() == name and str(item.get('state') or '') == 'unclaimed' and not bool(item.get('claimConsumed'))]
+        candidates = [
+            item for item in jobs
+            if str(item.get('state') or '') == 'unclaimed'
+            and not bool(item.get('claimConsumed'))
+            and (
+                str(item.get('id') or '') == requested_job_id
+                if requested_job_id
+                else str(item.get('name') or '').lower() == name
+            )
+        ]
         if not candidates:
             return jsonify({'ok': False, 'error': {'code': 'claim_recovery_not_available', 'message': 'No unclaimed pending job exists for this VM.'}}), 404
         candidates.sort(key=lambda item: str(item.get('updatedAt') or ''), reverse=True)
@@ -4001,6 +4293,19 @@ def api_provisioning_job_status(job_id):
                         'consoleRepairOutcome': 'ready',
                         'consoleOperationId': pending['operationId'],
                     })
+            elif pending.get('autonomous'):
+                status['job'].update({
+                    'autonomousPending': task_status == 'pending',
+                    'autonomousOperationId': pending['operationId'],
+                    'autonomousStage': str(pending.get('stage') or 'claim'),
+                })
+                if task_status == 'failed':
+                    status['job'].update({
+                        'autonomousOutcome': 'failed',
+                        'autonomousErrorCode': _safe_console_retry_code(pending.get('failureCode'), 'autonomous_provisioning_failed'),
+                    })
+                elif task_status == 'ready':
+                    status['job']['autonomousOutcome'] = 'ready'
             elif task_status == 'pending':
                 # The agent may still show setup_failed:streaming until its
                 # credential-bearing request completes. Overlay only safe,
@@ -4053,17 +4358,23 @@ def api_provisioning_job_claim(job_id):
     username = str(payload.get('username') or '')
     password = str(payload.get('password') or '')
     claim_token = str(payload.get('claimToken') or payload.get('claim_token') or '')
-    sunshine_username = str(payload.get('sunshineUsername') or payload.get('sunshine_username') or '')
-    sunshine_password = str(payload.get('sunshinePassword') or payload.get('sunshine_password') or '')
+    # Claim mode intentionally accepts only Windows credentials. Sunshine
+    # pairing always uses the protected dashboard default; client-supplied
+    # Sunshine fields are ignored rather than treated as an override.
+    sunshine_username = ''
+    sunshine_password = ''
     if not host_id or not username or not password or not claim_token:
         response = jsonify({'ok': False, 'error': 'host_id and claim fields are required'})
         response.headers['Cache-Control'] = 'no-store'
         return response, 400
     orchestrator = _console_orchestrator()
-    if _moonlight_console(orchestrator) and (not sunshine_username or not sunshine_password):
-        response = jsonify({'ok': False, 'error': {'code': 'sunshine_credentials_required', 'message': 'Sunshine credentials are required for Moonlight pairing.'}})
-        response.headers['Cache-Control'] = 'no-store'
-        return response, 400
+    if _moonlight_console(orchestrator):
+        resolved_sunshine = _resolve_sunshine_credentials(sunshine_username, sunshine_password)
+        if not resolved_sunshine:
+            response = jsonify({'ok': False, 'error': {'code': 'sunshine_credentials_unavailable', 'message': 'The protected Sunshine default is not configured on this dashboard.'}})
+            response.headers['Cache-Control'] = 'no-store'
+            return response, 503
+        sunshine_username, sunshine_password = resolved_sunshine
     try:
         host = _vm_host(host_id)
         if not hasattr(host, 'claim'):
@@ -4148,13 +4459,18 @@ def api_provisioning_job_retry_console(job_id):
     host_id = str(payload.get('host_id') or '').strip()
     username = str(payload.get('username') or '')
     password = str(payload.get('password') or '')
-    sunshine_username = str(payload.get('sunshineUsername') or payload.get('sunshine_username') or '')
-    sunshine_password = str(payload.get('sunshinePassword') or payload.get('sunshine_password') or '')
+    # Retained console retries use the protected Sunshine default as well;
+    # only the Windows credentials are accepted from the browser.
+    sunshine_username = ''
+    sunshine_password = ''
     if not host_id or not username or not password:
         return jsonify({'ok': False, 'error': 'host_id and console credentials are required'}), 400
     orchestrator = _console_orchestrator()
-    if _moonlight_console(orchestrator) and (not sunshine_username or not sunshine_password):
-        return jsonify({'ok': False, 'error': {'code': 'sunshine_credentials_required', 'message': 'Sunshine credentials are required for Moonlight pairing.'}}), 400
+    if _moonlight_console(orchestrator):
+        resolved_sunshine = _resolve_sunshine_credentials(sunshine_username, sunshine_password)
+        if not resolved_sunshine:
+            return jsonify({'ok': False, 'error': {'code': 'sunshine_credentials_unavailable', 'message': 'The protected Sunshine default is not configured on this dashboard.'}}), 503
+        sunshine_username, sunshine_password = resolved_sunshine
     try:
         host = _vm_host(host_id)
         current = host.provisioning_status(job_id)
@@ -4297,8 +4613,10 @@ def api_provisioning_job_repair_console(job_id):
     orchestrator = _console_orchestrator()
     if not _moonlight_console(orchestrator):
         return jsonify({'ok': False, 'error': {'code': 'console_repair_not_allowed', 'message': 'Moonlight console repair is unavailable on this host.'}}), 409
-    if not sunshine_username or not sunshine_password:
-        return jsonify({'ok': False, 'error': {'code': 'sunshine_credentials_required', 'message': 'Sunshine credentials are required for pairing.'}}), 400
+    resolved_sunshine = _resolve_sunshine_credentials(sunshine_username, sunshine_password)
+    if not resolved_sunshine:
+        return jsonify({'ok': False, 'error': {'code': 'sunshine_credentials_unavailable', 'message': 'The protected Sunshine default is not configured on this dashboard.'}}), 503
+    sunshine_username, sunshine_password = resolved_sunshine
     try:
         host = _vm_host(host_id)
         if getattr(host, 'kind', 'local') != 'remote':
