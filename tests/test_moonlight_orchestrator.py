@@ -51,6 +51,16 @@ def test_plan_is_digest_pinned_path_correct_and_does_not_contain_credentials(tmp
     assert "transient-password" not in plan.compose + plan.config + plan.data
 
 
+def test_remote_plan_can_use_host_scoped_route_without_changing_vm_name(tmp_path):
+    orch = make_orchestrator(tmp_path)
+    plan = orch.build_plan(name="testprovvm", guest_ip="100.111.82.1", route_name="testprovvm--epic-pc")
+    assert plan.name == "testprovvm"
+    assert plan.route_prefix == "/vm/testprovvm--epic-pc/"
+    assert "PathPrefix(`/vm/testprovvm--epic-pc/`)" in plan.compose
+    assert json.loads(plan.config)["web_server"]["url_path_prefix"] == "/vm/testprovvm--epic-pc"
+    assert "dashboard/auth/vm/testprovvm" in plan.compose
+
+
 def test_staging_writes_only_safe_owned_metadata(tmp_path):
     orch = make_orchestrator(tmp_path)
     target = orch.stage_plan(orch.build_plan(name="alpha", guest_ip="100.111.82.1"))
@@ -118,7 +128,7 @@ def test_pairing_keeps_sunshine_secret_out_of_bundle(tmp_path):
 
     orch = make_orchestrator(tmp_path, http_request=http)
     orch.stage_plan(orch.build_plan(name="alpha", guest_ip="100.111.82.1"))
-    orch._container_url = lambda _name: "http://172.20.0.2:8080/vm/alpha"
+    orch._container_url = lambda _name, _route_prefix=None: "http://172.20.0.2:8080/vm/alpha"
     result = orch.pair_staged("alpha", sunshine_username="sunshine-user", sunshine_password="secret-value")
     assert result["paired"] is True
     pair = next(call for call in calls if call[1].endswith("/api/pair"))

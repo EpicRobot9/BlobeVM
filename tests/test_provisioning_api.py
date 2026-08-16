@@ -298,7 +298,7 @@ def test_remote_moonlight_retry_returns_pending_and_deduplicates(monkeypatch, tm
         def quarantine_staged(self, name):
             return None
 
-        def build_plan(self, name, guest_ip):
+        def build_plan(self, name, guest_ip, route_name=None):
             return SimpleNamespace(route_prefix=f"/vm/{name}/")
 
         def stage_plan(self, plan):

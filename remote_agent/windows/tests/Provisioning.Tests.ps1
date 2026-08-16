@@ -33,6 +33,31 @@ Describe 'EpicVM provisioning safety' {
         $text | Should -Match 'Guest.*10-minute|\$Job\.name 600 1000'
     }
 
+    It 'allows retry only for an unclaimed preclaim failure' {
+        $preclaim = [pscustomobject]@{
+            state = 'setup_failed:preclaim'
+            claimConsumed = $false
+            claimUsed = $false
+            failureStage = 'preclaim'
+        }
+        $consumed = [pscustomobject]@{
+            state = 'setup_failed:guest'
+            claimConsumed = $true
+            claimUsed = $true
+            failureStage = 'guest'
+        }
+        $active = [pscustomobject]@{
+            state = 'booting'
+            claimConsumed = $false
+            claimUsed = $false
+            failureStage = ''
+        }
+
+        (Test-EpicVMProvisioningJobRetryable -Job $preclaim) | Should -BeTrue
+        (Test-EpicVMProvisioningJobRetryable -Job $consumed) | Should -BeFalse
+        (Test-EpicVMProvisioningJobRetryable -Job $active) | Should -BeFalse
+    }
+
     It 'uses the locked standard and gaming resource profiles' {
         (Get-EpicVMProvisioningProfile -Profile standard).cpuCount | Should -Be 4
         (Get-EpicVMProvisioningProfile -Profile standard).memoryBytes | Should -Be 8589934592
@@ -106,6 +131,86 @@ Describe 'EpicVM provisioning safety' {
         (Get-Content -LiteralPath $config.ProvisioningStatePath -Raw) | Should -Not -Match 'transient-password|single-use'
     }
 
+    It 'automatically recovers a post-enrollment network failure before returning claim failure' {
+        $config=Get-EpicVMDefaultConfig
+        $config.ProvisioningStatePath=Join-Path $TestDrive 'automatic-network-recovery.json'
+        $provider=New-ProvisioningTestProvider
+        $provider | Add-Member NoteProperty ConfigureGuest { param($name,$username,$password) @{ok=$true} }
+        $provider | Add-Member NoteProperty EnrollTailscale { param($name,$username,$password) throw (New-EpicVMProvisioningError -Code 'tailscale_enrollment_failed' -Message 'simulated post-enrollment verification race' -Status 422) }
+        $provider | Add-Member NoteProperty PowerShellDirectInvoker { param($name,$credential,$scriptBlock,$args)
+            if($scriptBlock.ToString() -match 'Get-NetIPAddress') { return @{ok=$true;ip='100.111.82.1'} }
+            return @{ok=$true;managementEndpoint=$true;firewallScoped=$true}
+        }
+        $provider | Add-Member NoteProperty TailscaleOAuthClientId 'client-id'
+        $provider | Add-Member NoteProperty TailscaleOAuthSecretPath 'mock://oauth-secret'
+        $provider | Add-Member NoteProperty TailscaleTailnet 'example.ts.net'
+        $provider | Add-Member NoteProperty TailscaleOAuthSecretLoader { [PSCredential]::new('oauth-secret',(ConvertTo-SecureString ('z' * 24) -AsPlainText -Force)) }
+        $provider | Add-Member NoteProperty TailscaleOAuthInvoker { @{access_token='access'} }
+        $provider | Add-Member NoteProperty TailscaleHttpInvoker { param($method,$url,$headers,$body) @{devices=@(@{id='device-auto';hostname='automatic-recovery';addresses=@('100.111.82.1')})} }
+        $state=New-EpicVMAgentState -Config $config -Token 'agent-token' -Provider $provider
+        $job=New-EpicVMProvisioningJobObject -Id 'job-automatic-network-recovery' -Name 'automatic-recovery' -Profile 'standard' -State 'unclaimed'
+        $job.vmId='5b3c52d1-7fd9-4a85-86f8-467d54fa0710'
+        $job.claimHash=ConvertTo-EpicVMClaimHash 'automatic-claim'; $job.claimExpires=[DateTime]::UtcNow.AddMinutes(5).ToString('o')
+        $state.Provisioning.Jobs[$job.id]=$job; $state.Provisioning.Claims[$job.id]=$job
+
+        { Invoke-EpicVMProvisioningClaim -State $state -Job $job -Request @{claimToken='automatic-claim';username='operator';password='transient-password'} } | Should -Not -Throw
+
+        $job.state | Should -Be 'streaming_setup'
+        $job.tailnetIp | Should -Be '100.111.82.1'
+        $job.tailnetDeviceId | Should -Be 'device-auto'
+        $job.managementTransport | Should -Be 'tailscale_winrm'
+        $job.completedStages | Should -Be @('claim','guest_setup','network_setup','management_handoff')
+        $job.claimConsumed | Should -BeTrue
+        (Get-Content -LiteralPath $config.ProvisioningStatePath -Raw) | Should -Not -Match 'transient-password|automatic-claim'
+    }
+
+    It 'returns one successful API response when automatic network recovery succeeds' {
+        $config=Get-EpicVMDefaultConfig
+        $config.ProvisioningStatePath=Join-Path $TestDrive 'automatic-network-recovery-api.json'
+        $provider=New-ProvisioningTestProvider
+        $provider | Add-Member NoteProperty ConfigureGuest { param($name,$username,$password) @{ok=$true} }
+        $provider | Add-Member NoteProperty EnrollTailscale { param($name,$username,$password) throw (New-EpicVMProvisioningError -Code 'tailscale_enrollment_failed' -Message 'simulated post-enrollment verification race' -Status 422) }
+        $provider | Add-Member NoteProperty PowerShellDirectInvoker { param($name,$credential,$scriptBlock,$args)
+            if($scriptBlock.ToString() -match 'Get-NetIPAddress') { return @{ok=$true;ip='100.111.82.1'} }
+            return @{ok=$true;managementEndpoint=$true;firewallScoped=$true}
+        }
+        $provider | Add-Member NoteProperty TailscaleOAuthClientId 'client-id'
+        $provider | Add-Member NoteProperty TailscaleOAuthSecretPath 'mock://oauth-secret'
+        $provider | Add-Member NoteProperty TailscaleTailnet 'example.ts.net'
+        $provider | Add-Member NoteProperty TailscaleOAuthSecretLoader { [PSCredential]::new('oauth-secret',(ConvertTo-SecureString ('z' * 24) -AsPlainText -Force)) }
+        $provider | Add-Member NoteProperty TailscaleOAuthInvoker { @{access_token='access'} }
+        $provider | Add-Member NoteProperty TailscaleHttpInvoker { param($method,$url,$headers,$body) @{devices=@(@{id='device-auto-api';hostname='automatic-recovery-api';addresses=@('100.111.82.1')})} }
+        $state=New-EpicVMAgentState -Config $config -Token 'agent-token' -Provider $provider
+        $job=New-EpicVMProvisioningJobObject -Id 'job-automatic-network-recovery-api' -Name 'automatic-recovery-api' -Profile 'standard' -State 'unclaimed'
+        $job.vmId='5b3c52d1-7fd9-4a85-86f8-467d54fa0710'
+        $job.claimHash=ConvertTo-EpicVMClaimHash 'automatic-api-claim'; $job.claimExpires=[DateTime]::UtcNow.AddMinutes(5).ToString('o')
+        $state.Provisioning.Jobs[$job.id]=$job; $state.Provisioning.Claims[$job.id]=$job
+        Save-EpicVMProvisioningStore -Store $state.Provisioning
+
+        $response=Invoke-EpicVMApiRequest -State $state -Method 'POST' -Path ('/v1/provisioning-jobs/{0}/claim' -f $job.id) -Headers @{Authorization='Bearer agent-token'} -Body (@{claimToken='automatic-api-claim';username='operator';password='transient-password'} | ConvertTo-Json)
+
+        @($response).Count | Should -Be 1
+        $response.StatusCode | Should -Be 200
+        $response.Body.ok | Should -BeTrue
+        $response.Body.job.state | Should -Be 'streaming_setup'
+        $response.Json | Should -Not -Match 'transient-password|automatic-api-claim'
+    }
+
+    It 'accepts a validated host-scoped console route' {
+        $config=Get-EpicVMDefaultConfig
+        $config.ProvisioningStatePath=Join-Path $TestDrive 'scoped-route-jobs.json'
+        $provider=New-ProvisioningTestProvider
+        $provider | Add-Member NoteProperty VerifyGuest { param($name,$ip) $true }
+        $state=New-EpicVMAgentState -Config $config -Token 'agent-token' -Provider $provider
+        $job=New-EpicVMProvisioningJobObject -Id 'scoped-job' -Name 'alpha' -Profile 'standard' -State 'streaming_setup'
+        $job.claimConsumed=$true
+        $job.completedStages=@('claim','guest_setup','network_setup','management_handoff')
+        $state.Provisioning.Jobs[$job.id]=$job
+        Complete-EpicVMProvisioningConsole -State $state -Job $job -Request @{routePrefix='/vm/alpha--epic-pc/';guestTcpVerified=$true}
+        $job.state | Should -Be 'ready'
+        $job.consoleRoutePrefix | Should -Be '/vm/alpha--epic-pc/'
+    }
+
     It 'retains a VM after a post-claim guest mutation failure' {
         $script:deletedAfterClaim=$false
         $config=Get-EpicVMDefaultConfig
@@ -154,7 +259,8 @@ Describe 'EpicVM provisioning safety' {
         $state.Provisioning.Jobs[$awaiting.id]=$awaiting
         $state.Provisioning.Jobs[$inFlight.id]=$inFlight
         Invoke-EpicVMProvisioningRecovery -State $state
-        $awaiting.state | Should -Be 'setup_failed:agent_restart'
+        $awaiting.state | Should -Be 'streaming_setup'
+        $awaiting.errorCode | Should -BeNullOrEmpty
         $inFlight.state | Should -Be 'setup_failed:agent_restart'
         $inFlight.errorCode | Should -Be 'agent_restarted'
     }
@@ -196,6 +302,141 @@ Describe 'EpicVM provisioning safety' {
         ($response.Body.diagnostic.code) | Should -BeIn @('ok','direct_not_supported','direct_runtime_failure')
         $job.state | Should -Be 'setup_failed:streaming'
         $job.claimConsumed | Should -BeTrue
+    }
+}
+
+Describe 'EpicVM guest-stage recovery' {
+    It 'recovers a retained consumed guest failure through network and management handoff' {
+        $config=Get-EpicVMDefaultConfig
+        $config.ProvisioningStatePath=Join-Path $TestDrive 'guest-recovery.json'
+        $provider=New-ProvisioningTestProvider
+        $provider | Add-Member NoteProperty PowerShellDirectInvoker { param($name,$credential,$scriptBlock,$args) @{ok=$true;stage='guest_account_readiness'} }
+        $provider | Add-Member NoteProperty EnrollTailscale { param($name,$username,$password) @{ok=$true;ip='100.111.82.1';deviceId='device-recovery';managementReady=$true;managementTransport='tailscale_winrm'} }
+        $state=New-EpicVMAgentState -Config $config -Token 'agent-token' -Provider $provider
+        $job=New-EpicVMProvisioningJobObject -Id 'job-guest-recovery' -Name 'recoverable' -Profile 'standard' -State 'setup_failed:guest'
+        $job.vmId='5b3c52d1-7fd9-4a85-86f8-467d54fa0710'
+        $job.claimConsumed=$true; $job.claimUsed=$true; $job.claimHash=$null
+        $job.completedStages=@('claim'); $job.errorCode='guest_account_failed'; $job.failureStage='guest'
+        $state.Provisioning.Jobs[$job.id]=$job
+        Save-EpicVMProvisioningStore -Store $state.Provisioning
+
+        Invoke-EpicVMProvisioningGuestRecovery -State $state -Job $job -Request @{username='operator';password='transient-password'} | Out-Null
+
+        $job.state | Should -Be 'streaming_setup'
+        $job.guestSetupVerified | Should -BeTrue
+        $job.managementTransport | Should -Be 'tailscale_winrm'
+        $job.completedStages | Should -Be @('claim','guest_setup','network_setup','management_handoff')
+        $job.claimConsumed | Should -BeTrue
+        $job.claimUsed | Should -BeTrue
+        (Get-Content -LiteralPath $config.ProvisioningStatePath -Raw) | Should -Not -Match 'transient-password|operator'
+    }
+
+    It 'rejects recovery when the consumed guest failure boundary is not exact' {
+        $config=Get-EpicVMDefaultConfig
+        $config.ProvisioningStatePath=Join-Path $TestDrive 'guest-recovery-reject.json'
+        $state=New-EpicVMAgentState -Config $config -Token 'agent-token' -Provider (New-ProvisioningTestProvider)
+        $job=New-EpicVMProvisioningJobObject -Id 'job-guest-recovery-reject' -Name 'not-recoverable' -Profile 'standard' -State 'streaming_setup'
+        $job.vmId='5b3c52d1-7fd9-4a85-86f8-467d54fa0710'; $job.claimConsumed=$true; $job.claimUsed=$true; $job.completedStages=@('claim','guest_setup')
+        $state.Provisioning.Jobs[$job.id]=$job
+        $caught=$null
+        try { Invoke-EpicVMProvisioningGuestRecovery -State $state -Job $job -Request @{username='operator';password='transient-password'} } catch { $caught=$_.Exception }
+        $caught.ErrorCode | Should -Be 'guest_recovery_not_allowed'
+    }
+
+    It 'exposes guest recovery through the authenticated agent API without returning credentials' {
+        $config=Get-EpicVMDefaultConfig
+        $config.ProvisioningStatePath=Join-Path $TestDrive 'guest-recovery-api.json'
+        $provider=New-ProvisioningTestProvider
+        $provider | Add-Member NoteProperty PowerShellDirectInvoker { param($name,$credential,$scriptBlock,$args) @{ok=$true;stage='guest_account_readiness'} }
+        $provider | Add-Member NoteProperty EnrollTailscale { param($name,$username,$password) @{ok=$true;ip='100.111.82.1';deviceId='device-api-recovery';managementReady=$true;managementTransport='tailscale_winrm'} }
+        $state=New-EpicVMAgentState -Config $config -Token 'agent-token' -Provider $provider
+        $job=New-EpicVMProvisioningJobObject -Id 'job-guest-recovery-api' -Name 'api-recoverable' -Profile 'standard' -State 'setup_failed:guest'
+        $job.vmId='5b3c52d1-7fd9-4a85-86f8-467d54fa0710'; $job.claimConsumed=$true; $job.claimUsed=$true; $job.claimHash=$null; $job.completedStages=@('claim')
+        $state.Provisioning.Jobs[$job.id]=$job
+        Save-EpicVMProvisioningStore -Store $state.Provisioning
+
+        $response=Invoke-EpicVMApiRequest -State $state -Method 'POST' -Path '/v1/provisioning-jobs/job-guest-recovery-api/guest-recovery' -Headers @{Authorization='Bearer agent-token'} -Body (@{username='operator';password='transient-password'} | ConvertTo-Json)
+
+        $response.StatusCode | Should -Be 200
+        $response.Body.ok | Should -BeTrue
+        $response.Body.job.state | Should -Be 'streaming_setup'
+        $response.Json | Should -Not -Match 'transient-password|operator'
+    }
+}
+
+Describe 'EpicVM network-stage recovery' {
+    It 'recovers an enrolled retained network failure without issuing a new claim' {
+        $config=Get-EpicVMDefaultConfig
+        $config.ProvisioningStatePath=Join-Path $TestDrive 'network-recovery.json'
+        $script:networkDirectCalls=0
+        $provider=New-ProvisioningTestProvider
+        $provider | Add-Member NoteProperty PowerShellDirectInvoker { param($name,$credential,$scriptBlock,$args)
+            $script:networkDirectCalls++
+            if($scriptBlock.ToString() -match 'Get-NetIPAddress') { return @{ok=$true;ip='100.111.82.1'} }
+            return @{ok=$true;managementEndpoint=$true;firewallScoped=$true}
+        }
+        $provider | Add-Member NoteProperty TailscaleOAuthClientId 'client-id'
+        $provider | Add-Member NoteProperty TailscaleOAuthSecretPath 'mock://oauth-secret'
+        $provider | Add-Member NoteProperty TailscaleTailnet 'example.ts.net'
+        $provider | Add-Member NoteProperty TailscaleOAuthSecretLoader { [PSCredential]::new('oauth-secret',(ConvertTo-SecureString ('z' * 24) -AsPlainText -Force)) }
+        $provider | Add-Member NoteProperty TailscaleOAuthInvoker { @{access_token='access'} }
+        $provider | Add-Member NoteProperty TailscaleHttpInvoker { param($method,$url,$headers,$body) @{devices=@(@{id='device-network';hostname='network-recoverable';addresses=@('100.111.82.1')})} }
+        $state=New-EpicVMAgentState -Config $config -Token 'agent-token' -Provider $provider
+        $job=New-EpicVMProvisioningJobObject -Id 'job-network-recovery' -Name 'network-recoverable' -Profile 'standard' -State 'setup_failed:network'
+        $job.vmId='5b3c52d1-7fd9-4a85-86f8-467d54fa0710'
+        $job.claimConsumed=$true; $job.claimUsed=$true; $job.claimHash=$null
+        $job.completedStages=@('claim','guest_setup'); $job.guestSetupVerified=$true; $job.errorCode='tailscale_enrollment_failed'; $job.failureStage='network'
+        $state.Provisioning.Jobs[$job.id]=$job
+        Save-EpicVMProvisioningStore -Store $state.Provisioning
+
+        Invoke-EpicVMProvisioningNetworkRecovery -State $state -Job $job -Request @{username='operator';password='transient-password'} | Out-Null
+
+        $job.state | Should -Be 'streaming_setup'
+        $job.tailnetIp | Should -Be '100.111.82.1'
+        $job.tailnetDeviceId | Should -Be 'device-network'
+        $job.managementTransport | Should -Be 'tailscale_winrm'
+        $job.completedStages | Should -Be @('claim','guest_setup','network_setup','management_handoff')
+        $job.claimConsumed | Should -BeTrue
+        $script:networkDirectCalls | Should -Be 2
+        (Get-Content -LiteralPath $config.ProvisioningStatePath -Raw) | Should -Not -Match 'transient-password|operator'
+    }
+
+    It 'rejects network recovery outside the exact retained boundary' {
+        $config=Get-EpicVMDefaultConfig
+        $config.ProvisioningStatePath=Join-Path $TestDrive 'network-recovery-reject.json'
+        $state=New-EpicVMAgentState -Config $config -Token 'agent-token' -Provider (New-ProvisioningTestProvider)
+        $job=New-EpicVMProvisioningJobObject -Id 'job-network-recovery-reject' -Name 'not-recoverable' -Profile 'standard' -State 'streaming_setup'
+        $job.vmId='5b3c52d1-7fd9-4a85-86f8-467d54fa0710'; $job.claimConsumed=$true; $job.claimUsed=$true; $job.completedStages=@('claim','guest_setup','network_setup')
+        $state.Provisioning.Jobs[$job.id]=$job
+        $caught=$null
+        try { Invoke-EpicVMProvisioningNetworkRecovery -State $state -Job $job -Request @{username='operator';password='transient-password'} } catch { $caught=$_.Exception }
+        $caught.ErrorCode | Should -Be 'network_recovery_not_allowed'
+        $job.state | Should -Be 'streaming_setup'
+    }
+
+    It 'exposes network recovery through the authenticated agent API without returning credentials' {
+        $config=Get-EpicVMDefaultConfig
+        $config.ProvisioningStatePath=Join-Path $TestDrive 'network-recovery-api.json'
+        $provider=New-ProvisioningTestProvider
+        $provider | Add-Member NoteProperty PowerShellDirectInvoker { param($name,$credential,$scriptBlock,$args) if($scriptBlock.ToString() -match 'Get-NetIPAddress'){@{ok=$true;ip='100.111.82.1'}}else{@{ok=$true;managementEndpoint=$true;firewallScoped=$true}} }
+        $provider | Add-Member NoteProperty TailscaleOAuthClientId 'client-id'
+        $provider | Add-Member NoteProperty TailscaleOAuthSecretPath 'mock://oauth-secret'
+        $provider | Add-Member NoteProperty TailscaleTailnet 'example.ts.net'
+        $provider | Add-Member NoteProperty TailscaleOAuthSecretLoader { [PSCredential]::new('oauth-secret',(ConvertTo-SecureString ('z' * 24) -AsPlainText -Force)) }
+        $provider | Add-Member NoteProperty TailscaleOAuthInvoker { @{access_token='access'} }
+        $provider | Add-Member NoteProperty TailscaleHttpInvoker { param($method,$url,$headers,$body) @{devices=@(@{id='device-api-network';hostname='api-network-recoverable';addresses=@('100.111.82.1')})} }
+        $state=New-EpicVMAgentState -Config $config -Token 'agent-token' -Provider $provider
+        $job=New-EpicVMProvisioningJobObject -Id 'job-network-recovery-api' -Name 'api-network-recoverable' -Profile 'standard' -State 'setup_failed:network'
+        $job.vmId='5b3c52d1-7fd9-4a85-86f8-467d54fa0710'; $job.claimConsumed=$true; $job.claimUsed=$true; $job.claimHash=$null; $job.completedStages=@('claim','guest_setup')
+        $state.Provisioning.Jobs[$job.id]=$job
+        Save-EpicVMProvisioningStore -Store $state.Provisioning
+
+        $response=Invoke-EpicVMApiRequest -State $state -Method 'POST' -Path '/v1/provisioning-jobs/job-network-recovery-api/network-recovery' -Headers @{Authorization='Bearer agent-token'} -Body (@{username='operator';password='transient-password'} | ConvertTo-Json)
+
+        $response.StatusCode | Should -Be 200
+        $response.Body.ok | Should -BeTrue
+        $response.Body.job.state | Should -Be 'streaming_setup'
+        $response.Json | Should -Not -Match 'transient-password|operator'
     }
 }
 

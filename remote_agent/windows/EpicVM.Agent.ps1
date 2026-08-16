@@ -398,6 +398,44 @@ function Invoke-EpicVMApiRequest {
                 }
                 return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok=$true; job=(ConvertTo-EpicVMRedactedJob -Job $job); claimToken=$claim })
             }
+            if ($Method -eq 'POST' -and $segments.Count -eq 4 -and $segments[3] -eq 'guest-recovery') {
+                try {
+                    $recovered = Invoke-EpicVMProvisioningGuestRecovery -State $State -Job $job -Request (Get-EpicVMRequestBody -Body $Body)
+                    return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok=$true; job=(ConvertTo-EpicVMRedactedJob -Job $job) })
+                }
+                catch {
+                    $code = [string](Get-EpicVMProperty -Object $_.Exception -Name 'ErrorCode' -Default 'guest_recovery_failed')
+                    $allowed = @('invalid_credential_input','guest_recovery_not_allowed','guest_recovery_vm_missing','guest_account_failed',
+                        'tailscale_unavailable','tailscale_verification_failed','tailscale_enrollment_failed',
+                        'management_handoff_failed','management_transport_failed','management_transport_unavailable',
+                        'management_trusted_hosts_broad','guest_recovery_failed')
+                    if ($allowed -notcontains $code) { $code = 'guest_recovery_failed' }
+                    $status = [int](Get-EpicVMProperty -Object $_.Exception -Name 'HttpStatus' -Default 422)
+                    return ConvertTo-EpicVMJsonResponse -StatusCode $status -Body ([ordered]@{
+                        ok=$false
+                        error=[ordered]@{code=$code;message='Guest recovery failed at a safe, identified stage.'}
+                        job=(ConvertTo-EpicVMRedactedJob -Job $job)
+                    })
+                }
+            }
+            if ($Method -eq 'POST' -and $segments.Count -eq 4 -and $segments[3] -eq 'network-recovery') {
+                try {
+                    $recovered = Invoke-EpicVMProvisioningNetworkRecovery -State $State -Job $job -Request (Get-EpicVMRequestBody -Body $Body)
+                    return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok=$true; job=(ConvertTo-EpicVMRedactedJob -Job $job) })
+                }
+                catch {
+                    $code = [string](Get-EpicVMProperty -Object $_.Exception -Name 'ErrorCode' -Default 'network_recovery_failed')
+                    $allowed = @('invalid_credential_input','network_recovery_not_allowed','network_recovery_vm_missing',
+                        'tailscale_verification_failed','network_recovery_failed','management_handoff_failed')
+                    if ($allowed -notcontains $code) { $code = 'network_recovery_failed' }
+                    $status = [int](Get-EpicVMProperty -Object $_.Exception -Name 'HttpStatus' -Default 422)
+                    return ConvertTo-EpicVMJsonResponse -StatusCode $status -Body ([ordered]@{
+                        ok=$false
+                        error=[ordered]@{code=$code;message='Network recovery failed at a safe, identified stage.'}
+                        job=(ConvertTo-EpicVMRedactedJob -Job $job)
+                    })
+                }
+            }
             if ($Method -eq 'POST' -and $segments.Count -eq 4 -and $segments[3] -eq 'claim') {
                 try { Invoke-EpicVMProvisioningClaim -State $State -Job $job -Request (Get-EpicVMRequestBody -Body $Body) }
                 catch {
@@ -562,7 +600,7 @@ function Test-EpicVMMutationRequest {
         [Parameter(Mandatory)] [string] $Path
     )
     if ($Method -eq 'DELETE' -and $Path -match '^/v1/vms/[^/]+$') { return $true }
-    if ($Method -eq 'POST' -and ($Path -eq '/v1/provisioning-jobs' -or $Path -eq '/v1/deprovisioning-jobs' -or $Path -match '^/v1/provisioning-jobs/[^/]+/(claim|claim-reissue|direct-diagnostic|console-credentials|console-complete|console-failed)$')) { return $true }
+    if ($Method -eq 'POST' -and ($Path -eq '/v1/provisioning-jobs' -or $Path -eq '/v1/deprovisioning-jobs' -or $Path -match '^/v1/provisioning-jobs/[^/]+/(claim|claim-reissue|guest-recovery|network-recovery|direct-diagnostic|console-credentials|console-complete|console-failed)$')) { return $true }
     if ($Method -eq 'POST' -and ($Path -eq '/v1/vms' -or $Path -match '^/v1/vms/[^/]+/(start|stop|restart)$' -or $Path -match '^/v1/vms/[^/]+/actions/(start|stop|restart|delete)$')) { return $true }
     return $false
 }

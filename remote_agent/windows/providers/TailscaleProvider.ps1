@@ -236,6 +236,21 @@ namespace EpicVM {
     }
 }
 
+function Get-EpicVMTailscaleGuestAddressScript {
+    return {
+        $ErrorActionPreference='Stop'
+        $ip=[string](@(
+            Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                Where-Object { [string]$_.IPAddress -match '^100\.(6[4-9]|[78][0-9]|9[0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}$' } |
+                Select-Object -First 1 -ExpandProperty IPAddress
+        )).Trim()
+        if($ip -notmatch '^100\.(6[4-9]|[78][0-9]|9[0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}$'){
+            throw 'Guest Tailscale IP verification failed.'
+        }
+        [ordered]@{ok=$true;ip=$ip}
+    }
+}
+
 function Get-EpicVMGuestManagementConfigurationScript {
     return {
         param($Port,$UseSsl)

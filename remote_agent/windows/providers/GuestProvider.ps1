@@ -258,9 +258,28 @@ function Invoke-EpicVMPowerShellDirectOnce {
                 $session=New-PSSession -VMId ([Guid]$VmIdArgument) -Credential $GuestCredential -ErrorAction Stop
                 if($null -eq $session){throw 'EPICVM_POWERSHELL_DIRECT_OPEN_FAILED'}
                 [ordered]@{epicvmDirectPhase='execute';sessionCreated=$true}
-                if(@($GuestArguments).Count -gt 0){$result=Invoke-Command -Session $session -ScriptBlock $GuestScript -ArgumentList @($GuestArguments) -ErrorAction Stop}
-                else{$result=Invoke-Command -Session $session -ScriptBlock $GuestScript -ErrorAction Stop}
-                [ordered]@{epicvmDirectResult=$result}
+                try {
+                    if(@($GuestArguments).Count -gt 0){$result=Invoke-Command -Session $session -ScriptBlock $GuestScript -ArgumentList @($GuestArguments) -ErrorAction Stop}
+                    else{$result=Invoke-Command -Session $session -ScriptBlock $GuestScript -ErrorAction Stop}
+                    [ordered]@{epicvmDirectResult=$result}
+                } catch {
+                    # A guest throw is serialized through the worker runspace and
+                    # can lose its original ErrorRecord metadata. Emit only the
+                    # allowlisted account marker before rethrowing so the caller
+                    # can preserve the concrete guest stage without exposing
+                    # credentials or raw remoting text.
+                    $guestText=@(
+                        [string]$_.Exception.Message,
+                        [string]$_.ErrorDetails,
+                        [string]$_.FullyQualifiedErrorId
+                    ) -join ' '
+                    $guestMarker=[regex]::Match($guestText,'(?i)\bguest_account_failed\|([a-z_]+)\b')
+                    $allowed=@('account_create_failed','account_update_failed','account_password_policy_failed','admin_membership_failed','account_verification_failed')
+                    if($guestMarker.Success -and $allowed -contains $guestMarker.Groups[1].Value.ToLowerInvariant()){
+                        [ordered]@{epicvmDirectGuestFailure=('guest_account_failed|' + $guestMarker.Groups[1].Value.ToLowerInvariant())}
+                    }
+                    throw
+                }
             } finally {
                 if($null -ne $session){try{Remove-PSSession -Session $session -ErrorAction SilentlyContinue}catch{}}
             }
@@ -285,7 +304,14 @@ function Invoke-EpicVMPowerShellDirectOnce {
         $phase='collect'
         try{$null=$workerPipeline.EndInvoke($workerAsync)}catch{}
         $observed=@($workerOutput)
-        $phaseMarker=$observed|Where-Object{$null -ne $_.PSObject.Properties['epicvmDirectPhase']}|Select-Object -Last 1
+        $guestFailureEnvelope=$observed | Where-Object { Test-EpicVMPowerShellDirectRecordKey -Record $_ -Name 'epicvmDirectGuestFailure' } | Select-Object -Last 1
+        $guestFailureMarker=[string](Get-EpicVMHyperVValue -Object $guestFailureEnvelope -Name 'epicvmDirectGuestFailure' -Default '')
+        if($guestFailureMarker -like 'guest_account_failed|*'){
+            $detail=$guestFailureMarker.Substring('guest_account_failed|'.Length)
+            if($script:EpicVMGuestFailureDetailCodes -notcontains $detail){$detail='account_verification_failed'}
+            throw (New-EpicVMHyperVError -Code 'guest_account_failed' -Message 'The guest account operation failed.' -DetailCode $detail)
+        }
+        $phaseMarker=$observed|Where-Object{Test-EpicVMPowerShellDirectRecordKey -Record $_ -Name 'epicvmDirectPhase'}|Select-Object -Last 1
         $sessionCreated=[bool](Get-EpicVMHyperVValue -Object $phaseMarker -Name 'sessionCreated' -Default $false)
         if($sessionCreated){$phase='execute'}else{$phase='open'}
         $marker=Get-EpicVMPowerShellDirectSafeMarker -Records @($workerPipeline.Streams.Error)
@@ -300,7 +326,7 @@ function Invoke-EpicVMPowerShellDirectOnce {
             $code=Get-EpicVMPowerShellDirectFailureCode -Records @($workerPipeline.Streams.Error) -Phase $phase -SessionCreated $sessionCreated
             throw (New-EpicVMPowerShellDirectFailure -Code $code -Phase $phase -SessionCreated $sessionCreated -CorrelationId $correlationId -ElapsedMilliseconds ([int]$started.ElapsedMilliseconds))
         }
-        $envelope=$observed|Where-Object{$null -ne $_.PSObject.Properties['epicvmDirectResult']}|Select-Object -Last 1
+        $envelope=$observed|Where-Object{Test-EpicVMPowerShellDirectRecordKey -Record $_ -Name 'epicvmDirectResult'}|Select-Object -Last 1
         if($null -eq $envelope){throw (New-EpicVMPowerShellDirectFailure -Code 'direct_transport_error' -Phase $phase -SessionCreated $sessionCreated -CorrelationId $correlationId -ElapsedMilliseconds ([int]$started.ElapsedMilliseconds))}
         return (ConvertTo-EpicVMDirectResult -Result (Get-EpicVMHyperVValue -Object $envelope -Name 'epicvmDirectResult' -Default $null))
     } catch {
@@ -317,6 +343,16 @@ function Invoke-EpicVMPowerShellDirectOnce {
         if($null -ne $workerPipeline){$workerPipeline.Dispose()}
         if($null -ne $workerInput){try{$workerInput.Complete()}catch{}}
     }
+}
+
+function Test-EpicVMPowerShellDirectRecordKey {
+    param(
+        [AllowNull()][object]$Record,
+        [Parameter(Mandatory)][string]$Name
+    )
+    if($null -eq $Record){return $false}
+    if($Record -is [System.Collections.IDictionary]){return $Record.Contains($Name)}
+    return $null -ne $Record.PSObject.Properties[$Name]
 }
 
 function ConvertTo-EpicVMDirectResult {
@@ -813,7 +849,7 @@ function Get-EpicVMGuestConfigurationScript {
                 catch { throw "guest_account_failed|$(Get-AccountFailureDetail -ErrorRecord $_ -Default 'account_create_failed')" }
             } else {
                 try {
-                    Set-LocalUser -Name $DesiredUser -Password $secure -AccountNeverExpires -PasswordNeverExpires -ErrorAction Stop
+                    Set-LocalUser -Name $DesiredUser -Password $secure -AccountNeverExpires -ErrorAction Stop
                     if(-not [bool]$user.Enabled){ Enable-LocalUser -Name $DesiredUser -ErrorAction Stop }
                 } catch { throw "guest_account_failed|$(Get-AccountFailureDetail -ErrorRecord $_ -Default 'account_update_failed')" }
             }

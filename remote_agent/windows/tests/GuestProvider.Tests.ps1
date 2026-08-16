@@ -22,6 +22,12 @@ Describe 'PowerShell Direct guest provider' {
         ($result.Keys -join ',') | Should -Not -Match 'password|secret|token'
     }
 
+    It 'uses an existing-user Set-LocalUser form supported by the guest LocalAccounts module' {
+        $text = (Get-EpicVMGuestConfigurationScript).ToString()
+        $text | Should -Match 'Set-LocalUser -Name \$DesiredUser -Password \$secure -AccountNeverExpires -ErrorAction Stop'
+        $text | Should -Not -Match 'Set-LocalUser -Name \$DesiredUser -Password \$secure -AccountNeverExpires -PasswordNeverExpires'
+    }
+
     It 'ships the scoped NLA and Tailscale-only firewall reconciliation' {
         $account = Get-EpicVMGuestConfigurationScript
         $text = $account.ToString()
@@ -117,6 +123,13 @@ Describe 'PowerShell Direct guest provider' {
         $text | Should -Match 'Remove-PSSession -Session \$session'
         $text | Should -Not -Match '\$openPipeline=.*New-PSSession'
         $text | Should -Not -Match '\$executePipeline=.*Invoke-Command'
+    }
+
+    It 'recognizes dictionary-backed worker phase and result records' {
+        $phase = [ordered]@{ epicvmDirectPhase = 'execute'; sessionCreated = $true }
+        $result = [ordered]@{ epicvmDirectResult = [ordered]@{ ok = $true; powershellDirect = $true } }
+        (Test-EpicVMPowerShellDirectRecordKey -Record $phase -Name 'epicvmDirectPhase') | Should -BeTrue
+        (Test-EpicVMPowerShellDirectRecordKey -Record $result -Name 'epicvmDirectResult') | Should -BeTrue
     }
 
     It 'gives guest writes bounded no-replay windows' {
@@ -496,6 +509,14 @@ Describe 'PowerShell Direct guest provider' {
         $text | Should -Match 'safeMarker'
         $text | Should -Match 'transportOpened=\$true'
         $text | Should -Match 'failureDetailCode=\$sunshineStage'
+    }
+
+    It 'preserves allowlisted account markers emitted by the Direct worker runspace' {
+        $text = Get-Content (Join-Path $windowsRoot 'providers/GuestProvider.ps1') -Raw
+        $text | Should -Match 'epicvmDirectGuestFailure'
+        $text | Should -Match 'account_password_policy_failed'
+        $text | Should -Match 'guestFailureEnvelope'
+        $text | Should -Match 'The guest account operation failed'
     }
 
     It 'collects nested WinRM output and bounds asynchronous stop during transport cleanup' {

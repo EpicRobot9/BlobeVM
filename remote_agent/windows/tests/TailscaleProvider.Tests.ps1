@@ -43,6 +43,14 @@ Describe 'Tailscale OAuth enrollment' {
         (Get-EpicVMTailscaleGuestScript).ToString() | Should -Not -Match '--authkey\s+\$AuthKey'
     }
 
+    It 'provides a read-only guest address probe for retained network recovery' {
+        $scriptText=(Get-EpicVMTailscaleGuestAddressScript).ToString()
+        $scriptText | Should -Match 'Get-NetIPAddress'
+        $scriptText | Should -Match 'AddressFamily IPv4'
+        $scriptText | Should -Match '100'
+        $scriptText | Should -Not -Match 'tailscale up|Register-ScheduledTask|Restart-Service'
+    }
+
     It 'rejects a duplicate guest address' {
         $provider=[pscustomobject]@{
             TailscaleOAuthClientId='client-id';TailscaleOAuthSecretPath='mock://oauth-secret';TailscaleTailnet='example.ts.net';TailscaleGuestTag='tag:epicvm-guest'

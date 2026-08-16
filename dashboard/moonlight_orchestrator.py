@@ -211,12 +211,13 @@ class MoonlightOrchestrator:
     def _project_name(name: str) -> str:
         return f"epicvm-{validate_vm_name(name).replace('.', '-')}-moonlight"
 
-    def build_config(self, *, name: str) -> str:
+    def build_config(self, *, name: str, route_name: str | None = None) -> str:
         safe = validate_vm_name(name)
+        route = validate_vm_name(route_name or name)
         value = {
             "data_storage": {"type": "json", "path": "server/data.json", "session_expiration_check_interval": {"secs": 300, "nanos": 0}},
             "webrtc": {"ice_servers": [{"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:3478"], "username": "", "credential": ""}], "ice_server_script": None, "port_range": {"min": 41000, "max": 41010}, "nat_1to1": None, "network_types": ["udp4"], "include_loopback_candidates": False},
-            "web_server": {"bind_address": "0.0.0.0:8080", "url_path_prefix": f"/vm/{safe}", "session_cookie_secure": True, "session_cookie_expiration": {"secs": 86400, "nanos": 0}, "first_login_create_admin": True, "first_login_assign_global_hosts": True, "default_user_id": None, "default_role_id": None, "forwarded_header": {"username_header": "X-EpicVM-User", "auto_create_missing_user": True, "ignore_case": True}},
+            "web_server": {"bind_address": "0.0.0.0:8080", "url_path_prefix": f"/vm/{route}", "session_cookie_secure": True, "session_cookie_expiration": {"secs": 86400, "nanos": 0}, "first_login_create_admin": True, "first_login_assign_global_hosts": True, "default_user_id": None, "default_role_id": None, "forwarded_header": {"username_header": "X-EpicVM-User", "auto_create_missing_user": True, "ignore_case": True}},
             "moonlight": {"default_http_port": 47989, "pair_device_name": "EpicVM Web"},
             "streamer_path": "./streamer",
             "log": {"level_filter": "INFO", "file_path": None, "dev_venator": False},
@@ -224,33 +225,34 @@ class MoonlightOrchestrator:
         }
         return json.dumps(value, separators=(",", ":")) + "\n"
 
-    def build_compose(self, *, name: str) -> str:
+    def build_compose(self, *, name: str, route_name: str | None = None) -> str:
         safe = validate_vm_name(name)
+        route = validate_vm_name(route_name or name)
         public_host, resolver, priority = self._routing_config()
         image = self._image()
         # Console authentication is per-VM and must go through the dashboard's
         # VM-session endpoint.  Do not inherit the legacy global middleware:
         # on the KVM host that value can point at the testre BasicAuth file,
         # which causes a second, unrelated browser credential prompt.
-        auth_identity = f"epicvm-{safe}-portal-auth"
-        identity = f"epicvm-{safe}-portal-user"
+        auth_identity = f"epicvm-{route}-portal-auth"
+        identity = f"epicvm-{route}-portal-user"
         labels = {
             "traefik.enable": "true",
             "com.blobevm.managed": "1",
             "com.epicvm.console": "moonlight",
             "com.epicvm.vm.name": safe,
             "traefik.docker.network": self.proxy_network,
-            f"traefik.http.routers.epicvm-{safe}.rule": f"Host(`{public_host}`) && PathPrefix(`/vm/{safe}/`)",
-            f"traefik.http.routers.epicvm-{safe}.entrypoints": "websecure",
-            f"traefik.http.routers.epicvm-{safe}.tls": "true",
-            f"traefik.http.routers.epicvm-{safe}.tls.certresolver": resolver,
-            f"traefik.http.routers.epicvm-{safe}.priority": str(priority),
-            f"traefik.http.routers.epicvm-{safe}.service": f"epicvm-{safe}",
-            f"traefik.http.routers.epicvm-{safe}.middlewares": f"{auth_identity},{identity}",
+            f"traefik.http.routers.epicvm-{route}.rule": f"Host(`{public_host}`) && PathPrefix(`/vm/{route}/`)",
+            f"traefik.http.routers.epicvm-{route}.entrypoints": "websecure",
+            f"traefik.http.routers.epicvm-{route}.tls": "true",
+            f"traefik.http.routers.epicvm-{route}.tls.certresolver": resolver,
+            f"traefik.http.routers.epicvm-{route}.priority": str(priority),
+            f"traefik.http.routers.epicvm-{route}.service": f"epicvm-{route}",
+            f"traefik.http.routers.epicvm-{route}.middlewares": f"{auth_identity},{identity}",
             f"traefik.http.middlewares.{auth_identity}.forwardauth.address": f"http://blobedash:5000/dashboard/auth/vm/{safe}",
             f"traefik.http.middlewares.{auth_identity}.forwardauth.trustForwardHeader": "true",
             f"traefik.http.middlewares.{identity}.headers.customrequestheaders.X-EpicVM-User": safe,
-            f"traefik.http.services.epicvm-{safe}.loadbalancer.server.port": "8080",
+            f"traefik.http.services.epicvm-{route}.loadbalancer.server.port": "8080",
         }
         lines = "\n".join(f"      {key}: {_yaml_quote(value)}" for key, value in labels.items())
         return f'''services:
@@ -259,7 +261,7 @@ class MoonlightOrchestrator:
     restart: unless-stopped
     environment:
       BIND_ADDRESS: "0.0.0.0:8080"
-      PATH_PREFIX: "/vm/{safe}"
+      PATH_PREFIX: "/vm/{route}"
       WEBRTC_PORT_RANGE: "41000:41010"
     volumes:
       - ./server:/moonlight-web/server
@@ -281,13 +283,14 @@ networks:
     driver: bridge
 '''
 
-    def build_plan(self, *, name: str, guest_ip: str) -> MoonlightPlan:
+    def build_plan(self, *, name: str, guest_ip: str, route_name: str | None = None) -> MoonlightPlan:
         safe = validate_vm_name(name)
+        route = validate_vm_name(route_name or name)
         address = validate_guest_ip(guest_ip)
         for port in (47989, 47990):
             if not self.tcp_probe(address, port, 2.0):
                 raise ConsoleOrchestrationError("Sunshine is not reachable from kvm2.", status=409, code="sunshine_tcp_unavailable")
-        return MoonlightPlan(safe, address, f"/vm/{safe}/", self.build_compose(name=safe), self.build_config(name=safe), '{"version":"3","users":{},"hosts":{},"roles":{}}\n')
+        return MoonlightPlan(safe, address, f"/vm/{route}/", self.build_compose(name=safe, route_name=route), self.build_config(name=safe, route_name=route), '{"version":"3","users":{},"hosts":{},"roles":{}}\n')
 
     def stage_plan(self, plan: MoonlightPlan) -> Path:
         target = self._instance_root(plan.name)
@@ -372,7 +375,7 @@ networks:
         except (OSError, subprocess.SubprocessError, TypeError, ValueError, json.JSONDecodeError):
             return False
 
-    def _container_url(self, name: str) -> str:
+    def _container_url(self, name: str, route_prefix: str | None = None) -> str:
         project = self._project_name(name)
         listed = self.command_runner(["docker", "ps", "--filter", f"label=com.docker.compose.project={project}", "-q"], check=True, capture_output=True, text=True)
         ids = str(getattr(listed, "stdout", "") or "").split()
@@ -387,7 +390,10 @@ networks:
         # Moonlight's API is mounted below the configured path prefix.  Keep
         # the internal URL path-correct; hitting the container root happens to
         # serve the UI but leaves the pairing endpoints at 404.
-        return f"http://{address}:8080/vm/{validate_vm_name(name)}"
+        route = str(route_prefix or f"/vm/{validate_vm_name(name)}").rstrip("/")
+        if not route.startswith("/vm/"):
+            raise ConsoleOrchestrationError("The Moonlight route prefix is invalid.", status=502, code="moonlight_route_failed")
+        return f"http://{address}:8080{route}"
 
     def start_staged(self, name: str) -> dict[str, Any]:
         plan = self._read_plan(name)
@@ -546,7 +552,7 @@ networks:
         plan = self._read_plan(name)
         if plan.get("paired") is True:
             return {"ok": True, "paired": True, "routePrefix": str(plan["routePrefix"]), "guestTcpVerified": True}
-        base = self._container_url(name)
+        base = self._container_url(name, str(plan.get("routePrefix") or ""))
         user = validate_vm_name(name)
         host_id = self._register_host(base, user, str(plan["guestIp"]))
         if not host_id:

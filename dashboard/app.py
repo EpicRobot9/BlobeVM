@@ -280,6 +280,7 @@ def _set_console_retry_result(key, *, status, operation_id, failure_code=''):
 
 
 def _start_remote_moonlight_console_retry(*, host, host_id, job_id, name, guest_ip,
+                                           route_name,
                                            guest_username, guest_password,
                                            sunshine_username, sunshine_password,
                                            orchestrator, operation_id):
@@ -300,7 +301,7 @@ def _start_remote_moonlight_console_retry(*, host, host_id, job_id, name, guest_
             sunshine_username=sunshine_username,
             sunshine_password=sunshine_password,
         )
-        plan = orchestrator.build_plan(name=name, guest_ip=guest_ip)
+        plan = orchestrator.build_plan(name=name, guest_ip=guest_ip, route_name=route_name)
         orchestrator.stage_plan(plan)
         started = orchestrator.start_staged(name)
         started = orchestrator.pair_staged(
@@ -353,6 +354,26 @@ def _start_remote_moonlight_console_retry(*, host, host_id, job_id, name, guest_
         app.logger.warning('EpicVM console retry failed operation=%s code=console_failed', operation_id)
     finally:
         guest_username = guest_password = sunshine_username = sunshine_password = ''
+
+def _remote_console_route_name(name: str, host_id: str) -> str:
+    """Return a stable route namespace for a remote host's VM name.
+
+    VM names are scoped by provider, while Traefik paths are global on kvm2.
+    Keep the user-facing VM name unchanged but include the trusted remote-host
+    id in the route slug so a local VM with the same name cannot capture the
+    remote console route.
+    """
+    safe_name = str(name or '').strip().lower()
+    safe_host = re.sub(r'[^a-z0-9._-]+', '-', str(host_id or '').strip().lower()).strip('-')
+    if not safe_name or not safe_host or safe_host == 'local':
+        return safe_name
+    candidate = f'{safe_name}--{safe_host}'
+    if len(candidate) <= 63:
+        return candidate
+    digest = hashlib.sha256(safe_host.encode('utf-8')).hexdigest()[:10]
+    keep = max(1, 63 - len(digest) - 2)
+    return f'{safe_name[:keep]}--{digest}'
+
 
 def _console_orchestrator():
     global _CONSOLE_ORCHESTRATOR
@@ -1962,8 +1983,15 @@ def _build_remote_console_url(name: str, host_id: str, route_prefix: str) -> str
     if not re.fullmatch(r'[a-z0-9][a-z0-9._-]{0,62}', safe_name):
         return _build_vm_url(name, host_id=host_id)
     expected = f'/vm/{safe_name}/'
-    if route != expected:
-        return _build_vm_url(name, host_id=host_id)
+    if route == expected:
+        route_name = safe_name
+    else:
+        scoped = f'/vm/{safe_name}--'
+        if not route.startswith(scoped) or not route.endswith('/'):
+            return _build_vm_url(name, host_id=host_id)
+        route_name = route[4:-1]
+        if not re.fullmatch(rf'{re.escape(safe_name)}--[a-z0-9][a-z0-9._-]{{0,62}}', route_name):
+            return _build_vm_url(name, host_id=host_id)
     base = _external_base_url()
     root = f'{base}{route}' if base else route
     return f'{root}?host_id={url_quote(str(host_id), safe="")}'
@@ -3953,7 +3981,8 @@ def api_provisioning_job_claim(job_id):
                 sunshine_username=sunshine_username,
                 sunshine_password=sunshine_password,
             )
-            plan = orchestrator.build_plan(name=name, guest_ip=guest_ip)
+            route_name = _remote_console_route_name(name, host_id) if getattr(host, 'kind', 'local') == 'remote' else name
+            plan = orchestrator.build_plan(name=name, guest_ip=guest_ip, route_name=route_name)
         else:
             plan = orchestrator.build_plan(name=name, guest_ip=guest_ip, username=username, password=password)
         orchestrator.stage_plan(plan)
@@ -4063,6 +4092,7 @@ def api_provisioning_job_retry_console(job_id):
                     'job_id': job_id,
                     'name': name,
                     'guest_ip': guest_ip,
+                    'route_name': _remote_console_route_name(name, host_id),
                     'guest_username': username,
                     'guest_password': password,
                     'sunshine_username': sunshine_username,
@@ -4100,7 +4130,8 @@ def api_provisioning_job_retry_console(job_id):
                 sunshine_username=sunshine_username,
                 sunshine_password=sunshine_password,
             )
-            plan = orchestrator.build_plan(name=name, guest_ip=guest_ip)
+            route_name = _remote_console_route_name(name, host_id) if getattr(host, 'kind', 'local') == 'remote' else name
+            plan = orchestrator.build_plan(name=name, guest_ip=guest_ip, route_name=route_name)
         else:
             plan = orchestrator.build_plan(name=name, guest_ip=guest_ip, username=username, password=password)
         orchestrator.stage_plan(plan)

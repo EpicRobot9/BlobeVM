@@ -650,7 +650,11 @@ function Invoke-EpicVMHyperVLifecycle {
         Invoke-EpicVMHyperVCmdlet -Provider $Provider -CommandName 'Stop-VM' -Parameters @{ Name = $Name; ErrorAction = 'Stop' } | Out-Null
     }
     elseif ($Action -eq 'Restart') {
-        Invoke-EpicVMHyperVCmdlet -Provider $Provider -CommandName 'Restart-VM' -Parameters @{ Name = $Name; ErrorAction = 'Stop' } | Out-Null
+        # A graceful guest restart can block the single-threaded agent listener
+        # indefinitely when the guest integration service is unhealthy.  Force
+        # is scoped to this already ownership-checked Hyper-V VM so lifecycle
+        # recovery returns to the caller instead of wedging the agent.
+        Invoke-EpicVMHyperVCmdlet -Provider $Provider -CommandName 'Restart-VM' -Parameters @{ Name = $Name; Force = $true; ErrorAction = 'Stop' } | Out-Null
     }
 
     return ConvertTo-EpicVMHyperVVMInfo -VM (Get-EpicVMHyperVVM -Provider $Provider -Name $Name)

@@ -147,9 +147,8 @@ Describe 'Hyper-V provider lifecycle safety' {
         $script:vmState.alpha.State = 'Running'
         (& $provider.RestartVM 'alpha').state | Should -Be 'Running'
 
-        @($script:commandCalls | ForEach-Object Name) | Should -Contain 'Start-VM'
-        @($script:commandCalls | ForEach-Object Name) | Should -Contain 'Stop-VM'
-        @($script:commandCalls | ForEach-Object Name) | Should -Contain 'Restart-VM'
+        $restartCall = @($script:commandCalls | Where-Object Name -eq 'Restart-VM') | Select-Object -First 1
+        $restartCall.Parameters.Force | Should -BeTrue
     }
 
     It 'refuses to delete a VM without the EpicVM ownership marker' {

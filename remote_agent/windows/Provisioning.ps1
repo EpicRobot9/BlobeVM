@@ -40,7 +40,7 @@ function Get-EpicVMProvisioningFailureState {
             'direct_transport_error','guest_credentials_rejected','guest_operation_failed','direct_parameter_failure',
             'direct_module_failure','direct_runtime_failure')) { return 'setup_failed:guest' }
     if ($safeCode -in @('tailscale_enrollment_failed','tailscale_state_not_persisted','tailscale_auth_input_failed','tailscale_guest_command_failed','tailscale_system_task_timeout','tailscale_system_task_failed','tailscale_unattended_failed','tailscale_restart_failed','TailscaleEnrollmentFailed','tailscale_verification_failed','tailscale_unavailable',
-            'network_setup_failed','tailscale_unreachable')) { return 'setup_failed:network' }
+            'network_setup_failed','network_recovery_failed','tailscale_unreachable')) { return 'setup_failed:network' }
     if ($safeCode -in @('management_handoff_failed','management_transport_failed','management_transport_unavailable','management_trusted_hosts_broad')) {
         return 'setup_failed:management'
     }
@@ -547,7 +547,35 @@ function Invoke-EpicVMProvisioningRecovery {
             $job.state = $canonical
             $changed = $true
         }
-        if ($job.state -in @('cloning', 'booting', 'claim_in_progress', 'guest_setup', 'network_setup', 'management_handoff', 'streaming_setup', 'stream_validation')) {
+        if ($job.state -eq 'streaming_setup') {
+            $job.failureStage = $null
+            $job.failureDetailCode = $null
+            $job.errorCode = $null
+            $job.errorMessage = $null
+            $job.updatedAt = [DateTime]::UtcNow.ToString('o')
+            $changed = $true
+            continue
+        }
+        $restartStages = @(Get-EpicVMProvisioningCompletedStages -Value $job.completedStages)
+        $restartRecoverable = $job.state -eq 'setup_failed:agent_restart' -and
+            [string]$job.errorCode -eq 'agent_restarted' -and
+            [bool](Get-EpicVMProperty -Object $job -Name 'claimConsumed' -Default $false) -and
+            [bool](Get-EpicVMProperty -Object $job -Name 'claimUsed' -Default $false) -and
+            $restartStages -contains 'claim' -and $restartStages -contains 'guest_setup' -and
+            $restartStages -contains 'network_setup' -and $restartStages -contains 'management_handoff' -and
+            [string](Get-EpicVMProperty -Object $job -Name 'tailnetIp' -Default '') -match '^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.\d{1,3}\.\d{1,3}$'
+        if ($restartRecoverable) {
+            $job.state = 'streaming_setup'
+            $job.failureStage = $null
+            $job.failureDetailCode = $null
+            $job.errorCode = $null
+            $job.errorMessage = $null
+            $job.lastAttemptCode = 'agent_restart_recovery'
+            $job.updatedAt = [DateTime]::UtcNow.ToString('o')
+            $changed = $true
+            continue
+        }
+        if ($job.state -in @('cloning', 'booting', 'claim_in_progress', 'guest_setup', 'network_setup', 'management_handoff', 'stream_validation')) {
             $job.state = 'setup_failed:agent_restart'
             $job.errorCode = 'agent_restarted'
             $job.failureStage = 'agent_restart'
@@ -573,6 +601,16 @@ function Invoke-EpicVMProvisioningRecovery {
     if ($changed) { Save-EpicVMProvisioningStore -Store $State.Provisioning }
 }
 
+function Test-EpicVMProvisioningJobRetryable {
+    param([AllowNull()] [object] $Job)
+    if ($null -eq $Job) { return $false }
+    $state = [string](Get-EpicVMProperty -Object $Job -Name 'state' -Default '')
+    $failureStage = [string](Get-EpicVMProperty -Object $Job -Name 'failureStage' -Default '')
+    $claimConsumed = [bool](Get-EpicVMProperty -Object $Job -Name 'claimConsumed' -Default $false)
+    $claimUsed = [bool](Get-EpicVMProperty -Object $Job -Name 'claimUsed' -Default $false)
+    return ($state -like 'setup_failed:*' -and -not $claimConsumed -and -not $claimUsed -and $failureStage -eq 'preclaim')
+}
+
 function New-EpicVMProvisioningJob {
     param([Parameter(Mandatory)] [object] $State, [Parameter(Mandatory)] [object] $Request)
     $name = [string](Get-EpicVMProperty -Object $Request -Name 'name' -Default '')
@@ -585,7 +623,7 @@ function New-EpicVMProvisioningJob {
     }
 
     $existingJob = @($State.Provisioning.Jobs.Values | Where-Object {
-        [string]$_.name -ceq $name -and $_.state -ne 'failed'
+        [string]$_.name -ceq $name -and -not (Test-EpicVMProvisioningJobRetryable -Job $_)
     }) | Select-Object -First 1
     if ($null -ne $existingJob) { throw (New-EpicVMProvisioningError -Code 'conflict' -Message 'The requested VM name already exists.' -Status 409) }
     $existing = @(& $State.Provider.GetVMs | Where-Object {
@@ -784,6 +822,28 @@ function Invoke-EpicVMProvisioningClaim {
         $Job.errorMessage = 'Guest setup stopped safely; the owned VM was retained for diagnosis.'
         $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
         Save-EpicVMProvisioningStore -Store $State.Provisioning
+
+        # A guest can finish Tailscale enrollment just before the initial
+        # verification/control-plane lookup races it.  The claim is already
+        # consumed at this point, so retrying the claim or issuing another
+        # auth key would be unsafe.  Use the existing read-only, stage-limited
+        # network recovery path automatically for this exact boundary.
+        $completed = @($Job.completedStages)
+        $autoRecoverable = $Job.state -eq 'setup_failed:network' -and
+            $completed -contains 'claim' -and $completed -contains 'guest_setup' -and
+            $completed -notcontains 'network_setup' -and
+            $code -in @('tailscale_enrollment_failed','tailscale_verification_failed','management_handoff_failed','network_setup_failed')
+        if ($autoRecoverable) {
+            try {
+                Invoke-EpicVMProvisioningNetworkRecovery -State $State -Job $Job -Request $Request | Out-Null
+                return
+            }
+            catch {
+                # The recovery function persists its own safe, identified
+                # failure.  Re-throw the original operation error so callers
+                # retain the original correlation and error contract.
+            }
+        }
         throw
     }
     finally {
@@ -791,7 +851,228 @@ function Invoke-EpicVMProvisioningClaim {
     }
 }
 
-function Invoke-EpicVMConfigureSunshineProvider {
+function Invoke-EpicVMProvisioningGuestRecovery {
+    param(
+        [Parameter(Mandatory)] [object] $State,
+        [Parameter(Mandatory)] [object] $Job,
+        [Parameter(Mandatory)] [object] $Request
+    )
+    $username = [string](Get-EpicVMProperty -Object $Request -Name 'username' -Default '')
+    $password = [string](Get-EpicVMProperty -Object $Request -Name 'password' -Default '')
+    if (-not (Test-EpicVMProvisioningCredentialInput -Username $username -Password $password)) {
+        throw (New-EpicVMProvisioningError -Code 'invalid_credential_input' -Message 'The credential input is empty or does not meet the request policy.' -Status 400)
+    }
+
+    Invoke-EpicVMProvisioningStoreLocked -Action {
+        $diskStore = New-EpicVMProvisioningStore -Config $State.Config
+        $persisted = @($diskStore.Jobs.Values | Where-Object { [string]$_.id -ceq [string]$Job.id } | Select-Object -First 1)
+        if ($persisted.Count -gt 0) { Copy-EpicVMProvisioningJobFields -Source $persisted[0] -Target $Job | Out-Null }
+        $Job.state = ConvertTo-EpicVMCanonicalProvisioningState -Record $Job
+        $stages = @($Job.completedStages)
+        $claimHash = [string](Get-EpicVMProperty -Object $Job -Name 'claimHash' -Default '')
+        if ($Job.state -ne 'setup_failed:guest' -or
+            -not [bool](Get-EpicVMProperty -Object $Job -Name 'claimConsumed' -Default $false) -or
+            -not [bool](Get-EpicVMProperty -Object $Job -Name 'claimUsed' -Default $false) -or
+            ($stages -notcontains 'claim') -or ($stages -contains 'guest_setup') -or
+            -not [string]::IsNullOrWhiteSpace($claimHash)) {
+            throw (New-EpicVMProvisioningError -Code 'guest_recovery_not_allowed' -Message 'Only a retained, consumed guest-stage failure may be recovered.' -Status 409)
+        }
+        if ([string]::IsNullOrWhiteSpace([string](Get-EpicVMProperty -Object $Job -Name 'vmId' -Default ''))) {
+            throw (New-EpicVMProvisioningError -Code 'guest_recovery_vm_missing' -Message 'The retained guest identity is unavailable.' -Status 409)
+        }
+        $Job.state = 'guest_setup'
+        $Job.failureStage = $null
+        $Job.failureDetailCode = $null
+        $Job.errorCode = $null
+        $Job.errorMessage = $null
+        $Job.lastAttemptCode = 'guest_recovery_started'
+        $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
+        $State.Provisioning.Jobs[$Job.id] = $Job
+        Save-EpicVMProvisioningStore -Store $State.Provisioning
+    } | Out-Null
+
+    $credential = $null
+    try {
+        $vmId = Get-EpicVMJobImmutableVmId -State $State -Job $Job
+        $credential = [PSCredential]::new($username, (ConvertTo-SecureString $password -AsPlainText -Force))
+        $readiness = Invoke-EpicVMPowerShellDirectOnce -Provider $State.Provider -VmName $Job.name -VmId $vmId -Credential $credential -Script (Get-EpicVMGuestDesiredCredentialReadinessScript) -TimeoutSeconds 30
+        if (-not [bool](Get-EpicVMHyperVValue -Object $readiness -Name 'ok' -Default $false)) {
+            throw (New-EpicVMProvisioningError -Code 'guest_account_failed' -Message 'The retained guest account did not pass readiness verification.' -Status 422 -DetailCode 'account_verification_failed')
+        }
+        $Job.guestSetupVerified = $true
+        $Job.completedStages = @(Get-EpicVMProvisioningCompletedStages -Value (@($Job.completedStages) + @('guest_setup')))
+        $Job.state = 'network_setup'
+        $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
+        Save-EpicVMProvisioningStore -Store $State.Provisioning
+
+        $enroll = Get-EpicVMProperty -Object $State.Provider -Name 'EnrollTailscale' -Default $null
+        if ($null -eq $enroll) { throw (New-EpicVMProvisioningError -Code 'tailscale_unavailable' -Message 'Tailscale enrollment is unavailable.' -Status 503) }
+        $tailnet = & $enroll $Job.name $username $password
+        $Job.tailnetIp = [string](Get-EpicVMProperty -Object $tailnet -Name 'ip' -Default '')
+        $Job.tailnetDeviceId = [string](Get-EpicVMProperty -Object $tailnet -Name 'deviceId' -Default '')
+        if ($Job.tailnetIp -notmatch '^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.\d{1,3}\.\d{1,3}$' -or [string]::IsNullOrWhiteSpace($Job.tailnetDeviceId)) {
+            throw (New-EpicVMProvisioningError -Code 'tailscale_verification_failed' -Message 'Tailscale enrollment did not return a verified device.' -Status 422)
+        }
+        $managementReady = [bool](Get-EpicVMProperty -Object $tailnet -Name 'managementReady' -Default $false)
+        $managementTransport = [string](Get-EpicVMProperty -Object $tailnet -Name 'managementTransport' -Default '')
+        if (-not $managementReady -or [string]::IsNullOrWhiteSpace($managementTransport)) {
+            throw (New-EpicVMProvisioningError -Code 'management_handoff_failed' -Message 'The post-network management handoff did not verify.' -Status 422)
+        }
+        $Job.managementTransport = $managementTransport
+        $Job.managementReadyAt = [DateTime]::UtcNow.ToString('o')
+        $Job.completedStages = @(Get-EpicVMProvisioningCompletedStages -Value (@($Job.completedStages) + @('network_setup','management_handoff')))
+        $Job.state = 'streaming_setup'
+        $Job.errorCode = $null
+        $Job.errorMessage = $null
+        $Job.failureStage = $null
+        $Job.failureDetailCode = $null
+        $Job.lastAttemptCode = $null
+        $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
+        Save-EpicVMProvisioningStore -Store $State.Provisioning
+        return $Job
+    }
+    catch {
+        $code = [string](Get-EpicVMProperty -Object $_.Exception -Name 'ErrorCode' -Default 'guest_recovery_failed')
+        if ($code -eq 'guest_recovery_failed') { $code = if ($Job.state -eq 'guest_setup') { 'guest_account_failed' } else { 'network_setup_failed' } }
+        $Job.state = Get-EpicVMProvisioningFailureState -Code $code
+        $Job.failureStage = switch -Regex ($Job.state) { 'guest' { 'guest' }; 'network' { 'network' }; 'management' { 'management_handoff' }; default { 'unknown' } }
+        $Job.errorCode = $code
+        $detail = [string](Get-EpicVMProperty -Object $_.Exception -Name 'FailureDetailCode' -Default '')
+        if ($script:EpicVMProvisioningFailureDetailCodes -contains $detail) { $Job.failureDetailCode = $detail } else { $Job.failureDetailCode = $null }
+        $Job.lastAttemptCode = $code
+        $Job.claimConsumed = $true
+        $Job.errorMessage = 'Guest recovery stopped safely; the owned VM was retained for diagnosis.'
+        $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
+        Save-EpicVMProvisioningStore -Store $State.Provisioning
+        throw
+    }
+    finally {
+            $username = $password = $null
+            $credential = $null
+        }
+    }
+
+    function Invoke-EpicVMProvisioningNetworkRecovery {
+        param(
+            [Parameter(Mandatory)] [object] $State,
+            [Parameter(Mandatory)] [object] $Job,
+            [Parameter(Mandatory)] [object] $Request
+        )
+        $username = [string](Get-EpicVMProperty -Object $Request -Name 'username' -Default '')
+        $password = [string](Get-EpicVMProperty -Object $Request -Name 'password' -Default '')
+        if (-not (Test-EpicVMProvisioningCredentialInput -Username $username -Password $password)) {
+            throw (New-EpicVMProvisioningError -Code 'invalid_credential_input' -Message 'The credential input is empty or does not meet the request policy.' -Status 400)
+        }
+
+        $started = $false
+        try {
+            Invoke-EpicVMProvisioningStoreLocked -Action {
+                $diskStore = New-EpicVMProvisioningStore -Config $State.Config
+                $persisted = @($diskStore.Jobs.Values | Where-Object { [string]$_.id -ceq [string]$Job.id } | Select-Object -First 1)
+                if ($persisted.Count -gt 0) { Copy-EpicVMProvisioningJobFields -Source $persisted[0] -Target $Job | Out-Null }
+                $Job.state = ConvertTo-EpicVMCanonicalProvisioningState -Record $Job
+                $stages = @(Get-EpicVMProvisioningCompletedStages -Value $Job.completedStages)
+                $claimHash = [string](Get-EpicVMProperty -Object $Job -Name 'claimHash' -Default '')
+                if ($Job.state -ne 'setup_failed:network' -or
+                    -not [bool](Get-EpicVMProperty -Object $Job -Name 'claimConsumed' -Default $false) -or
+                    -not [bool](Get-EpicVMProperty -Object $Job -Name 'claimUsed' -Default $false) -or
+                    ($stages -notcontains 'claim') -or ($stages -notcontains 'guest_setup') -or
+                    ($stages -contains 'network_setup') -or ($stages -contains 'management_handoff') -or
+                    -not [string]::IsNullOrWhiteSpace($claimHash)) {
+                    throw (New-EpicVMProvisioningError -Code 'network_recovery_not_allowed' -Message 'Only a retained, consumed network-stage failure may be recovered.' -Status 409)
+                }
+                if ([string]::IsNullOrWhiteSpace([string](Get-EpicVMProperty -Object $Job -Name 'vmId' -Default ''))) {
+                    throw (New-EpicVMProvisioningError -Code 'network_recovery_vm_missing' -Message 'The retained VM identity is unavailable.' -Status 409)
+                }
+                $Job.state = 'network_setup'
+                $Job.failureStage = $null
+                $Job.failureDetailCode = $null
+                $Job.errorCode = $null
+                $Job.errorMessage = $null
+                $Job.lastAttemptCode = 'network_recovery_started'
+                $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
+                $State.Provisioning.Jobs[$Job.id] = $Job
+                Save-EpicVMProvisioningStore -Store $State.Provisioning
+                $script:EpicVMNetworkRecoveryStarted = $true
+            } | Out-Null
+            $started = $true
+
+            $vmId = Get-EpicVMJobImmutableVmId -State $State -Job $Job
+            $credential = [PSCredential]::new($username, (ConvertTo-SecureString $password -AsPlainText -Force))
+            $addressResult = $null
+            try {
+                $addressResult = Invoke-EpicVMPowerShellDirectOnce -Provider $State.Provider -VmName $Job.name -VmId $vmId -Credential $credential -Script (Get-EpicVMTailscaleGuestAddressScript) -TimeoutSeconds 30
+            } catch {
+                throw (New-EpicVMProvisioningError -Code 'tailscale_verification_failed' -Message 'The retained guest Tailscale address could not be verified.' -Status 422)
+            }
+            $ip = [string](Get-EpicVMHyperVValue -Object $addressResult -Name 'ip' -Default '')
+            if (-not [bool](Get-EpicVMHyperVValue -Object $addressResult -Name 'ok' -Default $false) -or
+                $ip -notmatch '^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.\d{1,3}\.\d{1,3}$') {
+                throw (New-EpicVMProvisioningError -Code 'tailscale_verification_failed' -Message 'The retained guest Tailscale address could not be verified.' -Status 422)
+            }
+            try {
+                $deviceId = Get-EpicVMTailscaleDeviceId -Provider $State.Provider -VmName ([string]$Job.name) -GuestIp $ip
+            } catch {
+                throw (New-EpicVMProvisioningError -Code 'tailscale_verification_failed' -Message 'The retained Tailscale device could not be identified.' -Status 422)
+            }
+            if ([string]::IsNullOrWhiteSpace($deviceId)) {
+                throw (New-EpicVMProvisioningError -Code 'tailscale_verification_failed' -Message 'The retained Tailscale device could not be identified.' -Status 422)
+            }
+
+            $managementPort = 5985
+            try { $managementPort = [int](Get-EpicVMHyperVValue -Object $State.Config -Name 'ManagementPort' -Default 5985) } catch { $managementPort = 5985 }
+            if ($managementPort -lt 1 -or $managementPort -gt 65535) { $managementPort = 5985 }
+            $managementUseSsl = [bool](Get-EpicVMHyperVValue -Object $State.Config -Name 'ManagementUseSsl' -Default $false)
+            $management = $null
+            try {
+                $management = Invoke-EpicVMPowerShellDirectOnce -Provider $State.Provider -VmName $Job.name -VmId $vmId -Credential $credential -Script (Get-EpicVMGuestManagementConfigurationScript) -ArgumentList @($managementPort,$managementUseSsl) -TimeoutSeconds 45
+            } catch {
+                throw (New-EpicVMProvisioningError -Code 'management_handoff_failed' -Message 'The retained guest management endpoint could not be verified.' -Status 422)
+            }
+            if (-not [bool](Get-EpicVMHyperVValue -Object $management -Name 'ok' -Default $false) -or
+                -not [bool](Get-EpicVMHyperVValue -Object $management -Name 'managementEndpoint' -Default $false) -or
+                -not [bool](Get-EpicVMHyperVValue -Object $management -Name 'firewallScoped' -Default $false)) {
+                throw (New-EpicVMProvisioningError -Code 'management_handoff_failed' -Message 'The retained guest management endpoint could not be verified.' -Status 422)
+            }
+
+            $Job.tailnetIp = $ip
+            $Job.tailnetDeviceId = [string]$deviceId
+            $Job.managementTransport = 'tailscale_winrm'
+            $Job.managementReadyAt = [DateTime]::UtcNow.ToString('o')
+            $Job.completedStages = @(Get-EpicVMProvisioningCompletedStages -Value (@($Job.completedStages) + @('network_setup','management_handoff')))
+            $Job.state = 'streaming_setup'
+            $Job.failureStage = $null
+            $Job.failureDetailCode = $null
+            $Job.errorCode = $null
+            $Job.errorMessage = $null
+            $Job.lastAttemptCode = $null
+            $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
+            Save-EpicVMProvisioningStore -Store $State.Provisioning
+            return $Job
+        }
+        catch {
+            if ($started) {
+                $code = [string](Get-EpicVMProperty -Object $_.Exception -Name 'ErrorCode' -Default 'network_recovery_failed')
+                if ([string]::IsNullOrWhiteSpace($code) -or $code -in @('network_recovery_not_allowed','network_recovery_vm_missing')) { $code = 'network_recovery_failed' }
+                $Job.state = Get-EpicVMProvisioningFailureState -Code $code
+                $Job.failureStage = switch -Regex ($Job.state) { 'network' { 'network' }; 'management' { 'management_handoff' }; default { 'network' } }
+                $Job.errorCode = $code
+                $Job.failureDetailCode = $null
+                $Job.lastAttemptCode = $code
+                $Job.claimConsumed = $true
+                $Job.errorMessage = 'Network recovery stopped safely; the owned VM was retained for diagnosis.'
+                $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
+                Save-EpicVMProvisioningStore -Store $State.Provisioning
+            }
+            throw
+        }
+        finally {
+            $username = $password = $null
+            $credential = $null
+        }
+    }
+
+    function Invoke-EpicVMConfigureSunshineProvider {
     param(
         [Parameter(Mandatory)][scriptblock]$Invoker,
         [Parameter(Mandatory)][object]$State,
@@ -963,8 +1244,10 @@ function Complete-EpicVMProvisioningConsole {
     }
     $expectedRoute = '/vm/' + $Job.name + '/'
     $route = [string](Get-EpicVMProperty -Object $Request -Name 'routePrefix' -Default '')
+    $scopedRoutePattern = '^/vm/' + [regex]::Escape([string]$Job.name) + '--[a-z0-9][a-z0-9._-]{0,62}/$'
+    $routeAllowed = ($route -ceq $expectedRoute) -or ($route -cmatch $scopedRoutePattern)
     $serverVerified = [bool](Get-EpicVMProperty -Object $Request -Name 'guestTcpVerified' -Default $false)
-    if ($route -cne $expectedRoute -or -not $serverVerified) {
+    if (-not $routeAllowed -or -not $serverVerified) {
         throw (New-EpicVMProvisioningError -Code 'console_verification_failed' -Message 'The kvm2 console evidence is incomplete.' -Status 422)
     }
     $Job.state = 'streaming_setup'
