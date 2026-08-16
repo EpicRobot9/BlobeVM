@@ -265,6 +265,31 @@ Describe 'EpicVM provisioning safety' {
         $inFlight.errorCode | Should -Be 'agent_restarted'
     }
 
+    It 'preserves a completed ready checkpoint across a transient restart re-verification failure' {
+        $config=Get-EpicVMDefaultConfig
+        $config.ProvisioningStatePath=Join-Path $TestDrive 'ready-recovery-jobs.json'
+        $provider=New-ProvisioningTestProvider
+        $provider.GetVMs={ @(@{ name='alpha'; state='Running'; managed=$true }) }
+        $provider | Add-Member NoteProperty VerifyGuest { param($name,$ip) $false }
+        $state=New-EpicVMAgentState -Config $config -Token 'agent-token' -Provider $provider
+        $job=New-EpicVMProvisioningJobObject -Id 'job-ready-recovery' -Name 'alpha' -Profile 'standard' -State 'ready'
+        $job.claimConsumed=$true
+        $job.claimUsed=$true
+        $job.tailnetIp='100.111.82.1'
+        $job.consoleRoutePrefix='/vm/alpha--epic-pc/'
+        $job.consoleVerifiedAt=[DateTime]::UtcNow.AddMinutes(-2).ToString('o')
+        $job.streamValidationVerified=$true
+        $job.completedStages=@('claim','guest_setup','network_setup','management_handoff','streaming_setup','stream_validation')
+        $state.Provisioning.Jobs[$job.id]=$job
+
+        Invoke-EpicVMProvisioningRecovery -State $state
+
+        $job.state | Should -Be 'ready'
+        $job.errorCode | Should -BeNullOrEmpty
+        $job.failureStage | Should -BeNullOrEmpty
+        $job.consoleRoutePrefix | Should -Be '/vm/alpha--epic-pc/'
+    }
+
     It 'accepts request-only Sunshine credentials only at the console gate' {
         $config=Get-EpicVMDefaultConfig
         $config.ProvisioningStatePath=Join-Path $TestDrive 'sunshine-jobs.json'

@@ -575,6 +575,43 @@ function Invoke-EpicVMProvisioningRecovery {
             $changed = $true
             continue
         }
+        $readyStages = @(Get-EpicVMProvisioningCompletedStages -Value $job.completedStages)
+        $expectedReadyRoute = '/vm/' + [string]$job.name + '/'
+        $scopedReadyRoutePattern = '^/vm/' + [regex]::Escape([string]$job.name) + '--[a-z0-9][a-z0-9._-]{0,62}/$'
+        $readyRoute = [string](Get-EpicVMProperty -Object $job -Name 'consoleRoutePrefix' -Default '')
+        $readyCheckpoint =
+            [bool](Get-EpicVMProperty -Object $job -Name 'claimConsumed' -Default $false) -and
+            [bool](Get-EpicVMProperty -Object $job -Name 'claimUsed' -Default $false) -and
+            $readyStages -contains 'claim' -and $readyStages -contains 'guest_setup' -and
+            $readyStages -contains 'network_setup' -and $readyStages -contains 'management_handoff' -and
+            $readyStages -contains 'streaming_setup' -and $readyStages -contains 'stream_validation' -and
+            [bool](Get-EpicVMProperty -Object $job -Name 'streamValidationVerified' -Default $false) -and
+            -not [string]::IsNullOrWhiteSpace([string](Get-EpicVMProperty -Object $job -Name 'consoleVerifiedAt' -Default '')) -and
+            (($readyRoute -ceq $expectedReadyRoute) -or ($readyRoute -cmatch $scopedReadyRoutePattern)) -and
+            [string](Get-EpicVMProperty -Object $job -Name 'tailnetIp' -Default '') -match '^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.\d{1,3}\.\d{1,3}$'
+        $readyVmRunning = $false
+        try {
+            $readyVm = @(& $State.Provider.GetVMs | Where-Object {
+                [string](Get-EpicVMProperty -Object $_ -Name 'name' -Default '') -ceq [string]$job.name
+            }) | Select-Object -First 1
+            $readyVmRunning = $null -ne $readyVm -and
+                [bool](Get-EpicVMProperty -Object $readyVm -Name 'managed' -Default $false) -and
+                [string](Get-EpicVMProperty -Object $readyVm -Name 'state' -Default '') -ieq 'Running'
+        }
+        catch { $readyVmRunning = $false }
+        $retainedReadyRecovery = $job.state -eq 'setup_failed:agent_restart' -and
+            [string]$job.errorCode -eq 'reverification_failed' -and $readyCheckpoint -and $readyVmRunning
+        if ($retainedReadyRecovery) {
+            $job.state = 'ready'
+            $job.failureStage = $null
+            $job.failureDetailCode = $null
+            $job.errorCode = $null
+            $job.errorMessage = $null
+            $job.lastAttemptCode = 'agent_restart_recovery'
+            $job.updatedAt = [DateTime]::UtcNow.ToString('o')
+            $changed = $true
+            continue
+        }
         if ($job.state -in @('cloning', 'booting', 'claim_in_progress', 'guest_setup', 'network_setup', 'management_handoff', 'stream_validation')) {
             $job.state = 'setup_failed:agent_restart'
             $job.errorCode = 'agent_restarted'
@@ -585,14 +622,16 @@ function Invoke-EpicVMProvisioningRecovery {
             continue
         }
         if ($job.state -eq 'ready') {
-            $verify = Get-EpicVMProperty -Object $State.Provider -Name 'VerifyGuest' -Default $null
-            $verified = $false
-            if ($null -ne $verify) { try { $verified = [bool](& $verify $job.name $job.tailnetIp) } catch { $verified = $false } }
-            if (-not $verified) {
-                $job.state = 'setup_failed:agent_restart'
-                $job.errorCode = 'reverification_failed'
-                $job.failureStage = 'agent_restart'
-                $job.errorMessage = 'Readiness verification is required after agent restart.'
+            if (-not ($readyCheckpoint -and $readyVmRunning)) {
+                $verify = Get-EpicVMProperty -Object $State.Provider -Name 'VerifyGuest' -Default $null
+                $verified = $false
+                if ($null -ne $verify) { try { $verified = [bool](& $verify $job.name $job.tailnetIp) } catch { $verified = $false } }
+                if (-not $verified) {
+                    $job.state = 'setup_failed:agent_restart'
+                    $job.errorCode = 'reverification_failed'
+                    $job.failureStage = 'agent_restart'
+                    $job.errorMessage = 'Readiness verification is required after agent restart.'
+                }
             }
             $job.updatedAt = [DateTime]::UtcNow.ToString('o')
             $changed = $true
