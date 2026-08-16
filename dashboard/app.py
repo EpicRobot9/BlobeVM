@@ -374,6 +374,69 @@ def _start_remote_moonlight_console_retry(*, host, host_id, job_id, name, guest_
     finally:
         guest_username = guest_password = sunshine_username = sunshine_password = ''
 
+
+def _start_remote_moonlight_console_repair(*, host, host_id, job_id, name, guest_ip,
+                                             route_name, sunshine_username,
+                                             sunshine_password, orchestrator,
+                                             operation_id):
+    """Repair only a retained Moonlight bundle for an already-ready VM.
+
+    The provisioning job is deliberately read-only here.  This worker exists
+    for the case where the VM and its guest checkpoints are healthy but the
+    Moonlight client certificate persisted in the console bundle is stale.
+    """
+    key = (str(host_id), str(job_id))
+    try:
+        current = host.provisioning_status(job_id)
+        current_job = current.get('job') if isinstance(current, dict) else None
+        current_state = str(current_job.get('state') or '') if isinstance(current_job, dict) else ''
+        if current_state != 'ready':
+            raise ConsoleOrchestrationError(
+                'Only a ready remote VM console can be repaired.',
+                status=409,
+                code='console_repair_not_allowed',
+            )
+        started = orchestrator.repair_staged(
+            name,
+            guest_ip=guest_ip,
+            route_name=route_name,
+            sunshine_username=sunshine_username,
+            sunshine_password=sunshine_password,
+        )
+        if not isinstance(started, dict) or not bool(started.get('ok')):
+            raise ConsoleOrchestrationError(
+                'The repaired Moonlight console did not pass verification.',
+                status=502,
+                code='console_verification_failed',
+            )
+        _set_console_retry_result(key, status='ready', operation_id=operation_id)
+        app.logger.info('EpicVM console repair completed operation=%s status=ready', operation_id)
+    except ConsoleOrchestrationError as exc:
+        failure_code = _safe_console_retry_code(getattr(exc, 'code', 'console_failed'))
+        _set_console_retry_result(key, status='failed', operation_id=operation_id, failure_code=failure_code)
+        try:
+            orchestrator.stop_staged(name)
+        except Exception:
+            pass
+        app.logger.warning('EpicVM console repair failed operation=%s code=%s', operation_id, failure_code)
+    except VmHostUnavailable as exc:
+        failure_code = _safe_console_retry_code(getattr(exc, 'code', 'console_failed'))
+        _set_console_retry_result(key, status='failed', operation_id=operation_id, failure_code=failure_code)
+        try:
+            orchestrator.stop_staged(name)
+        except Exception:
+            pass
+        app.logger.warning('EpicVM console repair failed operation=%s code=%s', operation_id, failure_code)
+    except Exception:
+        _set_console_retry_result(key, status='failed', operation_id=operation_id, failure_code='console_failed')
+        try:
+            orchestrator.stop_staged(name)
+        except Exception:
+            pass
+        app.logger.warning('EpicVM console repair failed operation=%s code=console_failed', operation_id)
+    finally:
+        sunshine_username = sunshine_password = ''
+
 def _remote_console_route_name(name: str, host_id: str) -> str:
     """Return a stable route namespace for a remote host's VM name.
 
@@ -3915,7 +3978,30 @@ def api_provisioning_job_status(job_id):
             status = dict(status)
             status['job'] = dict(status['job'])
             task_status = str(pending.get('status') or 'pending')
-            if task_status == 'pending':
+            task_kind = str(pending.get('kind') or 'retry')
+            if task_kind == 'repair':
+                # A repair is deliberately read-only against the provisioning
+                # job. Never overlay a ready job as streaming_setup while the
+                # Moonlight bundle is being rebuilt.
+                if task_status == 'pending':
+                    status['job'].update({
+                        'consoleRepairPending': True,
+                        'consoleOperationId': pending['operationId'],
+                    })
+                elif task_status == 'failed':
+                    status['job'].update({
+                        'consoleRepairPending': False,
+                        'consoleRepairOutcome': 'failed',
+                        'consoleOperationId': pending['operationId'],
+                        'consoleRepairErrorCode': _safe_console_retry_code(pending.get('failureCode')),
+                    })
+                elif task_status == 'ready':
+                    status['job'].update({
+                        'consoleRepairPending': False,
+                        'consoleRepairOutcome': 'ready',
+                        'consoleOperationId': pending['operationId'],
+                    })
+            elif task_status == 'pending':
                 # The agent may still show setup_failed:streaming until its
                 # credential-bearing request completes. Overlay only safe,
                 # non-secret pending metadata for this dashboard process.
@@ -4191,6 +4277,115 @@ def api_provisioning_job_retry_console(job_id):
         return response, 502
     finally:
         username = password = sunshine_username = sunshine_password = ''
+
+
+@app.post('/dashboard/api/provisioning-jobs/<job_id>/repair-console')
+@auth_required
+def api_provisioning_job_repair_console(job_id):
+    """Repair a broken Moonlight bundle without reprovisioning the VM."""
+    if not _request_is_https():
+        response = jsonify({'ok': False, 'error': 'Console repair requires HTTPS'})
+        response.headers['Cache-Control'] = 'no-store'
+        return response, 426
+    payload = request.get_json(silent=True) if request.is_json else request.form.to_dict(flat=True)
+    payload = payload if isinstance(payload, dict) else {}
+    host_id = str(payload.get('host_id') or '').strip()
+    sunshine_username = str(payload.get('sunshineUsername') or payload.get('sunshine_username') or '')
+    sunshine_password = str(payload.get('sunshinePassword') or payload.get('sunshine_password') or '')
+    if not host_id:
+        return jsonify({'ok': False, 'error': 'host_id is required'}), 400
+    orchestrator = _console_orchestrator()
+    if not _moonlight_console(orchestrator):
+        return jsonify({'ok': False, 'error': {'code': 'console_repair_not_allowed', 'message': 'Moonlight console repair is unavailable on this host.'}}), 409
+    if not sunshine_username or not sunshine_password:
+        return jsonify({'ok': False, 'error': {'code': 'sunshine_credentials_required', 'message': 'Sunshine credentials are required for pairing.'}}), 400
+    try:
+        host = _vm_host(host_id)
+        if getattr(host, 'kind', 'local') != 'remote':
+            raise ConsoleOrchestrationError(
+                'Only a retained remote VM console can be repaired.',
+                status=409,
+                code='console_repair_not_allowed',
+            )
+        current = host.provisioning_status(job_id)
+        job = current.get('job') if isinstance(current, dict) else None
+        current_state = str(job.get('state') or '') if isinstance(job, dict) else ''
+        if current_state != 'ready':
+            raise ConsoleOrchestrationError(
+                'Only a ready remote VM console can be repaired.',
+                status=409,
+                code='console_repair_not_allowed',
+            )
+        name = str(job.get('name') or '').strip().lower()
+        guest_ip = str(job.get('tailnetIp') or '').strip()
+        if not name or not guest_ip:
+            raise ConsoleOrchestrationError(
+                'The ready VM has no verified guest address for console repair.',
+                status=409,
+                code='console_repair_not_allowed',
+            )
+        task_key = (host_id, str(job_id))
+        with _CONSOLE_RETRY_LOCK:
+            pending = _CONSOLE_RETRY_TASKS.get(task_key)
+            if isinstance(pending, dict) and str(pending.get('status') or 'pending') == 'pending':
+                raise ConsoleOrchestrationError(
+                    'Console setup is already running for this VM.',
+                    status=409,
+                    code='console_retry_in_progress',
+                )
+            operation_id = secrets.token_hex(16)
+            _CONSOLE_RETRY_TASKS[task_key] = {
+                'operationId': operation_id,
+                'startedAt': time.time(),
+                'status': 'pending',
+                'failureCode': '',
+                'routeReady': False,
+                'kind': 'repair',
+            }
+        worker = threading.Thread(
+            target=_start_remote_moonlight_console_repair,
+            kwargs={
+                'host': host,
+                'host_id': host_id,
+                'job_id': job_id,
+                'name': name,
+                'guest_ip': guest_ip,
+                'route_name': _remote_console_route_name(name, host_id),
+                'sunshine_username': sunshine_username,
+                'sunshine_password': sunshine_password,
+                'orchestrator': orchestrator,
+                'operation_id': operation_id,
+            },
+            name=f'epicvm-console-repair-{operation_id[:8]}',
+            daemon=True,
+        )
+        worker.start()
+        response = jsonify({
+            'ok': True,
+            'pending': True,
+            'host_id': host_id,
+            'operationId': operation_id,
+            'job': {
+                **job,
+                'consoleRepairPending': True,
+                'consoleOperationId': operation_id,
+            },
+        })
+        response.headers['Cache-Control'] = 'no-store'
+        response.headers['Pragma'] = 'no-cache'
+        return response, 202
+    except ConsoleOrchestrationError as exc:
+        response = jsonify({'ok': False, 'error': {'code': str(getattr(exc, 'code', 'console_repair_failed')), 'message': str(exc)}})
+        response.headers['Cache-Control'] = 'no-store'
+        return response, int(getattr(exc, 'status', 502) or 502)
+    except VmHostUnavailable as exc:
+        return _vm_host_error_response(exc)
+    except Exception:
+        response = jsonify({'ok': False, 'error': 'Unable to start the console repair'})
+        response.headers['Cache-Control'] = 'no-store'
+        return response, 502
+    finally:
+        sunshine_username = sunshine_password = ''
 
 
 @app.post('/dashboard/api/deprovisioning-jobs')

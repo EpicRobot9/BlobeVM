@@ -118,7 +118,7 @@ def test_pairing_keeps_sunshine_secret_out_of_bundle(tmp_path):
         calls.append((method, url, headers, body))
         if url.endswith("/api/hosts"):
             return Response(payload=(json.dumps({"host_id": "other-host", "paired": "Paired"}) + "\n").encode())
-        if url.endswith("/api/host"):
+        if "/api/host?" in url or url.endswith("/api/host"):
             return Response(payload=json.dumps({"host": {"host_id": "1251941260"}}).encode())
         if url.endswith("/api/pair"):
             return Response([json.dumps({"Pin": "1234"}), json.dumps({"Paired": "Paired"})])
@@ -142,6 +142,97 @@ def test_pairing_keeps_sunshine_secret_out_of_bundle(tmp_path):
     assert "secret-value" not in sunshine[3].decode()
     assert sunshine[2]["Authorization"].startswith("Basic ")
     assert json.loads((tmp_path / "alpha" / "plan.json").read_text())["paired"] is True
+
+
+def test_pairing_refuses_to_mark_plan_ready_when_authenticated_host_query_fails(tmp_path):
+    class Response:
+        def __init__(self, lines=(), payload=b""):
+            self.lines = [line if isinstance(line, bytes) else str(line).encode() for line in lines]
+            self.payload = payload
+
+        def readline(self):
+            return self.lines.pop(0) if self.lines else b""
+
+        def read(self, *_args):
+            return self.payload or b"\n".join(self.lines)
+
+        def close(self):
+            return None
+
+    def http(method, url, *, headers, body, timeout):
+        if url.endswith("/api/hosts"):
+            return Response(payload=b'{"hosts":[]}')
+        if url.endswith("/api/host"):
+            return Response(payload=b'{"host":{"host_id":1251941260}}')
+        if "/api/host?host_id=" in url:
+            return Response(payload=b'{"error":"certificate rejected"}')
+        if url.endswith("/api/pair"):
+            return Response([b'{"Pin":"1234"}', b'{"Paired":"Paired"}'])
+        if url.endswith("/api/pin"):
+            return Response(payload=b'{"status":true}')
+        raise AssertionError(url)
+
+    orch = make_orchestrator(tmp_path, http_request=http)
+    orch.stage_plan(orch.build_plan(name="alpha", guest_ip="100.111.82.1"))
+    orch._container_url = lambda _name, _route_prefix=None: "http://172.20.0.2:8080/vm/alpha"
+
+    with pytest.raises(ConsoleOrchestrationError) as failure:
+        orch.pair_staged("alpha", sunshine_username="sunshine-user", sunshine_password="secret-value")
+
+    assert failure.value.code == "moonlight_host_failed"
+    assert json.loads((tmp_path / "alpha" / "plan.json").read_text())["paired"] is False
+
+
+def test_repair_rebuilds_bundle_and_requires_authenticated_host_query(tmp_path):
+    calls = []
+
+    class Response:
+        def __init__(self, lines=(), payload=b""):
+            self.lines = [line if isinstance(line, bytes) else str(line).encode() for line in lines]
+            self.payload = payload
+
+        def readline(self):
+            return self.lines.pop(0) if self.lines else b""
+
+        def read(self, *_args):
+            return self.payload or b"\n".join(self.lines)
+
+        def close(self):
+            return None
+
+    def http(method, url, *, headers, body, timeout):
+        calls.append((method, url))
+        if url.endswith("/api/hosts"):
+            return Response(payload=b'{"hosts":[]}')
+        if url.endswith("/api/host"):
+            return Response(payload=b'{"host":{"host_id":1251941260}}')
+        if "/api/host?host_id=" in url:
+            return Response(payload=b'{"host":{"host_id":1251941260}}')
+        if url.endswith("/api/pair"):
+            return Response([b'{"Pin":"1234"}', b'{"Paired":"Paired"}'])
+        if url.endswith("/api/pin"):
+            return Response(payload=b'{"status":true}')
+        raise AssertionError(url)
+
+    orch = make_orchestrator(tmp_path, http_request=http)
+    orch.stage_plan(orch.build_plan(name="alpha", guest_ip="100.111.82.1"))
+    orch._container_url = lambda _name, _route_prefix=None: "http://172.20.0.2:8080/vm/alpha"
+    orch.start_staged = lambda _name: {"ok": True, "routePrefix": "/vm/alpha--epic-pc/", "guestTcpVerified": True}
+    result = orch.repair_staged(
+        "alpha",
+        guest_ip="100.111.82.1",
+        route_name="alpha--epic-pc",
+        sunshine_username="sunshine-user",
+        sunshine_password="secret-value",
+    )
+
+    assert result["ok"] is True
+    assert result["repaired"] is True
+    assert result["quarantined"] is True
+    assert any("/api/host?host_id=" in url for _, url in calls)
+    plan = json.loads((tmp_path / "alpha" / "plan.json").read_text())
+    assert plan["paired"] is True
+    assert "secret-value" not in (tmp_path / "alpha" / "plan.json").read_text()
 
 
 def test_sunshine_pair_retries_when_sunshine_reports_pending_session(tmp_path):

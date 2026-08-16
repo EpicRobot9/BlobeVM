@@ -274,6 +274,80 @@ def test_console_retry_ready_is_idempotent(monkeypatch, tmp_path):
     assert response.get_json()["job"]["state"] == "ready"
 
 
+def test_ready_console_repair_is_async_read_only_and_does_not_expose_password(monkeypatch, tmp_path):
+    module = load_app(monkeypatch, tmp_path)
+    started = threading.Event()
+
+    class RepairHost(FakeRemoteHost):
+        def __init__(self):
+            self.failed_codes = []
+
+        def provisioning_status(self, job_id):
+            return {
+                "job": {
+                    "id": job_id,
+                    "name": "alpha",
+                    "state": "ready",
+                    "tailnetIp": "100.111.82.1",
+                    "completedStages": ["claim", "guest_setup", "network_setup", "management_handoff", "streaming_setup", "stream_validation"],
+                }
+            }
+
+        def console_failed(self, job_id, code="console_failed"):
+            self.failed_codes.append(code)
+            return super().console_failed(job_id, code)
+
+    class MoonlightRepair:
+        backend = "moonlight"
+
+        def repair_staged(self, name, **kwargs):
+            started.set()
+            assert name == "alpha"
+            assert kwargs["guest_ip"] == "100.111.82.1"
+            assert kwargs["route_name"] == "alpha--epic-pc"
+            return {"ok": True, "routePrefix": "/vm/alpha--epic-pc/", "guestTcpVerified": True}
+
+        def stop_staged(self, name):
+            return None
+
+    host = RepairHost()
+    module.VM_HOST_REGISTRY.get = lambda host_id="local": host
+    module._CONSOLE_ORCHESTRATOR = MoonlightRepair()
+    client = authenticated_client(module)
+    csrf = client.get("/dashboard/api/auth/csrf").get_json()["csrfToken"]
+    headers = {"Origin": "http://localhost", "X-Forwarded-Proto": "https", "X-CSRF-Token": csrf}
+    payload = {
+        "host_id": "epic-pc",
+        "sunshineUsername": "sun-user",
+        "sunshinePassword": "sun-secret",
+    }
+
+    response = client.post("/dashboard/api/provisioning-jobs/job-1/repair-console", json=payload, headers=headers)
+    assert response.status_code == 202
+    body = response.get_json()
+    assert body["pending"] is True
+    assert body["job"]["state"] == "ready"
+    assert body["job"]["consoleRepairPending"] is True
+    assert "sun-secret" not in response.get_data(as_text=True)
+    assert started.wait(1)
+
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        task = module._CONSOLE_RETRY_TASKS.get(("epic-pc", "job-1"))
+        if task and task.get("status") == "ready":
+            break
+        time.sleep(0.01)
+    assert task["status"] == "ready"
+    assert task["kind"] == "repair"
+    assert host.failed_codes == []
+
+    status = client.get("/dashboard/api/provisioning-jobs/job-1?host_id=epic-pc")
+    assert status.status_code == 200
+    status_job = status.get_json()["job"]
+    assert status_job["state"] == "ready"
+    assert status_job["consoleRepairOutcome"] == "ready"
+
+
 def test_remote_console_worker_rechecks_ready_state_before_credentials(monkeypatch, tmp_path):
     module = load_app(monkeypatch, tmp_path)
 

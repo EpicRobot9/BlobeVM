@@ -502,6 +502,44 @@ networks:
             raise ConsoleOrchestrationError("Moonlight did not return a guest host id.", status=502, code="moonlight_host_failed")
         return self._coerce_host_id(host_id)
 
+    def _host_details(self, base: str, user: str, host_id: int) -> dict[str, Any]:
+        """Verify that Moonlight can perform the first authenticated host query.
+
+        `/api/hosts` only reads Moonlight's local database and can report a host
+        as paired even when Sunshine rejects the stored client certificate.  A
+        real `/api/host` request is therefore the readiness boundary.
+        """
+        response = None
+        try:
+            response = self._http(
+                "GET",
+                f"{base}/api/host?host_id={int(host_id)}",
+                headers={"X-EpicVM-User": user},
+                timeout=20,
+            )
+            raw = response.read()
+            text = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw or "")
+            try:
+                payload = json.loads(text)
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                payload = json.loads(next((line for line in text.splitlines() if line.strip()), ""))
+            host = payload.get("host") if isinstance(payload, dict) else None
+            if not isinstance(host, dict) or self._coerce_host_id(host.get("host_id")) != int(host_id):
+                raise ConsoleOrchestrationError("Moonlight did not return verified guest host details.", status=502, code="moonlight_host_failed")
+            return host
+        except ConsoleOrchestrationError:
+            raise
+        except urlerror.HTTPError as exc:
+            raise ConsoleOrchestrationError("Moonlight could not verify the paired guest.", status=502, code="moonlight_host_failed") from exc
+        except (OSError, urlerror.URLError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ConsoleOrchestrationError("Moonlight could not verify the paired guest.", status=502, code="moonlight_host_failed") from exc
+        finally:
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    pass
+
     def _sunshine_pair(self, guest_ip: str, username: str, password: str, pin: str, vm_name: str) -> None:
         if not username or not password:
             raise ConsoleOrchestrationError("Sunshine credentials are required for pairing.", status=400, code="sunshine_credentials_required")
@@ -550,13 +588,14 @@ networks:
 
     def pair_staged(self, name: str, *, sunshine_username: str, sunshine_password: str) -> dict[str, Any]:
         plan = self._read_plan(name)
-        if plan.get("paired") is True:
-            return {"ok": True, "paired": True, "routePrefix": str(plan["routePrefix"]), "guestTcpVerified": True}
         base = self._container_url(name, str(plan.get("routePrefix") or ""))
         user = validate_vm_name(name)
         host_id = self._register_host(base, user, str(plan["guestIp"]))
         if not host_id:
             raise ConsoleOrchestrationError("Moonlight did not return a guest host id.", status=502, code="moonlight_host_failed")
+        if plan.get("paired") is True:
+            self._host_details(base, user, host_id)
+            return {"ok": True, "paired": True, "routePrefix": str(plan["routePrefix"]), "guestTcpVerified": True}
         headers = {"Content-Type": "application/json", "X-EpicVM-User": user}
         body = json.dumps({"host_id": host_id}, separators=(",", ":")).encode("utf-8")
         try:
@@ -582,6 +621,10 @@ networks:
             raise ConsoleOrchestrationError("Moonlight pairing was rejected.", status=409 if int(exc.code) in (401, 403) else 502, code="moonlight_pair_failed") from exc
         except (OSError, urlerror.URLError) as exc:
             raise ConsoleOrchestrationError("Moonlight pairing could not be completed.", status=502, code="moonlight_pair_failed") from exc
+        # Do not persist paired=true until the first authenticated host query
+        # succeeds.  This catches stale/invalid client certificates before the
+        # provisioning state machine is allowed to report a ready console.
+        self._host_details(base, user, host_id)
         target = self._instance_root(name)
         plan["paired"] = True
         plan["pairedAt"] = int(time.time())
@@ -589,6 +632,46 @@ networks:
         os.chmod(target / "plan.json", 0o600)
         sunshine_username = sunshine_password = ""
         return {"ok": True, "paired": True, "routePrefix": str(plan["routePrefix"]), "guestTcpVerified": True}
+
+    def repair_staged(
+        self,
+        name: str,
+        *,
+        guest_ip: str,
+        route_name: str | None = None,
+        sunshine_username: str,
+        sunshine_password: str,
+    ) -> dict[str, Any]:
+        """Rebuild a retained Moonlight bundle without touching VM state.
+
+        A provisioning job can be ``ready`` while its persisted Moonlight
+        client certificate is stale or invalid. Repair only replaces the
+        console bundle: the VM, claim, guest setup, and management checkpoints
+        remain authoritative and are never rewritten here. The old bundle is
+        quarantined for rollback/forensics before a fresh pairing is attempted.
+        """
+        safe = validate_vm_name(name)
+        guest = validate_guest_ip(guest_ip)
+        route = validate_vm_name(route_name or safe)
+        quarantine = self.quarantine_staged(safe)
+        try:
+            plan = self.build_plan(name=safe, guest_ip=guest, route_name=route)
+            self.stage_plan(plan)
+            self.start_staged(safe)
+            result = self.pair_staged(
+                safe,
+                sunshine_username=sunshine_username,
+                sunshine_password=sunshine_password,
+            )
+            result["repaired"] = True
+            result["quarantined"] = bool(quarantine)
+            return result
+        except Exception:
+            try:
+                self.stop_staged(safe)
+            except Exception:
+                pass
+            raise
 
     def has_auto_login(self, name: str) -> bool:
         try:
