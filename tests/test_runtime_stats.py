@@ -153,5 +153,5 @@ def test_module_helper_uses_fixed_command_without_shell(monkeypatch):
     monkeypatch.setattr("runtime_stats.subprocess.check_output", fake_check_output)
     get_docker_stats.cache_clear()
     assert get_docker_stats() and seen["argv"] == list(DOCKER_STATS_COMMAND)
-    assert seen["kwargs"] == {"text": True}
+    assert seen["kwargs"] == {"text": True, "timeout": 3.0}
     get_docker_stats.cache_clear()

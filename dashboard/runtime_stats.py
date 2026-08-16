@@ -20,6 +20,9 @@ _DEFAULT_TTL = 2.0
 _MIN_TTL = 0.5
 _MAX_TTL = 10.0
 _STALE_MAX_AGE = 10.0
+_DEFAULT_TIMEOUT = 3.0
+_MIN_TIMEOUT = 0.5
+_MAX_TIMEOUT = 10.0
 
 
 def _configured_ttl(value: Optional[object] = None) -> float:
@@ -31,8 +34,17 @@ def _configured_ttl(value: Optional[object] = None) -> float:
         return _DEFAULT_TTL
 
 
+def _configured_timeout(value: Optional[object] = None) -> float:
+    if value is None:
+        value = os.environ.get("BLOBEVM_DOCKER_STATS_TIMEOUT", _DEFAULT_TIMEOUT)
+    try:
+        return min(_MAX_TIMEOUT, max(_MIN_TIMEOUT, float(value)))
+    except (TypeError, ValueError):
+        return _DEFAULT_TIMEOUT
+
+
 def _subprocess_runner(argv: Sequence[str]) -> str:
-    return subprocess.check_output(list(argv), text=True)
+    return subprocess.check_output(list(argv), text=True, timeout=_configured_timeout())
 
 
 class DockerStatsCache:

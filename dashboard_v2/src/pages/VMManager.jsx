@@ -9,6 +9,19 @@ import { canCacheVmSettingsResponse, clearRemovedVmState, createLoadInFlightRunn
 import { canUseRemotePlacement, createPlacementPayload, getEligibleRemoteHosts, getPlacementValidationReason, hostOptionLabel, normalizeHostInventory, provisioningProfileDisabledReason, remotePlacementDisabledReason } from '../lib/hostPlacement'
 import { canClaimProvisioningJob, canOpenInventoryVm, canOpenProvisionedVm, canRetryProvisioningConsole, deprovisioningPayload, provisioningClaimPayload, provisioningConsoleRetryPayload, provisioningFailureReason, provisioningProgress } from '../lib/provisioningUi'
 
+const OPTIONAL_REQUEST_TIMEOUT_MS = 2500
+
+function fetchOptional(path){
+  const controller = new AbortController()
+  let timer = null
+  const request = apiFetch(path, { signal: controller.signal })
+    .catch(() => ({ ok:false }))
+  timer = window.setTimeout(() => controller.abort(), OPTIONAL_REQUEST_TIMEOUT_MS)
+  return request.finally(() => {
+    if(timer !== null) window.clearTimeout(timer)
+  })
+}
+
 function toneFor(status){
   const s = (status || '').toLowerCase()
   if(s.includes('up') || s.includes('running') || s.includes('healthy')) return 'live'
@@ -289,9 +302,9 @@ export default function VMManager(){
       void loadHosts()
       const [rList, rStats, rOpt, rSettings] = await Promise.all([
         apiFetch('/list?fleet=1'),
-        apiFetch('/vm/stats').catch(()=>({ok:false})),
-        apiFetch('/optimizer/v2/summary').catch(()=>({ok:false})),
-        apiFetch('/settings').catch(()=>({ok:false}))
+        fetchOptional('/vm/stats'),
+        fetchOptional('/optimizer/v2/summary'),
+        fetchOptional('/settings')
       ])
       const j = await rList.json().catch(()=>({instances:[]}))
       const statJ = rStats && rStats.ok ? await rStats.json().catch(()=>({vms:{}})) : (rStats && typeof rStats.json === 'function' ? await rStats.json().catch(()=>({vms:{}})) : {vms:{}})
