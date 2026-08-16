@@ -7,10 +7,11 @@ param(
     [string] $VmRoot = 'E:\EpicVM\vms',
     [string] $TemplateManifestPath = 'E:\EpicVM\templates\win11-25h2\manifest.json',
     [string] $ProvisioningStatePath = 'E:\EpicVM\provisioning-jobs.json',
-    [Parameter(Mandatory)][string] $SwitchName,
+    [string] $SwitchName,
     [string] $TailscaleOAuthClientId,
     [string] $TailscaleTailnet,
-    [switch] $EnableGamingProvisioning
+    [switch] $EnableGamingProvisioning,
+    [switch] $RotateOAuthSecret
 )
 
 Set-StrictMode -Version Latest
@@ -28,18 +29,28 @@ $configPath = Join-Path $InstallRoot 'config.json'
 $secretPath = Join-Path $InstallRoot 'tailscale-oauth.dpapi'
 if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { throw 'The installed EpicVM agent configuration was not found.' }
 $config = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
-$clientId = Read-RequiredSetupValue -Value $TailscaleOAuthClientId -Prompt 'Tailscale OAuth client ID'
-$tailnet = Read-RequiredSetupValue -Value $TailscaleTailnet -Prompt 'Tailscale tailnet'
+$switchInput = $SwitchName
+if ([string]::IsNullOrWhiteSpace($switchInput)) { $switchInput = [string]$config.SwitchName }
+$clientInput = $TailscaleOAuthClientId
+if ([string]::IsNullOrWhiteSpace($clientInput)) { $clientInput = [string]$config.TailscaleOAuthClientId }
+$tailnetInput = $TailscaleTailnet
+if ([string]::IsNullOrWhiteSpace($tailnetInput)) { $tailnetInput = [string]$config.TailscaleTailnet }
+$switchValue = Read-RequiredSetupValue -Value $switchInput -Prompt 'Hyper-V switch name'
+$clientId = Read-RequiredSetupValue -Value $clientInput -Prompt 'Tailscale OAuth client ID'
+$tailnet = Read-RequiredSetupValue -Value $tailnetInput -Prompt 'Tailscale tailnet'
 if ($clientId.Length -gt 256 -or $tailnet.Length -gt 256) { throw 'The Tailscale OAuth values are too long.' }
 
 $config.VmRoot = $VmRoot
 $config.TemplateManifestPath = $TemplateManifestPath
 $config.ProvisioningStatePath = $ProvisioningStatePath
-$config.SwitchName = $SwitchName.Trim()
+$config.SwitchName = $switchValue.Trim()
 $config.TailscaleOAuthClientId = $clientId
 $config.TailscaleTailnet = $tailnet
 $config.TailscaleGuestTag = 'tag:epicvm-guest'
 $config.TailscaleOAuthSecretPath = $secretPath
+$config | Add-Member -MemberType NoteProperty -Name ManagementPort -Value 5985 -Force
+$config | Add-Member -MemberType NoteProperty -Name ManagementUseSsl -Value $false -Force
+$config | Add-Member -MemberType NoteProperty -Name RequireManagementTransport -Value $true -Force
 $config.EnableGamingProvisioning = [bool]$EnableGamingProvisioning
 $config.SunshineServiceName = 'SunshineService'
 $config.SunshineVersion = '2026.516.143833'
@@ -49,12 +60,16 @@ $config.SunshineStatePaths = @(
 )
 
 $secret = $null
+$secretWasPreserved = Test-Path -LiteralPath $secretPath -PathType Leaf
 $temporary = $configPath + '.tmp'
 try {
-    $secret = Read-Host 'Tailscale OAuth client secret (masked)' -AsSecureString
-    if ($null -eq $secret) { throw 'No Tailscale OAuth secret was provided.' }
-    . (Join-Path $PSScriptRoot '..\remote_agent\windows\providers\GuestProvider.ps1')
-    Protect-EpicVMMachineSecret -Secret $secret -Path $secretPath
+    if (-not $secretWasPreserved -or $RotateOAuthSecret) {
+        $secret = Read-Host 'Tailscale OAuth client secret (masked)' -AsSecureString
+        if ($null -eq $secret) { throw 'No Tailscale OAuth secret was provided.' }
+        . (Join-Path $PSScriptRoot '..\remote_agent\windows\providers\GuestProvider.ps1')
+        Protect-EpicVMMachineSecret -Secret $secret -Path $secretPath
+        $secretWasPreserved = $false
+    }
     $config | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $temporary -Encoding UTF8 -NoNewline
     Move-Item -LiteralPath $temporary -Destination $configPath -Force
 }
@@ -64,4 +79,4 @@ finally {
 }
 
 Restart-Service -Name 'EpicVMRemoteAgent' -Force -ErrorAction Stop
-[ordered]@{ ok = $true; switchConfigured = $true; standardProvisioningConfigured = $true; gamingProvisioningEnabled = [bool]$EnableGamingProvisioning } | ConvertTo-Json -Compress
+[ordered]@{ ok = $true; switchConfigured = $true; standardProvisioningConfigured = $true; gamingProvisioningEnabled = [bool]$EnableGamingProvisioning; managementPort = 5985; managementRequired = $true; oauthSecretPreserved = $secretWasPreserved } | ConvertTo-Json -Compress

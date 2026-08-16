@@ -49,11 +49,28 @@ function Get-EpicVMHyperVValue {
 function New-EpicVMHyperVError {
     param(
         [Parameter(Mandatory)] [string] $Code,
-        [Parameter(Mandatory)] [string] $Message
+        [Parameter(Mandatory)] [string] $Message,
+        [AllowNull()] [string] $DetailCode = $null
     )
 
     $exception = [System.InvalidOperationException]::new($Message)
     $exception | Add-Member -MemberType NoteProperty -Name ErrorCode -Value $Code -Force
+    $allowedDetails = @(
+        'account_create_failed', 'account_update_failed',
+        'account_password_policy_failed', 'admin_membership_failed',
+        'account_verification_failed',
+        'SUNSHINE_MANAGEMENT_READINESS', 'SUNSHINE_CONFIG_WRITE',
+        'SUNSHINE_STATUS_VERIFY', 'SUNSHINE_INPUT_VALIDATION',
+        'SUNSHINE_SERVICE_DISCOVERY', 'SUNSHINE_SERVICE_CIM_QUERY',
+        'SUNSHINE_EXECUTABLE_RESOLVE', 'SUNSHINE_VERSION_VERIFY',
+        'SUNSHINE_STATE_PATH',
+        'SUNSHINE_STATE_WRITE', 'SUNSHINE_STATE_ACL',
+        'SUNSHINE_FIREWALL_CONFIG', 'SUNSHINE_SERVICE_RESTART',
+        'SUNSHINE_LISTENER_VERIFY'
+    )
+    if ($DetailCode -and $allowedDetails -contains $DetailCode) {
+        $exception | Add-Member -MemberType NoteProperty -Name FailureDetailCode -Value $DetailCode -Force
+    }
     return $exception
 }
 
@@ -190,6 +207,7 @@ function ConvertTo-EpicVMHyperVVMInfo {
     param([Parameter(Mandatory)] [object] $VM)
 
     $name = [string](Get-EpicVMHyperVValue -Object $VM -Name 'Name' -Default '')
+    $id = [string](Get-EpicVMHyperVValue -Object $VM -Name 'Id' -Default '')
     $state = [string](Get-EpicVMHyperVValue -Object $VM -Name 'State' -Default 'Unknown')
     $status = Get-EpicVMHyperVValue -Object $VM -Name 'Status' -Default $null
     $memory = Get-EpicVMHyperVValue -Object $VM -Name 'MemoryAssigned' -Default $null
@@ -202,6 +220,7 @@ function ConvertTo-EpicVMHyperVVMInfo {
 
     return [ordered]@{
         name = $name
+        id = $id
         state = $state
         status = $status
         managed = Test-EpicVMHyperVOwned -VM $VM
@@ -695,6 +714,7 @@ function New-EpicVMHyperVProvider {
         [AllowNull()] [object] $Config = @{},
         [AllowNull()] [scriptblock] $CommandInvoker = $null,
         [AllowNull()] [scriptblock] $PowerShellDirectInvoker = $null,
+        [AllowNull()] [scriptblock] $ManagementInvoker = $null,
         [AllowNull()] [scriptblock] $BootstrapCredentialLoader = $null,
         [AllowNull()] [scriptblock] $TailscaleHttpInvoker = $null,
         [AllowNull()] [scriptblock] $TailscaleOAuthInvoker = $null,
@@ -710,6 +730,10 @@ function New-EpicVMHyperVProvider {
         }
     }
 
+    $configuredManagementPort = 0
+    try { $configuredManagementPort = [int](Get-EpicVMHyperVValue -Object $Config -Name 'ManagementPort' -Default 5985) } catch { $configuredManagementPort = 5985 }
+    if ($configuredManagementPort -lt 1 -or $configuredManagementPort -gt 65535) { $configuredManagementPort = 5985 }
+
     $provider = [pscustomobject]@{
         Name = 'HyperV'
         Config = $Config
@@ -717,6 +741,13 @@ function New-EpicVMHyperVProvider {
         MissingCmdlets = $missing
         CommandInvoker = $CommandInvoker
         PowerShellDirectInvoker = $PowerShellDirectInvoker
+        ManagementInvoker = $ManagementInvoker
+        ManagementPort = $configuredManagementPort
+        ManagementUseSsl = [bool](Get-EpicVMHyperVValue -Object $Config -Name 'ManagementUseSsl' -Default $false)
+        # The post-network handoff is mandatory for new provisioning. An old
+        # config may contain false from the pre-handoff agent; normalize that
+        # stale value in memory and let the config repair script persist it.
+        RequireManagementTransport = $true
         BootstrapCredentialLoader = $BootstrapCredentialLoader
         TailscaleHttpInvoker = $TailscaleHttpInvoker
         TailscaleOAuthInvoker = $TailscaleOAuthInvoker
@@ -765,8 +796,14 @@ function New-EpicVMHyperVProvider {
     $provider.TestBootstrapGuest = ({ param($Name,$TimeoutSeconds,$PollMilliseconds)
             return Wait-EpicVMGuestBootstrapReady -Provider $provider -Config $provider.Config -VmName $Name -TimeoutSeconds ([int]$TimeoutSeconds) -PollMilliseconds ([int]$PollMilliseconds)
         }.GetNewClosure())
-    $provider.ConfigureSunshine = ({ param($Name,$GuestUsername,$GuestPassword,$SunshineUsername,$SunshinePassword)
-            $result = Invoke-EpicVMSunshineConfiguration -Provider $provider -Config $provider.Config -VmName $Name -GuestUsername $GuestUsername -GuestPassword $GuestPassword -SunshineUsername $SunshineUsername -SunshinePassword $SunshinePassword
+    $provider.ConfigureSunshine = ({ param($Name,$GuestUsername,$GuestPassword,$SunshineUsername,$SunshinePassword,$GuestAddress,$ManagementCheckpoint,$ManagementHandoffAlreadyVerified)
+             if($null -ne $ManagementCheckpoint){
+                # The checkpoint callback is invoked only after the verified
+                # WinRM probe and before the credential-bearing Sunshine write.
+                $result = Invoke-EpicVMSunshineConfiguration -Provider $provider -Config $provider.Config -VmName $Name -GuestUsername $GuestUsername -GuestPassword $GuestPassword -SunshineUsername $SunshineUsername -SunshinePassword $SunshinePassword -GuestAddress $GuestAddress -ManagementCheckpoint $ManagementCheckpoint -ManagementHandoffAlreadyVerified ([bool]$ManagementHandoffAlreadyVerified)
+            } else {
+                $result = Invoke-EpicVMSunshineConfiguration -Provider $provider -Config $provider.Config -VmName $Name -GuestUsername $GuestUsername -GuestPassword $GuestPassword -SunshineUsername $SunshineUsername -SunshinePassword $SunshinePassword -GuestAddress $GuestAddress -ManagementHandoffAlreadyVerified ([bool]$ManagementHandoffAlreadyVerified)
+            }
             return $result
         }.GetNewClosure())
     $provider.EnrollTailscale = ({ param($Name,$Username,$Password)

@@ -55,6 +55,18 @@ class RemoteAgentClient:
         # storage. The create response carries the one-time claim token, so an
         # upstream timeout must never discard a still-running create response.
         self.operation_timeout = max(self.timeout, 600.0)
+        # Console setup is deliberately asynchronous at the dashboard
+        # boundary, but each agent call still needs a finite worker deadline.
+        # Do not reuse the VM-create timeout for status/failure callbacks or a
+        # dead host can leave the retry task pending for ten minutes.
+        self.console_write_timeout = max(self.timeout, 120.0)
+        self.console_transition_timeout = max(self.timeout, 60.0)
+        self.console_failure_timeout = max(self.timeout, 15.0)
+        # Hyper-V may briefly hold the provisioning store while a guest
+        # checkpoint is being committed. Status reads must outlive the normal
+        # two-second inventory probe or the UI loses the job and falls back to
+        # the old retry form with a misleading 503.
+        self.provisioning_status_timeout = max(self.timeout, 30.0)
         self._opener = opener or urlopen
 
     def _request(
@@ -179,7 +191,7 @@ class RemoteAgentClient:
 
     def provisioning_status(self, job_id: str) -> dict[str, Any]:
         safe_id = quote(str(job_id), safe="")
-        result = self._request("GET", f"/v1/provisioning-jobs/{safe_id}")
+        result = self._request("GET", f"/v1/provisioning-jobs/{safe_id}", timeout=self.provisioning_status_timeout)
         return result if isinstance(result, dict) else {"job": result}
 
     def provisioning_jobs(self) -> list[dict[str, Any]]:
@@ -203,7 +215,7 @@ class RemoteAgentClient:
     def console_complete(self, job_id: str, *, route_prefix: str, guest_tcp_verified: bool) -> dict[str, Any]:
         safe_id = quote(str(job_id), safe="")
         payload = {"routePrefix": str(route_prefix), "guestTcpVerified": bool(guest_tcp_verified)}
-        result = self._request("POST", f"/v1/provisioning-jobs/{safe_id}/console-complete", payload, timeout=self.operation_timeout)
+        result = self._request("POST", f"/v1/provisioning-jobs/{safe_id}/console-complete", payload, timeout=self.console_transition_timeout)
         return result if isinstance(result, dict) else {"ok": True, "job": result}
 
     def console_credentials(
@@ -227,13 +239,13 @@ class RemoteAgentClient:
             "POST",
             f"/v1/provisioning-jobs/{safe_id}/console-credentials",
             payload,
-            timeout=self.operation_timeout,
+            timeout=self.console_write_timeout,
         )
         return result if isinstance(result, dict) else {"ok": True, "job": result}
 
     def console_failed(self, job_id: str, *, code: str = "console_failed") -> dict[str, Any]:
         safe_id = quote(str(job_id), safe="")
-        result = self._request("POST", f"/v1/provisioning-jobs/{safe_id}/console-failed", {"code": str(code)}, timeout=self.operation_timeout)
+        result = self._request("POST", f"/v1/provisioning-jobs/{safe_id}/console-failed", {"code": str(code)}, timeout=self.console_failure_timeout)
         return result if isinstance(result, dict) else {"ok": True, "job": result}
 
     def deprovision(self, name: str, *, confirm_name: str, idempotency_key: str | None = None) -> dict[str, Any]:
@@ -494,6 +506,13 @@ class RemoteAgentHost:
             error = exc.data.get("error")
             if isinstance(error, Mapping):
                 candidate = str(error.get("code") or "").strip().lower()
+                if candidate and candidate.replace("_", "").isalnum():
+                    remote_code = candidate
+            # Older agent builds returned the safe code at the top level. Keep
+            # accepting that envelope during rollout, but never promote free
+            # text or exception material into the dashboard response.
+            if not remote_code:
+                candidate = str(exc.data.get("code") or "").strip().lower()
                 if candidate and candidate.replace("_", "").isalnum():
                     remote_code = candidate
         if remote_code:

@@ -59,6 +59,9 @@ function Get-EpicVMDefaultConfig {
         TailscaleTailnet = ''
         TailscaleGuestTag = 'tag:epicvm-guest'
         TailscaleExecutable = 'C:\Program Files\Tailscale\tailscale.exe'
+        ManagementPort = 5985
+        ManagementUseSsl = $false
+        RequireManagementTransport = $true
         SunshineServiceName = 'SunshineService'
         SunshineVersion = '2026.516.143833'
         SunshineStatePaths = @(
@@ -300,10 +303,16 @@ function Add-EpicVMProvisioningInventoryState {
         if ($vm -is [System.Collections.IDictionary]) {
             $vm['provisioningState'] = [string]$job[0].state
             $vm['consoleReady'] = ([string]$job[0].state -ceq 'ready')
+            if ([string]$job[0].state -ceq 'ready' -and [string]$job[0].consoleRoutePrefix -match '^/vm/[a-z0-9][a-z0-9._-]{0,62}/$') {
+                $vm['consoleRoutePrefix'] = [string]$job[0].consoleRoutePrefix
+            }
         }
         else {
             $vm | Add-Member -MemberType NoteProperty -Name provisioningState -Value ([string]$job[0].state) -Force
             $vm | Add-Member -MemberType NoteProperty -Name consoleReady -Value ([string]$job[0].state -ceq 'ready') -Force
+            if ([string]$job[0].state -ceq 'ready' -and [string]$job[0].consoleRoutePrefix -match '^/vm/[a-z0-9][a-z0-9._-]{0,62}/$') {
+                $vm | Add-Member -MemberType NoteProperty -Name consoleRoutePrefix -Value ([string]$job[0].consoleRoutePrefix) -Force
+            }
         }
     }
     return $Vms
@@ -412,6 +421,53 @@ function Invoke-EpicVMApiRequest {
                 }
                 return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok=$true; job=(ConvertTo-EpicVMRedactedJob -Job $job) })
             }
+            if ($Method -eq 'POST' -and $segments.Count -eq 4 -and $segments[3] -eq 'direct-diagnostic') {
+                # Read-only, stage-scoped proof of the LocalSystem PowerShell
+                # Direct channel.  This endpoint never mutates the VM, job,
+                # claim, or guest and returns only the diagnostic allowlist.
+                if ([string]$job.state -ne 'setup_failed:streaming' -or -not [bool](Get-EpicVMProperty -Object $job -Name 'claimConsumed' -Default $false)) {
+                    return ConvertTo-EpicVMJsonResponse -StatusCode 409 -Body (New-EpicVMApiError -Code 'direct_diagnostic_not_allowed' -Message 'The retained streaming diagnostic is not available for this job.')
+                }
+                $request = Get-EpicVMRequestBody -Body $Body
+                $username = [string](Get-EpicVMProperty -Object $request -Name 'username' -Default '')
+                $password = [string](Get-EpicVMProperty -Object $request -Name 'password' -Default '')
+                if (-not (Test-EpicVMProvisioningCredentialInput -Username $username -Password $password)) {
+                    return ConvertTo-EpicVMJsonResponse -StatusCode 400 -Body (New-EpicVMApiError -Code 'invalid_credential_input' -Message 'The credential input is empty or does not meet the request policy.')
+                }
+                $credential = $null
+                try {
+                    $credential = [PSCredential]::new($username, (ConvertTo-SecureString $password -AsPlainText -Force))
+                    $vmId = Get-EpicVMJobImmutableVmId -State $State -Job $job
+                    $diagnostic = Invoke-EpicVMPowerShellDirectDiagnostic -Provider $State.Provider -VmName ([string]$job.name) -VmId $vmId -Credential $credential
+                    return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{
+                        ok = $true
+                        jobId = [string]$job.id
+                        diagnostic = [ordered]@{
+                            correlationId = [string](Get-EpicVMProperty -Object $diagnostic -Name 'correlationId' -Default '')
+                            sessionCreated = [bool](Get-EpicVMProperty -Object $diagnostic -Name 'sessionCreated' -Default $false)
+                            code = [string](Get-EpicVMProperty -Object $diagnostic -Name 'code' -Default 'direct_runtime_failure')
+                            durationBucket = [string](Get-EpicVMProperty -Object $diagnostic -Name 'durationBucket' -Default '')
+                        }
+                    })
+                }
+                catch {
+                    $code = [string](Get-EpicVMProperty -Object $_.Exception -Name 'ErrorCode' -Default 'direct_runtime_failure')
+                    $allowed = @('hyperv_vm_not_found','hyperv_access_denied','hyperv_vm_not_running','guest_heartbeat_unhealthy',
+                        'direct_service_disabled','direct_service_not_ready','direct_not_supported','direct_open_timeout',
+                        'direct_transport_error','guest_credentials_rejected','guest_operation_failed','direct_parameter_failure',
+                        'direct_module_failure','direct_runtime_failure')
+                    if ($allowed -notcontains $code) { $code = 'direct_runtime_failure' }
+                    return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{
+                        ok = $true
+                        jobId = [string]$job.id
+                        diagnostic = [ordered]@{ correlationId = ''; sessionCreated = $false; code = $code; durationBucket = '' }
+                    })
+                }
+                finally {
+                    $username = $password = $null
+                    $credential = $null
+                }
+            }
             if ($Method -eq 'POST' -and $segments.Count -eq 4 -and $segments[3] -eq 'console-credentials') {
                 try { Set-EpicVMProvisioningConsoleCredentials -State $State -Job $job -Request (Get-EpicVMRequestBody -Body $Body) }
                 catch {
@@ -506,7 +562,7 @@ function Test-EpicVMMutationRequest {
         [Parameter(Mandatory)] [string] $Path
     )
     if ($Method -eq 'DELETE' -and $Path -match '^/v1/vms/[^/]+$') { return $true }
-    if ($Method -eq 'POST' -and ($Path -eq '/v1/provisioning-jobs' -or $Path -eq '/v1/deprovisioning-jobs' -or $Path -match '^/v1/provisioning-jobs/[^/]+/(claim|claim-reissue|console-credentials|console-complete|console-failed)$')) { return $true }
+    if ($Method -eq 'POST' -and ($Path -eq '/v1/provisioning-jobs' -or $Path -eq '/v1/deprovisioning-jobs' -or $Path -match '^/v1/provisioning-jobs/[^/]+/(claim|claim-reissue|direct-diagnostic|console-credentials|console-complete|console-failed)$')) { return $true }
     if ($Method -eq 'POST' -and ($Path -eq '/v1/vms' -or $Path -match '^/v1/vms/[^/]+/(start|stop|restart)$' -or $Path -match '^/v1/vms/[^/]+/actions/(start|stop|restart|delete)$')) { return $true }
     return $false
 }

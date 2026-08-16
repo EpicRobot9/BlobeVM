@@ -117,13 +117,10 @@ class MoonlightOrchestrator:
         return value
 
     def _routing_config(self) -> tuple[str, str, int]:
-        middlewares = [part.strip() for part in self.auth_middleware.split(",") if part.strip()]
         if (
             not re.fullmatch(r"[a-z0-9.-]+", self.public_host)
             or not self.tls_resolver
             or not self.router_priority.isdigit()
-            or not middlewares
-            or any(not re.fullmatch(r"[A-Za-z0-9_.-]+@(file|docker)", part) for part in middlewares)
         ):
             raise ConsoleOrchestrationError("Verified Traefik routing configuration is unavailable.", status=503, code="routing_config_required")
         priority = int(self.router_priority)
@@ -231,6 +228,11 @@ class MoonlightOrchestrator:
         safe = validate_vm_name(name)
         public_host, resolver, priority = self._routing_config()
         image = self._image()
+        # Console authentication is per-VM and must go through the dashboard's
+        # VM-session endpoint.  Do not inherit the legacy global middleware:
+        # on the KVM host that value can point at the testre BasicAuth file,
+        # which causes a second, unrelated browser credential prompt.
+        auth_identity = f"epicvm-{safe}-portal-auth"
         identity = f"epicvm-{safe}-portal-user"
         labels = {
             "traefik.enable": "true",
@@ -244,7 +246,9 @@ class MoonlightOrchestrator:
             f"traefik.http.routers.epicvm-{safe}.tls.certresolver": resolver,
             f"traefik.http.routers.epicvm-{safe}.priority": str(priority),
             f"traefik.http.routers.epicvm-{safe}.service": f"epicvm-{safe}",
-            f"traefik.http.routers.epicvm-{safe}.middlewares": f"{self.auth_middleware},{identity}",
+            f"traefik.http.routers.epicvm-{safe}.middlewares": f"{auth_identity},{identity}",
+            f"traefik.http.middlewares.{auth_identity}.forwardauth.address": f"http://blobedash:5000/dashboard/auth/vm/{safe}",
+            f"traefik.http.middlewares.{auth_identity}.forwardauth.trustForwardHeader": "true",
             f"traefik.http.middlewares.{identity}.headers.customrequestheaders.X-EpicVM-User": safe,
             f"traefik.http.services.epicvm-{safe}.loadbalancer.server.port": "8080",
         }
@@ -263,7 +267,7 @@ class MoonlightOrchestrator:
       - proxy
       - egress
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/vm/{safe}/ >/dev/null"]
+      test: ["CMD-SHELL", "kill -0 1"]
       interval: 5s
       timeout: 3s
       retries: 30
@@ -321,9 +325,9 @@ networks:
             stage.rename(target)
             try:
                 os.chown(target, 999, 999)
-                os.chown(server, 999, 999)
-                os.chown(server / "config.json", 999, 999)
-                os.chown(server / "data.json", 999, 999)
+                os.chown(target / "server", 999, 999)
+                os.chown(target / "server" / "config.json", 999, 999)
+                os.chown(target / "server" / "data.json", 999, 999)
             except (AttributeError, OSError):
                 pass
             return target
@@ -456,10 +460,20 @@ networks:
                 records.extend(item for item in value if isinstance(item, dict))
         return records
 
-    def _register_host(self, base: str, user: str, guest_ip: str) -> str:
+    @staticmethod
+    def _coerce_host_id(value: Any) -> int:
+        try:
+            host_id = int(str(value or "").strip(), 10)
+        except (TypeError, ValueError) as exc:
+            raise ConsoleOrchestrationError("Moonlight returned an invalid guest host id.", status=502, code="moonlight_host_failed") from exc
+        if host_id < 0 or host_id > 0xFFFFFFFF:
+            raise ConsoleOrchestrationError("Moonlight returned an invalid guest host id.", status=502, code="moonlight_host_failed")
+        return host_id
+
+    def _register_host(self, base: str, user: str, guest_ip: str) -> int:
         for host in self._hosts(base, user):
             if str(host.get("address") or "") == guest_ip and str(host.get("http_port") or "47989") == "47989":
-                return str(host.get("host_id") or "")
+                return self._coerce_host_id(host.get("host_id"))
         body = json.dumps({"address": guest_ip, "http_port": 47989}, separators=(",", ":")).encode("utf-8")
         response = self._http("POST", base + "/api/host", headers={"Content-Type": "application/json", "X-EpicVM-User": user}, body=body, timeout=15)
         try:
@@ -477,10 +491,10 @@ networks:
             except Exception:
                 pass
         host = payload.get("host") if isinstance(payload, dict) else None
-        host_id = str((host or {}).get("host_id") or "")
-        if not host_id:
+        host_id = (host or {}).get("host_id") if isinstance(host, dict) else None
+        if host_id in (None, ""):
             raise ConsoleOrchestrationError("Moonlight did not return a guest host id.", status=502, code="moonlight_host_failed")
-        return host_id
+        return self._coerce_host_id(host_id)
 
     def _sunshine_pair(self, guest_ip: str, username: str, password: str, pin: str, vm_name: str) -> None:
         if not username or not password:
@@ -488,15 +502,45 @@ networks:
         raw = f"{username}:{password}".encode("utf-8")
         auth = base64.b64encode(raw).decode("ascii")
         body = json.dumps({"pin": pin, "name": f"EpicVM {validate_vm_name(vm_name)}"}, separators=(",", ":")).encode("utf-8")
-        try:
-            response = self._http("POST", f"https://{guest_ip}:47990/api/pin", headers={"Authorization": f"Basic {auth}", "Content-Type": "application/json"}, body=body, timeout=20)
-            response.read(1)
-            response.close()
-        except urlerror.HTTPError as exc:
-            code = "sunshine_auth_failed" if int(exc.code) in (401, 403) else "sunshine_pair_failed"
-            raise ConsoleOrchestrationError("Sunshine rejected the pairing request.", status=409 if code == "sunshine_auth_failed" else 502, code=code) from exc
-        except (OSError, urlerror.URLError) as exc:
-            raise ConsoleOrchestrationError("Sunshine pairing could not be completed.", status=502, code="sunshine_pair_failed") from exc
+        deadline = time.monotonic() + 20.0
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ConsoleOrchestrationError("Sunshine did not accept the pairing request in time.", status=502, code="sunshine_pair_failed")
+            response = None
+            try:
+                response = self._http(
+                    "POST",
+                    f"https://{guest_ip}:47990/api/pin",
+                    headers={"Authorization": f"Basic {auth}", "Content-Type": "application/json"},
+                    body=body,
+                    timeout=min(5.0, remaining),
+                )
+                raw_response = response.read()
+                text = raw_response.decode("utf-8") if isinstance(raw_response, bytes) else str(raw_response or "")
+                try:
+                    payload = json.loads(text)
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise ConsoleOrchestrationError("Sunshine returned an invalid pairing response.", status=502, code="sunshine_pair_failed") from exc
+                if isinstance(payload, dict) and payload.get("status") is True:
+                    return
+                if not (isinstance(payload, dict) and payload.get("status") is False):
+                    raise ConsoleOrchestrationError("Sunshine did not accept the pairing request.", status=502, code="sunshine_pair_failed")
+            except urlerror.HTTPError as exc:
+                code = "sunshine_auth_failed" if int(exc.code) in (401, 403) else "sunshine_pair_failed"
+                raise ConsoleOrchestrationError("Sunshine rejected the pairing request.", status=409 if code == "sunshine_auth_failed" else 502, code=code) from exc
+            except (OSError, urlerror.URLError) as exc:
+                raise ConsoleOrchestrationError("Sunshine pairing could not be completed.", status=502, code="sunshine_pair_failed") from exc
+            finally:
+                if response is not None:
+                    try:
+                        response.close()
+                    except Exception:
+                        pass
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ConsoleOrchestrationError("Sunshine did not accept the pairing request in time.", status=502, code="sunshine_pair_failed")
+            time.sleep(min(0.25, remaining))
 
     def pair_staged(self, name: str, *, sunshine_username: str, sunshine_password: str) -> dict[str, Any]:
         plan = self._read_plan(name)

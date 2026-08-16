@@ -57,6 +57,8 @@ Describe 'EpicVM provisioning safety' {
         $raw=Get-Content -LiteralPath $config.ProvisioningStatePath -Raw
         $raw | Should -Not -Match 'never-persist-this'
         (ConvertTo-EpicVMRedactedJob -Job $job).Keys | Should -Not -Contain 'password'
+        $job.failureDetailCode='account_create_failed'
+        (ConvertTo-EpicVMRedactedJob -Job $job).failureDetailCode | Should -Be 'account_create_failed'
     }
 
     It 'requires exact-name confirmation before teardown' {
@@ -80,7 +82,7 @@ Describe 'EpicVM provisioning safety' {
         $config.ProvisioningStatePath=Join-Path $TestDrive 'two-phase-jobs.json'
         $provider=New-ProvisioningTestProvider
         $provider | Add-Member NoteProperty ConfigureGuest { param($name,$username,$password) @{ok=$true} }
-        $provider | Add-Member NoteProperty EnrollTailscale { param($name,$username,$password) @{ok=$true;ip='100.111.82.1';deviceId='device-1'} }
+        $provider | Add-Member NoteProperty EnrollTailscale { param($name,$username,$password) @{ok=$true;ip='100.111.82.1';deviceId='device-1';managementReady=$true;managementTransport='tailscale_winrm'} }
         $provider | Add-Member NoteProperty VerifyGuest { param($name,$ip) $ip -eq '100.111.82.1' }
         $state=New-EpicVMAgentState -Config $config -Token 'agent-token' -Provider $provider
         $job=New-EpicVMProvisioningJobObject -Id 'job-1' -Name 'alpha' -Profile 'standard' -State 'unclaimed'
@@ -93,12 +95,14 @@ Describe 'EpicVM provisioning safety' {
         $job.state | Should -Be 'streaming_setup'
         $job.claimConsumed | Should -BeTrue
         $job.operationId | Should -Match '^[0-9a-f]{32}$'
-        $job.completedStages | Should -Be @('claim','guest_setup','network_setup')
+        $job.completedStages | Should -Be @('claim','guest_setup','network_setup','management_handoff')
         $job.claimHash | Should -BeNullOrEmpty
         { Invoke-EpicVMProvisioningClaim -State $state -Job $job -Request @{claimToken='single-use';username='operator';password='transient-password'} } | Should -Throw
         Complete-EpicVMProvisioningConsole -State $state -Job $job -Request @{routePrefix='/vm/alpha/';guestTcpVerified=$true}
         $job.state | Should -Be 'ready'
         $job.consoleRoutePrefix | Should -Be '/vm/alpha/'
+        $job.streamValidationVerified | Should -BeTrue
+        $job.completedStages | Should -Be @('claim','guest_setup','network_setup','management_handoff','streaming_setup','stream_validation')
         (Get-Content -LiteralPath $config.ProvisioningStatePath -Raw) | Should -Not -Match 'transient-password|single-use'
     }
 
@@ -121,6 +125,22 @@ Describe 'EpicVM provisioning safety' {
         $job.errorCode | Should -Be 'guest_account_failed'
         $job.claimConsumed | Should -BeTrue
         $script:deletedAfterClaim | Should -BeFalse
+    }
+
+    It 'retains the consumed claim and exposes only an allowlisted guest detail' {
+        $config=Get-EpicVMDefaultConfig
+        $config.ProvisioningStatePath=Join-Path $TestDrive 'guest-detail.json'
+        $provider=New-ProvisioningTestProvider
+        $provider | Add-Member NoteProperty ConfigureGuest { throw (New-EpicVMHyperVError -Code 'guest_account_failed' -Message 'safe' -DetailCode 'account_create_failed') }
+        $state=New-EpicVMAgentState -Config $config -Token 'agent-token' -Provider $provider
+        $job=New-EpicVMProvisioningJobObject -Id 'job-detail' -Name 'detail' -Profile 'standard' -State 'unclaimed'
+        $job.claimHash=ConvertTo-EpicVMClaimHash 'detail-claim'; $job.claimExpires=[DateTime]::UtcNow.AddMinutes(5).ToString('o')
+        $state.Provisioning.Jobs[$job.id]=$job; $state.Provisioning.Claims[$job.id]=$job
+        try { Invoke-EpicVMProvisioningClaim -State $state -Job $job -Request @{claimToken='detail-claim';username='operator';password='transient-password'} } catch { }
+        $job.errorCode | Should -Be 'guest_account_failed'
+        $job.failureDetailCode | Should -Be 'account_create_failed'
+        $job.claimConsumed | Should -BeTrue
+        (Get-Content -LiteralPath $config.ProvisioningStatePath -Raw) | Should -Not -Match 'transient-password|operator'
     }
 
     It 'keeps the credential-free console gate stable across agent restart recovery' {
@@ -154,6 +174,28 @@ Describe 'EpicVM provisioning safety' {
         $script:sunshineReceived | Should -BeTrue
         $response.Json | Should -Not -Match 'guest-pass|sun-pass'
         (Get-Content -LiteralPath $config.ProvisioningStatePath -Raw) | Should -Not -Match 'guest-pass|sun-pass'
+    }
+
+    It 'exposes a retained read-only Direct diagnostic without mutating the job' {
+        $config=Get-EpicVMDefaultConfig
+        $config.ProvisioningStatePath=Join-Path $TestDrive 'direct-diagnostic.json'
+        $provider=New-ProvisioningTestProvider
+        $provider | Add-Member NoteProperty CommandInvoker { param($command,$parameters)
+            if($command -eq 'Get-VM'){ return @{Id='5b3c52d1-7fd9-4a85-86f8-467d54fa0710';State='Running'} }
+            if($command -eq 'Get-VMIntegrationService'){ return @(@{Name='Heartbeat';OperationalStatus='OK'}) }
+            return @()
+        }
+        $provider | Add-Member NoteProperty PowerShellDirectInvoker { param($name,$credential,$scriptBlock,$args) @{ok=$true} }
+        $state=New-EpicVMAgentState -Config $config -Token 'agent-token' -Provider $provider
+        $job=New-EpicVMProvisioningJobObject -Id 'job-direct' -Name 'direct' -Profile 'standard' -State 'setup_failed:streaming'
+        $job.vmId='5b3c52d1-7fd9-4a85-86f8-467d54fa0710'; $job.claimConsumed=$true; $job.operationId='0123456789abcdef0123456789abcdef'; $job.errorCode='direct_transport_error'
+        $state.Provisioning.Jobs[$job.id]=$job
+        $response=Invoke-EpicVMApiRequest -State $state -Method 'POST' -Path '/v1/provisioning-jobs/job-direct/direct-diagnostic' -Headers @{Authorization='Bearer agent-token'} -Body (@{username='operator';password='transient-password'}|ConvertTo-Json)
+        $response.StatusCode | Should -Be 200
+        $response.Json | Should -Not -Match 'transient-password|operator'
+        ($response.Body.diagnostic.code) | Should -BeIn @('ok','direct_not_supported','direct_runtime_failure')
+        $job.state | Should -Be 'setup_failed:streaming'
+        $job.claimConsumed | Should -BeTrue
     }
 }
 

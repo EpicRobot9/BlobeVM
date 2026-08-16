@@ -32,5 +32,7 @@ test('safe provisioning failure codes explain the failed trust boundary', () => 
   assert.equal(provisioningFailureReason({ errorCode:'powershell_direct_failed' }), 'PowerShell Direct could not open the cloned guest.')
   assert.equal(provisioningFailureReason({ errorCode:'rdp_verification_failed' }), 'Guest RDP/NLA/firewall verification failed.')
   assert.equal(provisioningFailureReason({ errorCode:'guest_account_failed' }), 'Windows guest-account setup failed after the claim was consumed.')
+  assert.equal(provisioningFailureReason({ errorCode:'guest_account_failed', failureDetailCode:'admin_membership_failed' }), 'Windows guest-account setup failed after the claim was consumed. Administrator membership could not be verified.')
+  assert.equal(provisioningFailureReason({ errorCode:'guest_account_failed', failureDetailCode:'raw-secret' }), 'Windows guest-account setup failed after the claim was consumed.')
   assert.equal(provisioningFailureReason({ errorCode:'secret_leaked' }), '')
 })

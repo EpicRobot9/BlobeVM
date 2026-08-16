@@ -109,11 +109,18 @@ function Get-EpicVMTailscaleDeviceId {
             try {
                 $response=Invoke-EpicVMTailscaleHttp -Provider $Provider -Method 'GET' -Path ('tailnet/' + [Uri]::EscapeDataString($tailnet) + '/devices') -AccessToken $access -TimeoutSeconds 20
                 $devices=@(Get-EpicVMHyperVValue -Object $response -Name 'devices' -Default @())
-                $matches=@($devices | Where-Object {
+                # A retained clone can leave an offline control-plane record
+                # with the same hostname. The address returned by the guest
+                # enrollment is the authoritative identity for this operation;
+                # use hostname only as a bounded fallback when no exact
+                # address match exists.
+                $addressMatches=@($devices | Where-Object {
                     $addresses=@(Get-EpicVMHyperVValue -Object $_ -Name 'addresses' -Default @())
-                    $hostname=[string](Get-EpicVMHyperVValue -Object $_ -Name 'hostname' -Default '')
-                    ($addresses -contains $GuestIp) -or $hostname -ceq $VmName
+                    $addresses -contains $GuestIp
                 })
+                $matches=@(if($addressMatches.Count -eq 1){$addressMatches}else{@($devices | Where-Object {
+                    [string](Get-EpicVMHyperVValue -Object $_ -Name 'hostname' -Default '') -ceq $VmName
+                })})
                 if($matches.Count -ne 1){throw 'The enrolled Tailscale device could not be uniquely identified.'}
                 $id=[string](Get-EpicVMHyperVValue -Object $matches[0] -Name 'id' -Default '')
                 if([string]::IsNullOrWhiteSpace($id)){throw 'The enrolled Tailscale device has no revocation identifier.'}
@@ -136,13 +143,18 @@ function Get-EpicVMTailscaleGuestScript {
             Add-Type -TypeDefinition @'
 using System;
 using System.IO.Pipes;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text;
 using System.Threading.Tasks;
 namespace EpicVM {
     public static class NamedPipeSecret {
         public static Task Serve(string pipeName, string value) {
             return Task.Run(() => {
-                using (var pipe = new NamedPipeServerStream(pipeName, PipeDirection.Out, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous)) {
+                var security = new PipeSecurity();
+                security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), PipeAccessRights.ReadWrite, AccessControlType.Allow));
+                security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null), PipeAccessRights.ReadWrite, AccessControlType.Allow));
+                using (var pipe = new NamedPipeServerStream(pipeName, PipeDirection.Out, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 0, 0, security)) {
                     pipe.WaitForConnection();
                     byte[] bytes = Encoding.UTF8.GetBytes(value);
                     try { pipe.Write(bytes, 0, bytes.Length); pipe.Flush(); }
@@ -154,19 +166,102 @@ namespace EpicVM {
 }
 '@
         }
+        function Invoke-SystemTailscaleTask {
+            param([Parameter(Mandatory)][string]$TaskName,[Parameter(Mandatory)][string]$Execute,[Parameter(Mandatory)][string]$Arguments,[int]$TimeoutSeconds=60)
+            $action=$null;$trigger=$null;$principal=$null
+            try {
+                $action=New-ScheduledTaskAction -Execute $Execute -Argument $Arguments -ErrorAction Stop
+                $trigger=New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(2) -ErrorAction Stop
+                $principal=New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest -ErrorAction Stop
+                Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Force -ErrorAction Stop | Out-Null
+                Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+                $deadline=[DateTime]::UtcNow.AddSeconds([Math]::Max(5,$TimeoutSeconds))
+                $info=$null
+                do {
+                    Start-Sleep -Milliseconds 250
+                    $info=Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction Stop
+                    $state=[string]$info.State
+                    if($state -notin @('Running','Queued')){break}
+                } while([DateTime]::UtcNow -lt $deadline)
+                if($null -eq $info -or [string]$info.State -in @('Running','Queued')){throw 'EPICVM_TAILSCALE_SYSTEM_TASK_TIMEOUT'}
+                return [ordered]@{completed=$true;exitCode=[int]$info.LastTaskResult}
+            } catch {
+                $text=[string]$_.Exception.Message
+                if($text -match 'EPICVM_TAILSCALE_SYSTEM_TASK_TIMEOUT'){throw}
+                throw 'EPICVM_TAILSCALE_SYSTEM_TASK_FAILED'
+            } finally {
+                Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+            }
+        }
         $pipeName='EpicVM-Tailscale-' + [Guid]::NewGuid().ToString('N')
         $pipeTask=[EpicVM.NamedPipeSecret]::Serve($pipeName,$AuthKey)
+        $pipeConsumed=$false
         try {
             # The one-use key is served from memory. Only the pipe path appears
             # in the child process arguments.
-            & $Executable up --authkey ("file:\\.\pipe\" + $pipeName) --hostname $Hostname --unattended --accept-dns=false --reset 2>$null | Out-Null
-            if($LASTEXITCODE -ne 0){throw 'Tailscale rejected the memory-only enrollment input.'}
-            if(-not $pipeTask.Wait(60000)){throw 'Tailscale did not consume the enrollment key.'}
+            # The guest PowerShell session may be an administrator with a
+            # filtered remote token. Run the CLI as LocalSystem so it can reach
+            # Tailscale's protected local API pipe without weakening UAC or
+            # granting the agent broader Hyper-V rights. The scheduled task
+            # contains only the ephemeral pipe path, never the auth key.
+            $pipePath='file:\\.\pipe\' + $pipeName
+            $upArguments='up --auth-key "' + $pipePath + '" --hostname "' + $Hostname + '" --unattended=true --accept-dns=false --reset'
+            $upTask=Invoke-SystemTailscaleTask -TaskName ('EpicVM-Tailscale-Up-' + [Guid]::NewGuid().ToString('N')) -Execute $Executable -Arguments $upArguments -TimeoutSeconds 60
+            $pipeConsumed=$pipeTask.Wait(5000)
+            if(-not $pipeConsumed){throw 'EPICVM_TAILSCALE_AUTH_INPUT_FAILED'}
+            if([int]$upTask.exitCode -ne 0){throw 'EPICVM_TAILSCALE_GUEST_COMMAND_FAILED'}
         }
         finally {$AuthKey=$null;$pipeTask=$null}
-        $ip=[string]((& $Executable ip -4 2>$null | Select-Object -First 1)).Trim()
+        # Windows normally runs Tailscale in the logged-in user's context.
+        # Make the unattended/system handoff explicit, then restart the
+        # service once and verify the address returns.  Without this check a
+        # clone can appear enrolled until reboot while losing its durable node
+        # state, leaving a stale tailnetIp in the provisioning store.
+        $setTask=Invoke-SystemTailscaleTask -TaskName ('EpicVM-Tailscale-Set-' + [Guid]::NewGuid().ToString('N')) -Execute $Executable -Arguments 'set --unattended=true' -TimeoutSeconds 30
+        if([int]$setTask.exitCode -ne 0){throw 'EPICVM_TAILSCALE_UNATTENDED_FAILED'}
+        try {
+            Restart-Service -Name 'Tailscale' -Force -ErrorAction Stop
+        } catch {
+            $restartTask=Invoke-SystemTailscaleTask -TaskName ('EpicVM-Tailscale-Restart-' + [Guid]::NewGuid().ToString('N')) -Execute 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -Arguments '-NoProfile -NonInteractive -Command "Restart-Service -Name Tailscale -Force"' -TimeoutSeconds 30
+            if([int]$restartTask.exitCode -ne 0){throw 'EPICVM_TAILSCALE_RESTART_FAILED'}
+        }
+        $deadline=(Get-Date).AddSeconds(30)
+        do {
+            Start-Sleep -Milliseconds 500
+            $ip=[string](@(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { [string]$_.IPAddress -match '^100\.(6[4-9]|[78][0-9]|9[0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}$' } | Select-Object -First 1 -ExpandProperty IPAddress)).Trim()
+            if($ip -match '^100\.(6[4-9]|[78][0-9]|9[0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}$'){break}
+        } while((Get-Date) -lt $deadline)
         if($ip -notmatch '^100\.(6[4-9]|[78][0-9]|9[0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}$'){throw 'Guest Tailscale IP verification failed.'}
         return [ordered]@{ok=$true;ip=$ip}
+    }
+}
+
+function Get-EpicVMGuestManagementConfigurationScript {
+    return {
+        param($Port,$UseSsl)
+        $ErrorActionPreference='Stop'
+        $winrm=Get-Service -Name 'WinRM' -ErrorAction Stop
+        Set-Service -Name 'WinRM' -StartupType Automatic -ErrorAction Stop
+        if([string]$winrm.Status -ne 'Running'){Start-Service -Name 'WinRM' -ErrorAction Stop}
+        if(Get-Command -Name Enable-PSRemoting -ErrorAction SilentlyContinue){
+            Enable-PSRemoting -SkipNetworkProfileCheck -Force -ErrorAction Stop | Out-Null
+        }
+        # Enable-PSRemoting may create broad built-in rules. Disable those and
+        # replace them with one exact Tailscale-only management rule.
+        Get-NetFirewallRule -DisplayGroup 'Windows Remote Management' -ErrorAction SilentlyContinue | Disable-NetFirewallRule -ErrorAction SilentlyContinue
+        Get-NetFirewallRule -Name 'EpicVM-WinRM-Tailscale' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+        New-NetFirewallRule -Name 'EpicVM-WinRM-Tailscale' -DisplayName 'EpicVM WinRM (Tailscale)' -Direction Inbound -Action Allow -Protocol TCP -LocalPort ([int]$Port) -RemoteAddress '100.64.0.0/10' -Profile Any -EdgeTraversalPolicy Block -ErrorAction Stop | Out-Null
+        try {
+            Set-Item -Path 'WSMan:\localhost\Service\Auth\Negotiate' -Value $true -Force -ErrorAction Stop
+            Set-Item -Path 'WSMan:\localhost\Service\Auth\Basic' -Value $false -Force -ErrorAction Stop
+            Set-Item -Path 'WSMan:\localhost\Service\Auth\CredSSP' -Value $false -Force -ErrorAction SilentlyContinue
+            Set-Item -Path 'WSMan:\localhost\Service\AllowUnencrypted' -Value $false -Force -ErrorAction Stop
+        } catch { throw 'EPICVM_MANAGEMENT_ENDPOINT_FAILED' }
+        $listeners=@(Get-WSManInstance -ResourceURI 'winrm/config/listener' -Enumerate -ErrorAction SilentlyContinue)
+        $transport=if([bool]$UseSsl){'HTTPS'}else{'HTTP'}
+        $listener=$listeners | Where-Object { [string]$_.Transport -eq $transport -and ([int]$_.Port -eq [int]$Port -or [string]::IsNullOrWhiteSpace([string]$_.Port)) } | Select-Object -First 1
+        if($null -eq $listener){throw 'EPICVM_MANAGEMENT_ENDPOINT_FAILED'}
+        [ordered]@{ok=$true;managementEndpoint=$true;managementPort=[int]$Port;managementUseSsl=[bool]$UseSsl;firewallScoped=$true}
     }
 }
 
@@ -175,6 +270,11 @@ function Invoke-EpicVMTailscaleEnrollment {
     $key=New-EpicVMTailscaleAuthKey -Provider $Provider -VmName $VmName
     $credential=[PSCredential]::new($Username,(ConvertTo-SecureString $Password -AsPlainText -Force))
     $script=Get-EpicVMTailscaleGuestScript
+    $managementScript=Get-EpicVMGuestManagementConfigurationScript
+    $managementPort=5985
+    try { $managementPort=[int](Get-EpicVMHyperVValue -Object $Config -Name 'ManagementPort' -Default 5985) } catch { $managementPort=5985 }
+    if($managementPort -lt 1 -or $managementPort -gt 65535){$managementPort=5985}
+    $managementUseSsl=[bool](Get-EpicVMHyperVValue -Object $Config -Name 'ManagementUseSsl' -Default $false)
     $exe=[string](Get-EpicVMHyperVValue -Object $Config -Name 'TailscaleExecutable' -Default 'C:\Program Files\Tailscale\tailscale.exe')
     try {
         # The auth key is one-use. Once issued, this guest operation is never
@@ -185,8 +285,24 @@ function Invoke-EpicVMTailscaleEnrollment {
         $known=@(Get-EpicVMHyperVValue -Object $Provider -Name 'KnownTailscaleIps' -Default @())
         if($known -contains $ip){throw 'The guest received a duplicate Tailscale IP.'}
         $deviceId=Get-EpicVMTailscaleDeviceId -Provider $Provider -VmName $VmName -GuestIp $ip
-        return [ordered]@{ok=$true;ip=$ip;deviceId=$deviceId;tag='tag:epicvm-guest'}
-    } catch { throw (New-EpicVMHyperVError -Code 'tailscale_enrollment_failed' -Message 'Tailscale guest enrollment failed.') }
+        # Tailscale is now the control-plane handoff point. Configure WinRM
+        # through the already-authenticated pre-network channel exactly once;
+        # the subsequent streaming stage must use the private management path.
+        $management=Invoke-EpicVMPowerShellDirectOnce -Provider $Provider -VmName $VmName -Credential $credential -Script $managementScript -ArgumentList @($managementPort,$managementUseSsl) -TimeoutSeconds 45
+        if(-not [bool](Get-EpicVMHyperVValue -Object $management -Name 'ok' -Default $false)){throw 'EPICVM_MANAGEMENT_ENDPOINT_FAILED'}
+        return [ordered]@{ok=$true;ip=$ip;deviceId=$deviceId;tag='tag:epicvm-guest';managementReady=$true;managementTransport='tailscale_winrm';managementPort=$managementPort;managementUseSsl=$managementUseSsl}
+    } catch {
+        $safeCode='tailscale_enrollment_failed'
+        $safeText=([string]$_.Exception.Message) + ' ' + ([string]$_.ToString())
+        if($safeText -match 'EPICVM_TAILSCALE_AUTH_INPUT_FAILED'){$safeCode='tailscale_auth_input_failed'}
+        if($safeText -match 'EPICVM_TAILSCALE_GUEST_COMMAND_FAILED'){$safeCode='tailscale_guest_command_failed'}
+        if($safeText -match 'EPICVM_TAILSCALE_SYSTEM_TASK_TIMEOUT'){$safeCode='tailscale_system_task_timeout'}
+        if($safeText -match 'EPICVM_TAILSCALE_SYSTEM_TASK_FAILED'){$safeCode='tailscale_system_task_failed'}
+        if($safeText -match 'EPICVM_TAILSCALE_UNATTENDED_FAILED'){$safeCode='tailscale_unattended_failed'}
+        if($safeCode -eq 'tailscale_enrollment_failed' -and $safeText -match '(?i)unattended|durable|state|Tailscale IP verification failed'){$safeCode='tailscale_state_not_persisted'}
+        if($safeCode -eq 'tailscale_enrollment_failed' -and $safeText -match '(?i)EPICVM_MANAGEMENT|management endpoint|WinRM'){$safeCode='management_handoff_failed'}
+        throw (New-EpicVMHyperVError -Code $safeCode -Message 'Tailscale guest enrollment failed.')
+    }
     finally {$key=$null;$Password=$null;$credential=$null}
 }
 

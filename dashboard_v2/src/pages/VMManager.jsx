@@ -138,6 +138,7 @@ export default function VMManager(){
   const [provisioningClaimToken, setProvisioningClaimToken] = useState('')
   const [claimDraft, setClaimDraft] = useState({ username:'', password:'', confirm:'', sunshineUsername:'', sunshinePassword:'', sunshineConfirm:'' })
   const [provisioningBusy, setProvisioningBusy] = useState(false)
+  const consoleRetryOutcomeRef = useRef('')
   const [createBusy, setCreateBusy] = useState(false)
   const [manageVm, setManageVm] = useState(null)
   const [manageVmHostId, setManageVmHostId] = useState('local')
@@ -580,6 +581,20 @@ export default function VMManager(){
     return ()=>{ stopped=true; clearInterval(timer) }
   }, [provisioningJob?.id, provisioningJob?.state, provisioningHostId])
 
+  useEffect(()=>{
+    const outcome = String(provisioningJob?.consoleRetryOutcome || '')
+    const operation = String(provisioningJob?.consoleOperationId || provisioningJob?.operationId || '')
+    const key = outcome && operation ? `${operation}:${outcome}:${provisioningJob?.errorCode || ''}` : ''
+    if(!key || consoleRetryOutcomeRef.current === key) return
+    consoleRetryOutcomeRef.current = key
+    if(outcome === 'failed') {
+      addToast({title:'Console repair stopped safely', message:provisioningFailureReason(provisioningJob) || 'The retained VM was kept for diagnosis.', type:'error', timeout:9000})
+    } else if(outcome === 'ready') {
+      addToast({title:'Console ready', message:'The Moonlight route passed its reachability gate and is available from the VM card.', type:'success', timeout:8000})
+      void load({silent:true})
+    }
+  }, [provisioningJob?.consoleRetryOutcome, provisioningJob?.consoleOperationId, provisioningJob?.operationId, provisioningJob?.errorCode, addToast])
+
   async function claimProvisioningJob(e){
     e?.preventDefault?.()
     if(!provisioningJob || !canClaimProvisioningJob(provisioningJob) || !provisioningClaimToken) return
@@ -617,7 +632,11 @@ export default function VMManager(){
       const body = await res.json().catch(()=>({ ok:res.ok }))
       if(!res.ok || body.ok === false) throw new Error(body.error?.message || body.error || 'Console retry failed')
       setProvisioningJob(body.job || provisioningJob)
-      addToast({title:'Console ready', message:'The isolated browser console passed its reachability gate.', type:'success', timeout:7000})
+      if(body.pending){
+        addToast({title:'Console setup started', message:'The retained VM is being repaired in the background; this page will update when the console gate finishes.', type:'success', timeout:7000})
+      }else{
+        addToast({title:'Console ready', message:'The isolated browser console passed its reachability gate.', type:'success', timeout:7000})
+      }
     }catch(err){
       await refreshProvisioningJob().catch(()=>null)
       addToast({title:'Console retry failed', message:String(err), type:'error', timeout:8000})
@@ -663,11 +682,11 @@ export default function VMManager(){
     logRequestSequenceRef.current += 1
     setSelected(name)
     setSelectedVmHostId(hostId || 'local')
-    // Force a new launcher request on every open. Guacamole logout leaves the
-    // iframe on its login page, and reusing the same src can preserve that
-    // document instead of running EpicVM's short-lived SSO exchange again.
+    // A verified remote inventory URL is the Moonlight route. Do not send a
+    // ready remote VM through the legacy Guacamole launcher; that was the
+    // source of the misleading "console" link after a successful retry.
     const launcherUrl = `/dashboard/console/${encodeURIComponent(name)}/?launch=${Date.now()}`
-    setSelectedVmUrl(hostId && hostId !== 'local' ? launcherUrl : (vmUrl || ''))
+    setSelectedVmUrl(hostId && hostId !== 'local' ? (vmUrl || launcherUrl) : (vmUrl || ''))
     await apiFetch(`/optimizer/activity/${encodeURIComponent(name)}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ source:'details-open' }) }).catch(()=>null)
     await fetchLogs(name, hostId)
   }

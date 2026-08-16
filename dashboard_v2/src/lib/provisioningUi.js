@@ -1,4 +1,4 @@
-export const PROVISIONING_STATES = ['queued','cloning','booting','unclaimed','claim_in_progress','guest_setup','network_setup','streaming_setup','ready']
+export const PROVISIONING_STATES = ['queued','cloning','booting','unclaimed','claim_in_progress','guest_setup','network_setup','management_handoff','streaming_setup','stream_validation','ready']
 
 export function canClaimProvisioningJob(job){
   return String(job?.state || '') === 'unclaimed'
@@ -38,6 +38,12 @@ export function provisioningFailureReason(job){
     bootstrap_readiness_unavailable: 'The host lacks the secure guest-readiness check.',
     guest_bootstrap_not_ready: 'The cloned guest did not become ready for secure setup.',
     powershell_direct_failed: 'PowerShell Direct could not open the cloned guest.',
+    direct_service_disabled: 'The Hyper-V PowerShell Direct service is disabled.',
+    direct_service_not_ready: 'The Hyper-V PowerShell Direct service was not ready; no credential conclusion was made.',
+    direct_not_supported: 'PowerShell Direct is not available on this host.',
+    direct_open_timeout: 'PowerShell Direct did not open before the bounded timeout.',
+    direct_transport_error: 'The PowerShell Direct transport failed; no credential conclusion was made.',
+    guest_credential_rejected: 'The guest channel explicitly rejected the supplied credential.',
     rdp_verification_failed: 'Guest RDP/NLA/firewall verification failed.',
     guest_configuration_failed: 'Guest configuration failed at the secure setup gate.',
     invalid_credential_input: 'The credential input is empty or does not meet the request policy.',
@@ -49,10 +55,38 @@ export function provisioningFailureReason(job){
     bootstrap_cleanup_failed: 'Guest bootstrap cleanup did not verify.',
     bootstrap_cleanup_transport_failed: 'The guest bootstrap cleanup channel failed.',
     tailscale_enrollment_failed: 'Tailscale guest enrollment failed after guest setup.',
-    streaming_setup_failed: 'Moonlight/Sunshine setup failed after guest and network setup.',
-    legacy_state_uncertain: 'Persisted provisioning checkpoints are inconsistent; the VM was retained for diagnosis.',
+    management_handoff_failed: 'The private management handoff did not verify after Tailscale enrollment.',
+    management_transport_failed: 'The private guest management channel failed safely; the VM was retained for diagnosis.',
+    management_transport_unavailable: 'The private guest management channel is unavailable; the VM was retained for diagnosis.',
+     streaming_setup_failed: 'Moonlight/Sunshine setup failed after guest and network setup.',
+     sunshine_invalid_input: 'The Sunshine credential input was rejected before guest setup.',
+     sunshine_service_missing: 'The retained guest does not have the pinned Sunshine service.',
+     sunshine_executable_missing: 'The pinned Sunshine executable could not be verified in the guest.',
+     sunshine_version_mismatch: 'The guest Sunshine version does not match the pinned release.',
+     sunshine_state_path_failed: 'The Sunshine state path could not be prepared safely.',
+     sunshine_state_write_failed: 'The Sunshine credential state could not be written safely.',
+     sunshine_state_acl_failed: 'The Sunshine credential state permissions could not be verified.',
+     sunshine_firewall_failed: 'The narrow Sunshine firewall scope could not be applied.',
+     sunshine_service_restart_failed: 'The Sunshine service could not be restarted safely.',
+     sunshine_listener_failed: 'Sunshine did not pass its service/listener verification.',
+     sunshine_verification_failed: 'Sunshine configuration did not pass verification.',
+     console_failed: 'The retained console repair failed safely; the VM was retained for diagnosis.',
+     host_unavailable: 'The remote host became unavailable while repairing the retained console.',
+     legacy_state_uncertain: 'Persisted provisioning checkpoints are inconsistent; the VM was retained for diagnosis.',
   }
-  return reasons[code] || ''
+  const base = reasons[code] || ''
+  if(code === 'guest_account_failed'){
+    const detail = String(job?.failureDetailCode || '').trim().toLowerCase()
+    const detailReasons = {
+      account_create_failed: 'The requested Windows account could not be created.',
+      account_update_failed: 'The requested Windows account could not be updated.',
+      account_password_policy_failed: 'Windows rejected the password under its local policy.',
+      admin_membership_failed: 'Administrator membership could not be verified.',
+      account_verification_failed: 'The requested Windows account could not be verified after setup.',
+    }
+    if(detailReasons[detail]) return `${base} ${detailReasons[detail]}`
+  }
+  return base
 }
 
 export function provisioningConsoleRetryPayload({ hostId, username, password, sunshineUsername, sunshinePassword } = {}){

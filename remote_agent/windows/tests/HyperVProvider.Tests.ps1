@@ -123,6 +123,12 @@ Describe 'Hyper-V provider capabilities' {
         $provider.TailscaleTailnet | Should -Be 'example.ts.net'
         $provider.TailscaleGuestTag | Should -Be 'tag:epicvm-guest'
     }
+
+    It 'normalizes stale management settings to the protected handoff defaults' {
+        $provider = New-EpicVMHyperVProvider -Config @{ ManagementPort = 0; RequireManagementTransport = $false } -CommandInvoker ${function:Invoke-MockHyperVCmdlet}
+        $provider.ManagementPort | Should -Be 5985
+        $provider.RequireManagementTransport | Should -BeTrue
+    }
 }
 
 Describe 'Hyper-V provider lifecycle safety' {

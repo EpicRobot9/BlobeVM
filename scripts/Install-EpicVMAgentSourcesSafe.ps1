@@ -13,6 +13,7 @@ $ErrorActionPreference = 'Stop'
 $files = @(
     'EpicVM.Agent.ps1',
     'Provisioning.ps1',
+    'providers\HyperVProvider.ps1',
     'providers\GuestProvider.ps1',
     'providers\TailscaleProvider.ps1'
 )

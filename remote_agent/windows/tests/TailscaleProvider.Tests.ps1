@@ -31,7 +31,14 @@ Describe 'Tailscale OAuth enrollment' {
         $script:request.capabilities.devices.create.preauthorized | Should -BeTrue
         $script:request.capabilities.devices.create.tags | Should -Contain 'tag:epicvm-guest'
         (Get-EpicVMTailscaleGuestScript).ToString() | Should -Match 'NamedPipeServerStream'
+        (Get-EpicVMTailscaleGuestScript).ToString() | Should -Match 'Register-ScheduledTask'
+        (Get-EpicVMTailscaleGuestScript).ToString() | Should -Match "-UserId 'SYSTEM'"
+        (Get-EpicVMTailscaleGuestScript).ToString() | Should -Match 'New-ScheduledTaskPrincipal'
         (Get-EpicVMTailscaleGuestScript).ToString() | Should -Match 'file:\\\\.\\pipe\\'
+        (Get-EpicVMTailscaleGuestScript).ToString() | Should -Match '--auth-key'
+        (Get-EpicVMTailscaleGuestScript).ToString() | Should -Not -Match '--authkey'
+        (Get-EpicVMTailscaleGuestScript).ToString() | Should -Match '--unattended=true'
+        (Get-EpicVMTailscaleGuestScript).ToString() | Should -Match 'Restart-Service -Name .Tailscale.'
         (Get-EpicVMTailscaleGuestScript).ToString() | Should -Not -Match 'ArgumentList\.Add'
         (Get-EpicVMTailscaleGuestScript).ToString() | Should -Not -Match '--authkey\s+\$AuthKey'
     }

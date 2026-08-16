@@ -183,6 +183,23 @@ def test_remote_create_uses_long_operation_timeout():
     assert calls[0] >= 600
 
 
+def test_remote_provisioning_status_has_bounded_store_read_timeout():
+    calls = []
+
+    class FakeResponse:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self): return b'{"job":{"state":"setup_failed:streaming"}}'
+
+    def fake_open(req, timeout):
+        calls.append(timeout)
+        return FakeResponse()
+
+    RemoteAgentClient("http://100.64.0.2:8765", "token", timeout=2.0, opener=fake_open).provisioning_status("job-1")
+    assert calls[0] == 30
+
+
 def test_remote_lifecycle_uses_explicit_agent_contract_routes():
     calls = []
 
@@ -354,6 +371,33 @@ def test_remote_claim_preserves_only_safe_agent_error_code():
     assert "do not reflect" not in str(caught.value)
 
 
+def test_remote_console_retry_accepts_legacy_top_level_safe_code():
+    host = RemoteAgentHost({
+        "id": "epic-pc",
+        "display_name": "Epic PC",
+        "agent_url": "http://100.64.0.2:8765",
+        "token": "token",
+    })
+    host.client = SimpleNamespace(
+        console_credentials=lambda *args, **kwargs: (_ for _ in ()).throw(RemoteAgentError(
+            "opaque transport text",
+            status=422,
+            data={"ok": False, "code": "sunshine_setup_failed", "error": "do not reflect"},
+        ))
+    )
+    with pytest.raises(VmHostUnavailable) as caught:
+        host.console_credentials(
+            "job-1",
+            guest_username="operator",
+            guest_password="secret",
+            sunshine_username="sunshine",
+            sunshine_password="secret",
+        )
+    assert caught.value.code == "sunshine_setup_failed"
+    assert "secret" not in str(caught.value)
+    assert "do not reflect" not in str(caught.value)
+
+
 def test_remote_vm_url_includes_public_origin_and_host_id(monkeypatch):
     import importlib
 
@@ -409,6 +453,32 @@ def test_remote_inventory_gets_public_vm_link(monkeypatch, tmp_path):
         items = module.manager_json_list("epic-pc")
 
     assert items[0]["url"] == "https://techexplore.us/vm/testre/?host_id=epic-pc"
+
+
+def test_ready_remote_inventory_uses_verified_console_route(monkeypatch, tmp_path):
+    import importlib
+
+    monkeypatch.setenv("BLOBEDASH_STATE", str(tmp_path))
+    module = importlib.import_module("dashboard.app")
+    monkeypatch.setattr(module, "_external_base_url", lambda: "https://techexplore.us")
+
+    class FakeHost:
+        kind = "remote"
+        host_id = "epic-pc"
+        host_name = "Epic PC"
+        def list_vms(self):
+            return [{"name": "pilot-14", "state": "Running", "provisioningState": "ready", "consoleReady": True, "consoleRoutePrefix": "/vm/pilot-14/"}]
+        def normalize_inventory(self, instances):
+            return [{**item, "placement": "remote", "host_id": self.host_id, "host_name": self.host_name} for item in instances]
+
+    class FakeRegistry:
+        def refresh(self): return None
+        def get(self, host_id="local"): return FakeHost()
+
+    monkeypatch.setattr(module, "VM_HOST_REGISTRY", FakeRegistry())
+    with module.app.test_request_context("/dashboard/api/list", headers={"Host": "techexplore.us", "X-Forwarded-Proto": "https", "X-Forwarded-Host": "techexplore.us"}):
+        items = module.manager_json_list("epic-pc")
+    assert items[0]["url"] == "https://techexplore.us/vm/pilot-14/?host_id=epic-pc"
 
 
 def test_hosts_api_redacts_credentials_and_exposes_inventory(monkeypatch, tmp_path):

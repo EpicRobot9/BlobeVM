@@ -147,7 +147,11 @@ def admin_auth_required(fn):
         basic_ok = check_auth(request.headers.get('Authorization'))
         token_ok = _verify_v2_token(request.cookies.get('Dashboard-Auth', ''))
         if not (basic_ok or token_ok):
-            return Response('Auth required', 401, {'WWW-Authenticate': f'Basic realm="{AUTH_REALM}"'})
+            # The official Dashboard V2 uses its own cookie login screen.  A
+            # Basic challenge here makes Chromium open a native credential
+            # prompt before that UI can render; keep the JSON/HTML 401 while
+            # deliberately avoiding the unrelated browser Basic-Auth flow.
+            return Response('Auth required', 401)
         if request.method not in ('GET', 'HEAD', 'OPTIONS') and not _same_origin_request():
             return jsonify({'ok': False, 'error': 'Cross-origin request rejected'}), 403
         if request.method not in ('GET', 'HEAD', 'OPTIONS') and not _csrf_request_valid():
@@ -221,6 +225,134 @@ VM_HOST_REGISTRY = ConfiguredVmHostRegistry(LOCAL_VM_HOST)
 VM_HOSTS = VM_HOST_REGISTRY
 _CONSOLE_ORCHESTRATOR = None
 _LEGACY_GUACAMOLE_ORCHESTRATOR = None
+_CONSOLE_RETRY_TASKS = {}
+_CONSOLE_RETRY_LOCK = threading.Lock()
+_CONSOLE_RETRY_TASK_TTL_SECONDS = 900
+
+
+def _safe_console_retry_code(value, default='console_failed'):
+    """Normalize a worker result to a non-sensitive allowlisted code.
+
+    The retry worker is deliberately fire-and-forget from the HTTP request,
+    so its terminal result must be safe to expose later.  Never retain an
+    exception string, request body, or transport response here.
+    """
+    code = str(value or default).strip().lower()
+    if not re.fullmatch(r'[a-z][a-z0-9_]{2,63}', code):
+        return default
+    return code
+
+
+def _prune_console_retry_tasks(now=None):
+    now = time.time() if now is None else float(now)
+    with _CONSOLE_RETRY_LOCK:
+        stale = [
+            key for key, task in _CONSOLE_RETRY_TASKS.items()
+            if isinstance(task, dict)
+            and task.get('status') in ('ready', 'failed')
+            and now - float(task.get('finishedAt') or task.get('startedAt') or now) > _CONSOLE_RETRY_TASK_TTL_SECONDS
+        ]
+        for key in stale:
+            _CONSOLE_RETRY_TASKS.pop(key, None)
+
+
+def _set_console_retry_result(key, *, status, operation_id, failure_code=''):
+    """Publish only safe terminal metadata for an async retry."""
+    finished = time.time()
+    with _CONSOLE_RETRY_LOCK:
+        current = _CONSOLE_RETRY_TASKS.get(key) or {}
+        # Keep the original operation id even if a malformed caller somehow
+        # supplies a different one to a worker.
+        original_operation = str(current.get('operationId') or operation_id)
+        current.update({
+            'operationId': original_operation,
+            'status': 'ready' if status == 'ready' else 'failed',
+            'finishedAt': finished,
+        })
+        if status == 'ready':
+            current['failureCode'] = ''
+            current['routeReady'] = True
+        else:
+            current['failureCode'] = _safe_console_retry_code(failure_code)
+            current['routeReady'] = False
+        _CONSOLE_RETRY_TASKS[key] = current
+    return current
+
+
+def _start_remote_moonlight_console_retry(*, host, host_id, job_id, name, guest_ip,
+                                           guest_username, guest_password,
+                                           sunshine_username, sunshine_password,
+                                           orchestrator, operation_id):
+    """Run credential-bearing console setup outside the public request.
+
+    Cloudflare/Traefik must not hold a browser request open while the agent
+    performs the bounded management handoff and Sunshine readiness checks.
+    Credentials remain request-local/in-memory and are cleared when this
+    worker exits; only the non-secret operation id is tracked.
+    """
+    key = (str(host_id), str(job_id))
+    try:
+        orchestrator.quarantine_staged(name)
+        host.console_credentials(
+            job_id,
+            guest_username=guest_username,
+            guest_password=guest_password,
+            sunshine_username=sunshine_username,
+            sunshine_password=sunshine_password,
+        )
+        plan = orchestrator.build_plan(name=name, guest_ip=guest_ip)
+        orchestrator.stage_plan(plan)
+        started = orchestrator.start_staged(name)
+        started = orchestrator.pair_staged(
+            name,
+            sunshine_username=sunshine_username,
+            sunshine_password=sunshine_password,
+        )
+        host.console_complete(
+            job_id,
+            route_prefix=str(started.get('routePrefix') or plan.route_prefix),
+            guest_tcp_verified=bool(started.get('guestTcpVerified')),
+        )
+        _set_console_retry_result(key, status='ready', operation_id=operation_id)
+        app.logger.info('EpicVM console retry completed operation=%s status=ready', operation_id)
+    except ConsoleOrchestrationError as exc:
+        failure_code = _safe_console_retry_code(getattr(exc, 'code', 'console_failed'))
+        _set_console_retry_result(key, status='failed', operation_id=operation_id, failure_code=failure_code)
+        try:
+            orchestrator.stop_staged(name)
+        except Exception:
+            pass
+        try:
+            if failure_code not in ('console_retry_not_allowed',):
+                host.console_failed(job_id, code=failure_code)
+        except Exception:
+            pass
+        app.logger.warning('EpicVM console retry failed operation=%s code=%s', operation_id, failure_code)
+    except VmHostUnavailable as exc:
+        failure_code = _safe_console_retry_code(getattr(exc, 'code', 'console_failed'))
+        _set_console_retry_result(key, status='failed', operation_id=operation_id, failure_code=failure_code)
+        try:
+            orchestrator.stop_staged(name)
+        except Exception:
+            pass
+        try:
+            host.console_failed(job_id, code=failure_code)
+        except Exception:
+            pass
+        app.logger.warning('EpicVM console retry failed operation=%s code=%s', operation_id, failure_code)
+    except Exception:
+        _set_console_retry_result(key, status='failed', operation_id=operation_id, failure_code='console_failed')
+        try:
+            orchestrator.stop_staged(name)
+        except Exception:
+            pass
+        try:
+            host.console_failed(job_id, code='console_failed')
+        except Exception:
+            pass
+        app.logger.warning('EpicVM console retry failed operation=%s code=console_failed', operation_id)
+    finally:
+        guest_username = guest_password = sunshine_username = sunshine_password = ''
 
 def _console_orchestrator():
     global _CONSOLE_ORCHESTRATOR
@@ -316,6 +448,12 @@ def _vm_host_error_response(exc):
         'bootstrap_readiness_unavailable': 'The host lacks the secure guest-readiness check.',
         'guest_bootstrap_not_ready': 'The cloned guest did not become ready for secure setup.',
         'powershell_direct_failed': 'PowerShell Direct could not open the cloned guest.',
+        'direct_service_disabled': 'The Hyper-V PowerShell Direct service is disabled.',
+        'direct_service_not_ready': 'The Hyper-V PowerShell Direct service was not ready; no credential conclusion was made.',
+        'direct_not_supported': 'PowerShell Direct is not available on this host.',
+        'direct_open_timeout': 'PowerShell Direct did not open before the bounded timeout.',
+        'direct_transport_error': 'The PowerShell Direct transport failed; no credential conclusion was made.',
+        'guest_credential_rejected': 'The guest channel explicitly rejected the supplied credential.',
         'rdp_verification_failed': 'Guest RDP/NLA/firewall verification failed.',
         'guest_configuration_failed': 'Guest configuration failed at the secure setup gate.',
         'guest_account_failed': 'Windows guest-account setup failed after the claim was consumed.',
@@ -323,7 +461,27 @@ def _vm_host_error_response(exc):
         'bootstrap_cleanup_failed': 'Guest bootstrap cleanup did not verify.',
         'bootstrap_cleanup_transport_failed': 'The guest bootstrap cleanup channel failed.',
         'tailscale_enrollment_failed': 'Tailscale guest enrollment failed after guest setup.',
+        'management_handoff_failed': 'The private management handoff did not verify after Tailscale enrollment.',
+        'management_transport_failed': 'The private guest management channel failed safely; the VM was retained for diagnosis.',
+        'management_transport_unavailable': 'The private guest management channel is unavailable; the VM was retained for diagnosis.',
         'streaming_setup_failed': 'Moonlight/Sunshine setup failed after guest and network setup.',
+        'sunshine_setup_failed': 'Automatic Sunshine setup failed after guest and network setup.',
+        'sunshine_setup_unavailable': 'Automatic Sunshine setup is unavailable on this host.',
+        'sunshine_invalid_input': 'The Sunshine credential input was rejected before guest setup.',
+        'sunshine_service_missing': 'The retained guest does not have the pinned Sunshine service.',
+        'sunshine_executable_missing': 'The pinned Sunshine executable could not be verified in the guest.',
+        'sunshine_version_mismatch': 'The guest Sunshine version does not match the pinned release.',
+        'sunshine_state_path_failed': 'The Sunshine state path could not be prepared safely.',
+        'sunshine_state_write_failed': 'The Sunshine credential state could not be written safely.',
+        'sunshine_state_acl_failed': 'The Sunshine credential state permissions could not be verified.',
+        'sunshine_firewall_failed': 'The narrow Sunshine firewall scope could not be applied.',
+        'sunshine_service_restart_failed': 'The Sunshine service could not be restarted safely.',
+        'sunshine_listener_failed': 'Sunshine did not pass its service/listener verification.',
+        'sunshine_verification_failed': 'Sunshine configuration did not pass verification.',
+        'console_retry_not_allowed': 'Only a retained failed console step may be retried.',
+        'console_credentials_not_allowed': 'This provisioning job is not waiting for console credentials.',
+        'console_verification_failed': 'The console route did not pass its final verification.',
+        'guest_tcp_unverified': 'The server could not verify TCP reachability to the guest.',
         'legacy_state_uncertain': 'The persisted provisioning checkpoints are inconsistent; the VM was retained for diagnosis.',
         'host_unavailable': 'The remote VM host is unavailable.',
     }
@@ -1796,6 +1954,20 @@ def _build_vm_url(name: str, host_id: str | None = None) -> str:
         return f'{base}{prefix}/'
     return f'{prefix}/'
 
+
+def _build_remote_console_url(name: str, host_id: str, route_prefix: str) -> str:
+    """Build a Moonlight URL only from an exact, ready-owned route."""
+    safe_name = str(name or '').strip().lower()
+    route = str(route_prefix or '').strip()
+    if not re.fullmatch(r'[a-z0-9][a-z0-9._-]{0,62}', safe_name):
+        return _build_vm_url(name, host_id=host_id)
+    expected = f'/vm/{safe_name}/'
+    if route != expected:
+        return _build_vm_url(name, host_id=host_id)
+    base = _external_base_url()
+    root = f'{base}{route}' if base else route
+    return f'{root}?host_id={url_quote(str(host_id), safe="")}'
+
 def manager_json_list(host_id=None):
     """Return a list of instances with best-effort status and URL.
     Tries the selected provider's manager list first. Falls back to scanning
@@ -1813,7 +1985,10 @@ def manager_json_list(host_id=None):
             normalized = host_provider.normalize_inventory(instances)
             for item in normalized:
                 if item.get('name'):
-                    item['url'] = _build_vm_url(item['name'], host_id=host_id)
+                    if item.get('consoleReady') and item.get('consoleRoutePrefix'):
+                        item['url'] = _build_remote_console_url(item['name'], host_id, item.get('consoleRoutePrefix'))
+                    else:
+                        item['url'] = _build_vm_url(item['name'], host_id=host_id)
             if hasattr(VM_HOST_REGISTRY, 'remember_inventory'):
                 try:
                     VM_HOST_REGISTRY.remember_inventory(host_id, normalized)
@@ -1861,7 +2036,10 @@ def manager_json_list(host_id=None):
                     item['host_online'] = False
                     item['status'] = 'offline'
                     if item.get('name'):
-                        item['url'] = _build_vm_url(item['name'], host_id=host_id)
+                        if item.get('consoleReady') and item.get('consoleRoutePrefix'):
+                            item['url'] = _build_remote_console_url(item['name'], host_id, item.get('consoleRoutePrefix'))
+                        else:
+                            item['url'] = _build_vm_url(item['name'], host_id=host_id)
                 return cached
             raise
     except Exception:
@@ -3681,7 +3859,44 @@ def api_provisioning_job_status(job_id):
         host = _vm_host(host_id)
         if not hasattr(host, 'provisioning_status'):
             return jsonify({'ok': False, 'error': 'Provisioning is unavailable on this host'}), 409
-        response = jsonify({'ok': True, 'host_id': host_id, **host.provisioning_status(job_id)})
+        status = host.provisioning_status(job_id)
+        _prune_console_retry_tasks()
+        pending = None
+        with _CONSOLE_RETRY_LOCK:
+            pending = _CONSOLE_RETRY_TASKS.get((host_id, str(job_id)))
+        if pending and isinstance(status, dict) and isinstance(status.get('job'), dict):
+            status = dict(status)
+            status['job'] = dict(status['job'])
+            task_status = str(pending.get('status') or 'pending')
+            if task_status == 'pending':
+                # The agent may still show setup_failed:streaming until its
+                # credential-bearing request completes. Overlay only safe,
+                # non-secret pending metadata for this dashboard process.
+                status['job'].update({
+                    'state': 'streaming_setup',
+                    'consoleRetryPending': True,
+                    'consoleOperationId': pending['operationId'],
+                })
+            elif task_status == 'failed':
+                # A host update can fail while the background worker is
+                # finishing (for example during a transient agent restart).
+                # Keep the safe terminal outcome visible instead of silently
+                # returning the old retry form with no explanation.
+                status['job'].update({
+                    'consoleRetryPending': False,
+                    'consoleRetryOutcome': 'failed',
+                    'consoleOperationId': pending['operationId'],
+                    'errorCode': _safe_console_retry_code(pending.get('failureCode')),
+                })
+            elif task_status == 'ready':
+                # The agent is authoritative for the persisted ready state;
+                # expose only the safe correlation/result metadata here.
+                status['job'].update({
+                    'consoleRetryPending': False,
+                    'consoleRetryOutcome': 'ready',
+                    'consoleOperationId': pending['operationId'],
+                })
+        response = jsonify({'ok': True, 'host_id': host_id, **status})
         response.headers['Cache-Control'] = 'no-store'
         return response
     except VmHostUnavailable as exc:
@@ -3810,10 +4025,70 @@ def api_provisioning_job_retry_console(job_id):
         host = _vm_host(host_id)
         current = host.provisioning_status(job_id)
         job = current.get('job') if isinstance(current, dict) else None
-        if not isinstance(job, dict) or job.get('state') != 'setup_failed:streaming':
+        current_state = str(job.get('state') or '') if isinstance(job, dict) else ''
+        if current_state == 'ready':
+            # A concurrent retry may have completed the retained console while
+            # this request was in flight.  Treat that outcome as idempotent;
+            # never turn a successful console back into a failure.
+            response = jsonify({'ok': True, 'host_id': host_id, 'job': job})
+            response.headers['Cache-Control'] = 'no-store'
+            return response
+        if current_state != 'setup_failed:streaming':
             raise ConsoleOrchestrationError('Only a failed console step may be retried.', status=409, code='console_retry_not_allowed')
         name = str(job.get('name') or '')
         guest_ip = str(job.get('tailnetIp') or '')
+        task_key = (host_id, str(job_id))
+        if _moonlight_console(orchestrator) and getattr(host, 'kind', 'local') == 'remote':
+            with _CONSOLE_RETRY_LOCK:
+                pending = _CONSOLE_RETRY_TASKS.get(task_key)
+                if isinstance(pending, dict) and str(pending.get('status') or 'pending') == 'pending':
+                    raise ConsoleOrchestrationError(
+                        'Console setup is already running for this VM.',
+                        status=409,
+                        code='console_retry_in_progress',
+                    )
+                operation_id = secrets.token_hex(16)
+                _CONSOLE_RETRY_TASKS[task_key] = {
+                    'operationId': operation_id,
+                    'startedAt': time.time(),
+                    'status': 'pending',
+                    'failureCode': '',
+                    'routeReady': False,
+                }
+            worker = threading.Thread(
+                target=_start_remote_moonlight_console_retry,
+                kwargs={
+                    'host': host,
+                    'host_id': host_id,
+                    'job_id': job_id,
+                    'name': name,
+                    'guest_ip': guest_ip,
+                    'guest_username': username,
+                    'guest_password': password,
+                    'sunshine_username': sunshine_username,
+                    'sunshine_password': sunshine_password,
+                    'orchestrator': orchestrator,
+                    'operation_id': operation_id,
+                },
+                name=f'epicvm-console-retry-{operation_id[:8]}',
+                daemon=True,
+            )
+            worker.start()
+            response = jsonify({
+                'ok': True,
+                'pending': True,
+                'host_id': host_id,
+                'operationId': operation_id,
+                'job': {
+                    **job,
+                    'state': 'streaming_setup',
+                    'consoleRetryPending': True,
+                    'consoleOperationId': operation_id,
+                },
+            })
+            response.headers['Cache-Control'] = 'no-store'
+            response.headers['Pragma'] = 'no-cache'
+            return response, 202
         orchestrator.quarantine_staged(name)
         if _moonlight_console(orchestrator):
             if not hasattr(host, 'console_credentials'):
@@ -3837,14 +4112,18 @@ def api_provisioning_job_retry_console(job_id):
         response.headers['Cache-Control'] = 'no-store'
         return response
     except ConsoleOrchestrationError as exc:
+        failure_code = str(getattr(exc, 'code', 'console_failed') or 'console_failed')
         try:
             if 'orchestrator' in locals() and 'name' in locals():
                 orchestrator.stop_staged(name)
-            if 'host' in locals() and hasattr(host, 'console_failed'):
-                host.console_failed(job_id, code=str(getattr(exc, 'code', 'console_failed')))
+            # A retry-state conflict is read-only.  In particular, do not
+            # convert a transient in-progress/ready race into a new failed
+            # state or overwrite the diagnostic code from the winning request.
+            if failure_code not in ('console_retry_not_allowed', 'console_retry_in_progress') and 'host' in locals() and hasattr(host, 'console_failed'):
+                host.console_failed(job_id, code=failure_code)
         except Exception:
             pass
-        response = jsonify({'ok': False, 'error': {'code': str(getattr(exc, 'code', 'console_failed')), 'message': str(exc)}})
+        response = jsonify({'ok': False, 'error': {'code': failure_code, 'message': str(exc)}})
         response.headers['Cache-Control'] = 'no-store'
         return response, int(getattr(exc, 'status', 502) or 502)
     except VmHostUnavailable as exc:
