@@ -564,6 +564,7 @@ export default function VMManager(){
     const force = !!opts.force
     const hostId = opts.hostId || 'local'
     const isRemote = hostId !== 'local'
+    let consoleRecoveryError = null
     setBusyAction(key)
     try{
       if(cmd === 'start' && !isRemote){
@@ -593,7 +594,20 @@ export default function VMManager(){
       if(!res.ok || body.ok === false){
         throw new Error(body.error || body.message || `Failed to ${cmd} ${name}`)
       }
+      if(isRemote && (cmd === 'start' || cmd === 'restart')){
+        try{
+          await reconcileRemoteConsole(name, hostId)
+        }catch(error){
+          // The VM lifecycle action succeeded even if the guest console is
+          // still inside its bounded post-restart recovery window. Keep the
+          // distinction visible instead of reporting a false lifecycle failure.
+          consoleRecoveryError = error
+        }
+      }
       addToast({ title:`${name}`, message:`${cmd} request sent successfully${force ? ' (forced)' : ''}`, type:'success', timeout:5000 })
+      if(consoleRecoveryError){
+        addToast({ title:`${name} console`, message:`The VM ${cmd} succeeded, but the remote console is still recovering: ${String(consoleRecoveryError)}`, type:'warning', timeout:9000 })
+      }
     }catch(e){
       console.error('action error', e)
       addToast({ title:`${name}`, message:String(e), type:'error', timeout:8000 })

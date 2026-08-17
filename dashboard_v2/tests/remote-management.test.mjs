@@ -18,3 +18,9 @@ test('remote management lifecycle controls keep the selected host', () => {
   assert.match(source, /action\(cmd, name, \{ hostId \}\)/)
   assert.match(source, /actionParams\.set\('host_id', hostId\)/)
 })
+
+test('remote start and restart reconcile Moonlight before releasing the action', () => {
+  assert.match(source, /if\(isRemote && \(cmd === 'start' \|\| cmd === 'restart'\)\)/)
+  assert.match(source, /await reconcileRemoteConsole\(name, hostId\)/)
+  assert.match(source, /remote console is still recovering/)
+})
