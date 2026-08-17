@@ -625,7 +625,7 @@ def _start_remote_guest_network_recovery(*, host, host_id, job_id, name,
         current = host.provisioning_status(job_id)
         current_job = current.get('job') if isinstance(current, dict) else None
         current_state = str(current_job.get('state') or '') if isinstance(current_job, dict) else ''
-        if current_state == 'ready':
+        if current_state in ('ready', 'setup_failed:streaming', 'setup_failed:agent_restart'):
             if not hasattr(host, 'network_recovery'):
                 raise ConsoleOrchestrationError(
                     'The remote host lacks the retained-network recovery boundary.',
@@ -638,10 +638,10 @@ def _start_remote_guest_network_recovery(*, host, host_id, job_id, name,
                 guest_password=guest_password,
                 reverify=True,
             )
-        elif current_state in ('streaming_setup', 'setup_failed:streaming', 'setup_failed:agent_restart'):
-            # A concurrent request may have completed network revalidation
-            # before this worker started. Continue idempotently from the
-            # console gate rather than sending a second recovery request.
+        elif current_state == 'streaming_setup':
+            # A concurrent request may have moved the job into the console
+            # gate before this worker started. Continue idempotently from the
+            # retained network checkpoint rather than sending a second request.
             recovered = {'job': current_job}
         else:
             raise ConsoleOrchestrationError(

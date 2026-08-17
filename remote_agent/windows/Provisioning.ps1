@@ -1217,6 +1217,10 @@ function Invoke-EpicVMProvisioningGuestRecovery {
             PreviousTailnetDeviceId = $null
             PreviousManagementTransport = $null
             PreviousManagementReadyAt = $null
+            PreviousFailureStage = $null
+            PreviousFailureDetailCode = $null
+            PreviousErrorCode = $null
+            PreviousErrorMessage = $null
         }
         try {
             Invoke-EpicVMProvisioningStoreLocked -Action {
@@ -1234,13 +1238,13 @@ function Invoke-EpicVMProvisioningGuestRecovery {
                     ($stages -contains 'claim') -and ($stages -contains 'guest_setup') -and
                     ($stages -notcontains 'network_setup') -and ($stages -notcontains 'management_handoff') -and
                     [string]::IsNullOrWhiteSpace($claimHash)
-                $readyReverifyAllowed = $reverify -and $Job.state -eq 'ready' -and
+                $readyReverifyAllowed = $reverify -and $Job.state -in @('ready','setup_failed:streaming','setup_failed:agent_restart') -and
                     $claimConsumed -and $claimUsed -and $hasVmId -and
                     ($stages -contains 'claim') -and ($stages -contains 'guest_setup') -and
                     ($stages -contains 'network_setup') -and ($stages -contains 'management_handoff')
                 $recoveryContext.ReadyReverify = [bool]$readyReverifyAllowed
                 if (-not ($networkFailureRecoveryAllowed -or $readyReverifyAllowed)) {
-                    throw (New-EpicVMProvisioningError -Code 'network_recovery_not_allowed' -Message 'Only a retained, consumed network-stage failure or an explicitly requested ready-state revalidation may be recovered.' -Status 409)
+                    throw (New-EpicVMProvisioningError -Code 'network_recovery_not_allowed' -Message 'Only a retained, consumed network-stage failure or an explicitly requested retained guest-network revalidation may be recovered.' -Status 409)
                 }
                 if (-not $hasVmId) {
                     throw (New-EpicVMProvisioningError -Code 'network_recovery_vm_missing' -Message 'The retained VM identity is unavailable.' -Status 409)
@@ -1252,6 +1256,10 @@ function Invoke-EpicVMProvisioningGuestRecovery {
                     $recoveryContext.PreviousTailnetDeviceId = Get-EpicVMProperty -Object $Job -Name 'tailnetDeviceId' -Default $null
                     $recoveryContext.PreviousManagementTransport = Get-EpicVMProperty -Object $Job -Name 'managementTransport' -Default $null
                     $recoveryContext.PreviousManagementReadyAt = Get-EpicVMProperty -Object $Job -Name 'managementReadyAt' -Default $null
+                    $recoveryContext.PreviousFailureStage = Get-EpicVMProperty -Object $Job -Name 'failureStage' -Default $null
+                    $recoveryContext.PreviousFailureDetailCode = Get-EpicVMProperty -Object $Job -Name 'failureDetailCode' -Default $null
+                    $recoveryContext.PreviousErrorCode = Get-EpicVMProperty -Object $Job -Name 'errorCode' -Default $null
+                    $recoveryContext.PreviousErrorMessage = Get-EpicVMProperty -Object $Job -Name 'errorMessage' -Default $null
                 }
                 $Job.state = 'network_setup'
                 $Job.failureStage = $null
@@ -1339,10 +1347,18 @@ function Invoke-EpicVMProvisioningGuestRecovery {
                     $Job.tailnetDeviceId = $recoveryContext.PreviousTailnetDeviceId
                     $Job.managementTransport = $recoveryContext.PreviousManagementTransport
                     $Job.managementReadyAt = $recoveryContext.PreviousManagementReadyAt
-                    $Job.failureStage = $null
-                    $Job.failureDetailCode = $null
-                    $Job.errorCode = $null
-                    $Job.errorMessage = $null
+                    if ($Job.state -eq 'ready') {
+                        $Job.failureStage = $null
+                        $Job.failureDetailCode = $null
+                        $Job.errorCode = $null
+                        $Job.errorMessage = $null
+                    }
+                    else {
+                        $Job.failureStage = $recoveryContext.PreviousFailureStage
+                        $Job.failureDetailCode = $recoveryContext.PreviousFailureDetailCode
+                        $Job.errorCode = $recoveryContext.PreviousErrorCode
+                        $Job.errorMessage = $recoveryContext.PreviousErrorMessage
+                    }
                     $Job.lastAttemptCode = $code
                     $Job.consoleRepairOutcome = 'failed'
                     $Job.consoleRepairErrorCode = $code

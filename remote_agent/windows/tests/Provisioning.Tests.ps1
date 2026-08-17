@@ -481,6 +481,43 @@ Describe 'EpicVM network-stage recovery' {
         (Get-Content -LiteralPath $config.ProvisioningStatePath -Raw) | Should -Not -Match 'transient-password|operator'
     }
 
+    It 'revalidates a retained streaming failure without issuing a new claim' {
+        $config=Get-EpicVMDefaultConfig
+        $config.ProvisioningStatePath=Join-Path $TestDrive 'streaming-network-recovery.json'
+        $script:streamingNetworkDirectCalls=0
+        $provider=New-ProvisioningTestProvider
+        $provider | Add-Member NoteProperty PowerShellDirectInvoker { param($name,$credential,$scriptBlock,$args)
+            $script:streamingNetworkDirectCalls++
+            if($scriptBlock.ToString() -match 'Get-NetIPAddress') { return @{ok=$true;ip='100.111.82.3'} }
+            return @{ok=$true;managementEndpoint=$true;firewallScoped=$true}
+        }
+        $provider | Add-Member NoteProperty TailscaleOAuthClientId 'client-id'
+        $provider | Add-Member NoteProperty TailscaleOAuthSecretPath 'mock://oauth-secret'
+        $provider | Add-Member NoteProperty TailscaleTailnet 'example.ts.net'
+        $provider | Add-Member NoteProperty TailscaleOAuthSecretLoader { [PSCredential]::new('oauth-secret',(ConvertTo-SecureString ('z' * 24) -AsPlainText -Force)) }
+        $provider | Add-Member NoteProperty TailscaleOAuthInvoker { @{access_token='access'} }
+        $provider | Add-Member NoteProperty TailscaleHttpInvoker { param($method,$url,$headers,$body) @{devices=@(@{id='device-streaming-network';hostname='streaming-network-recoverable';addresses=@('100.111.82.3')})} }
+        $state=New-EpicVMAgentState -Config $config -Token 'agent-token' -Provider $provider
+        $job=New-EpicVMProvisioningJobObject -Id 'job-streaming-network-recovery' -Name 'streaming-network-recoverable' -Profile 'standard' -State 'setup_failed:streaming'
+        $job.vmId='5b3c52d1-7fd9-4a85-86f8-467d54fa0710'
+        $job.claimConsumed=$true; $job.claimUsed=$true; $job.claimHash=$null
+        $job.completedStages=@('claim','guest_setup','network_setup','management_handoff','streaming_setup')
+        $job.guestSetupVerified=$true; $job.managementTransport='tailscale_winrm'; $job.managementReadyAt=[DateTime]::UtcNow.ToString('o'); $job.tailnetIp='100.111.82.1'; $job.tailnetDeviceId='device-old-streaming-network'
+        $job.failureStage='streaming'; $job.errorCode='tailscale_unreachable'; $job.errorMessage='Automatic Sunshine setup failed; the VM and stopped console data were retained.'
+        $state.Provisioning.Jobs[$job.id]=$job
+        Save-EpicVMProvisioningStore -Store $state.Provisioning
+
+        Invoke-EpicVMProvisioningNetworkRecovery -State $state -Job $job -Request @{username='operator';password='transient-password';reverify=$true} | Out-Null
+
+        $job.state | Should -Be 'streaming_setup'
+        $job.tailnetIp | Should -Be '100.111.82.3'
+        $job.tailnetDeviceId | Should -Be 'device-streaming-network'
+        $job.managementTransport | Should -Be 'tailscale_winrm'
+        $job.claimConsumed | Should -BeTrue
+        $script:streamingNetworkDirectCalls | Should -Be 2
+        (Get-Content -LiteralPath $config.ProvisioningStatePath -Raw) | Should -Not -Match 'transient-password|operator'
+    }
+
     It 'rejects network recovery outside the exact retained boundary' {
         $config=Get-EpicVMDefaultConfig
         $config.ProvisioningStatePath=Join-Path $TestDrive 'network-recovery-reject.json'

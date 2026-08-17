@@ -230,6 +230,62 @@ def test_guest_network_recovery_worker_repairs_with_new_verified_address(monkeyp
     assert "transient-password" not in repr(module._CONSOLE_RETRY_TASKS)
 
 
+def test_guest_network_recovery_worker_revalidates_streaming_failure(monkeypatch):
+    module = load_app(monkeypatch)
+    task_key = ("epic-pc", "job-streaming-network")
+    module._CONSOLE_RETRY_TASKS.clear()
+    module._CONSOLE_RETRY_TASKS[task_key] = {
+        "operationId": "op-streaming-network",
+        "status": "pending",
+        "startedAt": 1,
+        "kind": "network_recovery",
+    }
+    calls = []
+
+    class Host:
+        def provisioning_status(self, job_id):
+            return {"job": {"state": "setup_failed:streaming", "name": "testprovvm-autonomous-1"}}
+
+        def network_recovery(self, job_id, **kwargs):
+            calls.append(("network_recovery", job_id, kwargs))
+            return {"job": {"state": "streaming_setup", "tailnetIp": "100.124.226.19"}}
+
+        def console_credentials(self, job_id, **kwargs):
+            calls.append(("console_credentials", job_id, kwargs))
+            return {"ok": True}
+
+        def console_complete(self, job_id, **kwargs):
+            calls.append(("console_complete", job_id, kwargs))
+            return {"ok": True}
+
+    class Orchestrator:
+        def repair_staged(self, *args, **kwargs):
+            calls.append(("repair_staged", args, kwargs))
+            return {"ok": True, "routePrefix": "/vm/testprovvm-autonomous-1--epic-pc/", "guestTcpVerified": True}
+
+    module._start_remote_guest_network_recovery(
+        host=Host(),
+        host_id="epic-pc",
+        job_id="job-streaming-network",
+        name="testprovvm-autonomous-1",
+        route_name="testprovvm-autonomous-1--epic-pc",
+        guest_username="operator",
+        guest_password="transient-password",
+        sunshine_username="sunshine",
+        sunshine_password="sunshine-password",
+        orchestrator=Orchestrator(),
+        operation_id="op-streaming-network",
+    )
+
+    assert calls[0] == (
+        "network_recovery",
+        "job-streaming-network",
+        {"guest_username": "operator", "guest_password": "transient-password", "reverify": True},
+    )
+    assert any(item[0] == "repair_staged" and item[2]["guest_ip"] == "100.124.226.19" for item in calls)
+    assert module._CONSOLE_RETRY_TASKS[task_key]["status"] == "ready"
+
+
 def test_forward_auth_does_not_preflight_unrelated_vm_requests(monkeypatch, tmp_path):
     module = load_app(monkeypatch)
     monkeypatch.setenv("BLOBEDASH_STATE", str(tmp_path))
