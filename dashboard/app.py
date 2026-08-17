@@ -14,11 +14,13 @@ from branding import PRODUCT_NAME, DASHBOARD_TITLE, MANAGER_NAME, AUTH_REALM
 try:
     from .vm_hosts import LocalDockerHost, VmHostRegistry, VmHostUnavailable
     from .remote_hosts import ConfiguredVmHostRegistry, RemoteHostConfigError, redact_host_record, upsert_remote_host_config
+    from .remote_agent_client import normalize_remote_vm_record
     from .guacamole_orchestrator import GuacamoleOrchestrator, ConsoleOrchestrationError
     from .moonlight_orchestrator import MoonlightOrchestrator
 except ImportError:
     from vm_hosts import LocalDockerHost, VmHostRegistry, VmHostUnavailable
     from remote_hosts import ConfiguredVmHostRegistry, RemoteHostConfigError, redact_host_record, upsert_remote_host_config
+    from remote_agent_client import normalize_remote_vm_record
     from guacamole_orchestrator import GuacamoleOrchestrator, ConsoleOrchestrationError
     from moonlight_orchestrator import MoonlightOrchestrator
 try:
@@ -3256,6 +3258,42 @@ def api_set_vm_title(name):
 @app.get('/dashboard/api/vm-settings/<name>')
 @auth_required
 def api_get_vm_settings(name):
+    requested_host_id = str(request.values.get('host_id') or request.values.get('host') or 'local').strip() or 'local'
+    if requested_host_id != 'local':
+        try:
+            host = _vm_host(requested_host_id)
+            if getattr(host, 'kind', 'local') == 'remote':
+                _ensure_remote_vm_exists(host, name)
+                envelope = host.status(name)
+                raw_vm = envelope.get('vm') if isinstance(envelope, dict) else envelope
+                vm = normalize_remote_vm_record(raw_vm if isinstance(raw_vm, dict) else {})
+                return jsonify({
+                    'ok': True,
+                    'name': name,
+                    'placement': 'remote',
+                    'host_id': requested_host_id,
+                    'host_name': getattr(host, 'host_name', requested_host_id),
+                    'title': '',
+                    'hostOverride': '',
+                    'pathOverride': '',
+                    'faviconUrl': '',
+                    'accessMode': 'public',
+                    'assignedUsers': [],
+                    'state': vm.get('state', 'Unknown'),
+                    'status': vm.get('status', 'Unknown'),
+                    'provider_status': vm.get('provider_status', ''),
+                    'running': bool(vm.get('running', False)),
+                    'vm_id': vm.get('id', vm.get('Id', '')),
+                    'profile': vm.get('profile', 'standard'),
+                    'cpuUsagePercent': vm.get('cpuUsagePercent'),
+                    'memoryAssignedBytes': vm.get('memoryAssignedBytes'),
+                    'uptimeSeconds': vm.get('uptimeSeconds'),
+                })
+        except VmHostUnavailable as exc:
+            return _vm_host_error_response(exc)
+        except Exception as exc:
+            return jsonify({'ok': False, 'error': str(exc)}), 502
+
     cfg = _load_dashboard_settings()
     vm_titles = cfg.get('vm_titles', {}) if isinstance(cfg.get('vm_titles', {}), dict) else {}
     meta = _instance_meta(name)
@@ -3279,6 +3317,16 @@ def api_get_vm_settings(name):
 def api_set_vm_settings(name):
     try:
         data = request.get_json(silent=True) or {}
+        requested_host_id = str((data.get('host_id') if isinstance(data, dict) else None) or request.values.get('host_id') or 'local').strip() or 'local'
+        if requested_host_id != 'local':
+            host = _vm_host(requested_host_id)
+            if getattr(host, 'kind', 'local') == 'remote':
+                _ensure_remote_vm_exists(host, name)
+                return jsonify({
+                    'ok': False,
+                    'code': 'remote_settings_read_only',
+                    'error': 'Remote VM presentation settings are managed on the dashboard host.'
+                }), 409
         host_override = (data.get('hostOverride') if isinstance(data, dict) else None)
         title = (data.get('title') if isinstance(data, dict) else None)
         access_mode = (data.get('accessMode') if isinstance(data, dict) else None)
@@ -3315,6 +3363,8 @@ def api_set_vm_settings(name):
                 return jsonify({'ok': False, 'error': err or out or 'Failed recreating VM with updated settings', 'returncode': rc}), 500
 
         return api_get_vm_settings(name)
+    except VmHostUnavailable as exc:
+        return _vm_host_error_response(exc)
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
@@ -4849,7 +4899,26 @@ def api_vm_status(name):
         host = _vm_host()
         _ensure_remote_vm_exists(host, name)
         if getattr(host, 'kind', 'local') == 'remote':
-            return jsonify({'ok': True, **host.status(name), 'placement': 'remote', 'host_id': host.host_id, 'host_name': host.host_name})
+            envelope = host.status(name)
+            envelope = dict(envelope) if isinstance(envelope, dict) else {}
+            raw_vm = envelope.get('vm') if isinstance(envelope.get('vm'), dict) else envelope
+            vm = normalize_remote_vm_record(raw_vm)
+            envelope.update({
+                'ok': bool(envelope.get('ok', True)),
+                'vm': vm,
+                'placement': 'remote',
+                'host_id': host.host_id,
+                'host_name': host.host_name,
+                # Keep the legacy wrapper contract flat while retaining the
+                # full normalized agent record under ``vm``.
+                'state': vm.get('state', 'Unknown'),
+                'status': vm.get('status', 'Unknown'),
+                'provider_status': vm.get('provider_status', ''),
+                'running': bool(vm.get('running', False)),
+                'vm_id': vm.get('id', vm.get('Id', '')),
+                'profile': vm.get('profile', 'standard'),
+            })
+            return jsonify(envelope)
         return jsonify(_vm_status_payload(name))
     except VmHostUnavailable as exc:
         return _vm_host_error_response(exc)

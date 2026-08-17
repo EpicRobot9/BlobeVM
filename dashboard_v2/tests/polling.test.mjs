@@ -15,6 +15,12 @@ test('instanceNamesKey changes when an instance is added or removed', () => {
   assert.notEqual(initial, instanceNamesKey([]))
 })
 
+test('instanceNamesKey distinguishes the same VM name on different hosts', () => {
+  assert.notEqual(
+    instanceNamesKey([{ name: 'alpha', host_id: 'local' }]),
+    instanceNamesKey([{ name: 'alpha', host_id: 'epic-pc' }])
+  )
+})
 test('pollDelayMs clamps visible polling to the existing minimum', () => {
   assert.equal(pollDelayMs({ visible: true, intervalMs: 100 }), 800)
   assert.equal(pollDelayMs({ visible: true, intervalMs: 3000 }), 3000)

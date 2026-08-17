@@ -151,6 +151,23 @@ Describe 'Hyper-V provider lifecycle safety' {
         $restartCall.Parameters.Force | Should -BeTrue
     }
 
+    It 'uses the actual Hyper-V state instead of generic provider health text' {
+        $vm = [pscustomobject]@{
+            Name = 'alpha'
+            Id = '11111111-1111-1111-1111-111111111111'
+            State = 'Off'
+            Status = 'Operating normally'
+            Notes = 'EpicVM-Managed: true'
+            Path = 'C:\EpicVM\VMs\alpha'
+        }
+
+        $info = ConvertTo-EpicVMHyperVVMInfo -VM $vm
+
+        $info.state | Should -Be 'Off'
+        $info.status | Should -Be 'Off'
+        $info.providerStatus | Should -Be 'Operating normally'
+    }
+
     It 'refuses to delete a VM without the EpicVM ownership marker' {
         { & $provider.DeleteVM 'manual' } | Should -Throw '*not owned by EpicVM*'
         @($script:commandCalls | Where-Object Name -eq 'Remove-VM') | Should -BeNullOrEmpty

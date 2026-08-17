@@ -214,7 +214,12 @@ function ConvertTo-EpicVMHyperVVMInfo {
     $name = [string](Get-EpicVMHyperVValue -Object $VM -Name 'Name' -Default '')
     $id = [string](Get-EpicVMHyperVValue -Object $VM -Name 'Id' -Default '')
     $state = [string](Get-EpicVMHyperVValue -Object $VM -Name 'State' -Default 'Unknown')
-    $status = Get-EpicVMHyperVValue -Object $VM -Name 'Status' -Default $null
+    if ([string]::IsNullOrWhiteSpace($state)) { $state = 'Unknown' }
+    # Hyper-V's Status field is provider health text (often "Operating normally"),
+    # not the power state shown by Get-VM.State. Preserve it for diagnostics, but
+    # expose the actual VM state as the dashboard-facing status.
+    $providerStatus = Get-EpicVMHyperVValue -Object $VM -Name 'Status' -Default $null
+    $status = $state
     $memory = Get-EpicVMHyperVValue -Object $VM -Name 'MemoryAssigned' -Default $null
     $cpuUsage = Get-EpicVMHyperVValue -Object $VM -Name 'CPUUsage' -Default $null
     $uptime = Get-EpicVMHyperVValue -Object $VM -Name 'Uptime' -Default $null
@@ -231,6 +236,7 @@ function ConvertTo-EpicVMHyperVVMInfo {
         id = $id
         state = $state
         status = $status
+        providerStatus = $providerStatus
         managed = Test-EpicVMHyperVOwned -VM $VM
         profile = $profile
         path = $path

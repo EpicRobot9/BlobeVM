@@ -796,3 +796,213 @@ def test_admin_auth_accepts_hash_and_rejects_plaintext_fallback(monkeypatch):
     assert user == "Epic"
     assert module._admin_password_matches("new-password", verifier) is True
     assert module._admin_password_matches("legacy-password", verifier) is False
+
+
+def test_remote_inventory_uses_vm_state_for_dashboard_status():
+    host = RemoteAgentHost({
+        "id": "epic-pc",
+        "display_name": "Epic PC",
+        "agent_url": "http://100.64.0.2:8765",
+        "token": "token",
+    })
+    host.client = SimpleNamespace(
+        health=lambda: {"ok": True},
+        capabilities=lambda: {},
+    )
+
+    inventory = host.normalize_inventory([{
+        "name": "alpha",
+        "state": "Off",
+        "status": "Operating normally",
+    }])
+
+    assert inventory[0]["state"] == "Off"
+    assert inventory[0]["status"] == "Off"
+    assert inventory[0]["provider_status"] == "Operating normally"
+    assert inventory[0]["running"] is False
+
+
+def test_remote_status_normalizes_nested_vm_state():
+    host = RemoteAgentHost({
+        "id": "epic-pc",
+        "display_name": "Epic PC",
+        "agent_url": "http://100.64.0.2:8765",
+        "token": "token",
+    })
+    host.client = SimpleNamespace(
+        status=lambda name: {
+            "ok": True,
+            "vm": {"name": name, "state": "Running", "status": "Operating normally"},
+        },
+    )
+
+    response = host.status("alpha")
+
+    assert response["vm"]["state"] == "Running"
+    assert response["vm"]["status"] == "Running"
+    assert response["vm"]["provider_status"] == "Operating normally"
+    assert response["vm"]["running"] is True
+
+
+def test_remote_manage_settings_reads_selected_remote_host(monkeypatch, tmp_path):
+    monkeypatch.setenv("BLOBEVM_ALLOW_INSECURE_DASHBOARD", "1")
+    monkeypatch.setenv("BLOBEDASH_STATE", str(tmp_path))
+    import importlib
+
+    module = importlib.import_module("dashboard.app")
+
+    class FakeHost:
+        kind = "remote"
+        host_id = "epic-pc"
+        host_name = "Epic PC"
+
+        def list_vms(self):
+            return [{"name": "alpha"}]
+
+        def status(self, name):
+            return {"ok": True, "vm": {"name": name, "id": "vm-1", "state": "Off", "status": "Off", "profile": "gaming"}}
+
+    class FakeRegistry:
+        def refresh(self):
+            return None
+
+        def get(self, host_id="local"):
+            assert host_id == "epic-pc"
+            return FakeHost()
+
+    monkeypatch.setattr(module, "VM_HOST_REGISTRY", FakeRegistry())
+    response = module.app.test_client().get("/dashboard/api/vm-settings/alpha?host_id=epic-pc")
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["placement"] == "remote"
+    assert body["host_id"] == "epic-pc"
+    assert body["state"] == "Off"
+    assert body["status"] == "Off"
+    assert body["vm_id"] == "vm-1"
+
+
+def test_remote_lifecycle_routes_forward_start_stop_restart_to_selected_host(monkeypatch, tmp_path):
+    monkeypatch.setenv("BLOBEVM_ALLOW_INSECURE_DASHBOARD", "1")
+    monkeypatch.setenv("BLOBEDASH_STATE", str(tmp_path))
+    import importlib
+
+    module = importlib.import_module("dashboard.app")
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    class FakeHost:
+        kind = "remote"
+        host_id = "epic-pc"
+        host_name = "Epic PC"
+
+        def list_vms(self):
+            return [{"name": "alpha"}]
+
+        def run_manager(self, action, name, **kwargs):
+            calls.append(("run_manager", action, name, kwargs))
+            return Result()
+
+        def check_call(self, action, name, **kwargs):
+            calls.append(("check_call", action, name, kwargs))
+
+    class FakeRegistry:
+        def refresh(self):
+            return None
+
+        def get(self, host_id="local"):
+            assert host_id == "epic-pc"
+            return FakeHost()
+
+    monkeypatch.setattr(module, "VM_HOST_REGISTRY", FakeRegistry())
+    client = module.app.test_client()
+
+    assert client.post("/dashboard/api/start/alpha?host_id=epic-pc").status_code == 200
+    assert client.post("/dashboard/api/stop/alpha?host_id=epic-pc").status_code == 200
+    assert client.post("/dashboard/api/restart/alpha?host_id=epic-pc").status_code == 200
+    assert [(entry[0], entry[1]) for entry in calls] == [
+        ("run_manager", "start"),
+        ("check_call", "stop"),
+        ("run_manager", "restart"),
+    ]
+    assert all(entry[2] == "alpha" for entry in calls)
+
+
+def test_remote_status_endpoint_flattens_live_state_for_legacy_ui(monkeypatch, tmp_path):
+    monkeypatch.setenv("BLOBEVM_ALLOW_INSECURE_DASHBOARD", "1")
+    monkeypatch.setenv("BLOBEDASH_STATE", str(tmp_path))
+    import importlib
+
+    module = importlib.import_module("dashboard.app")
+
+    class FakeHost:
+        kind = "remote"
+        host_id = "epic-pc"
+        host_name = "Epic PC"
+
+        def list_vms(self):
+            return [{"name": "alpha"}]
+
+        def status(self, name):
+            return {
+                "ok": True,
+                "vm": {
+                    "name": name,
+                    "state": "Running",
+                    "status": "Operating normally",
+                    "profile": "gaming",
+                },
+            }
+
+    class FakeRegistry:
+        def refresh(self):
+            return None
+
+        def get(self, host_id="local"):
+            assert host_id == "epic-pc"
+            return FakeHost()
+
+    monkeypatch.setattr(module, "VM_HOST_REGISTRY", FakeRegistry())
+    response = module.app.test_client().get("/dashboard/api/vm/alpha/status?host_id=epic-pc")
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["state"] == "Running"
+    assert body["status"] == "Running"
+    assert body["provider_status"] == "Operating normally"
+    assert body["running"] is True
+    assert body["vm"]["state"] == "Running"
+
+
+def test_remote_manage_settings_cannot_write_local_presentation_state(monkeypatch, tmp_path):
+    monkeypatch.setenv("BLOBEVM_ALLOW_INSECURE_DASHBOARD", "1")
+    monkeypatch.setenv("BLOBEDASH_STATE", str(tmp_path))
+    import importlib
+
+    module = importlib.import_module("dashboard.app")
+
+    class FakeHost:
+        kind = "remote"
+        host_id = "epic-pc"
+
+        def list_vms(self):
+            return [{"name": "alpha"}]
+
+    class FakeRegistry:
+        def refresh(self):
+            return None
+
+        def get(self, host_id="local"):
+            return FakeHost()
+
+    monkeypatch.setattr(module, "VM_HOST_REGISTRY", FakeRegistry())
+    response = module.app.test_client().post(
+        "/dashboard/api/vm-settings/alpha?host_id=epic-pc",
+        json={"host_id": "epic-pc", "title": "should-not-write"},
+    )
+    assert response.status_code == 409
+    assert response.get_json()["code"] == "remote_settings_read_only"

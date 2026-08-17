@@ -20,6 +20,64 @@ except ImportError:  # pragma: no cover - direct script/module loading
     from vm_hosts import VmHostUnavailable
 
 
+_REMOTE_VM_STATE_ALIASES = {
+    "running": "Running",
+    "on": "Running",
+    "poweredon": "Running",
+    "started": "Running",
+    "off": "Off",
+    "stopped": "Off",
+    "poweredoff": "Off",
+    "paused": "Paused",
+    "saved": "Saved",
+    "starting": "Starting",
+    "stopping": "Stopping",
+    "unknown": "Unknown",
+}
+_REMOTE_PROVIDER_HEALTH_STATES = {"operatingnormally", "healthy", "ok", "normal"}
+
+
+def _remote_state_key(value: Any) -> str:
+    return "".join(character for character in str(value or "").casefold() if character.isalnum())
+
+
+def _canonical_remote_vm_state(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "Unknown"
+    return _REMOTE_VM_STATE_ALIASES.get(_remote_state_key(text), text)
+
+
+def normalize_remote_vm_record(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize a remote VM record around its power state.
+
+    Hyper-V exposes ``State`` (the VM power state) and ``Status`` (provider
+    health text such as ``Operating normally``).  The latter is useful for
+    diagnostics but must never become the dashboard's VM status.
+    """
+    item = dict(raw)
+    raw_state = item.get("state", item.get("State"))
+    raw_status = item.get("status", item.get("Status"))
+    provider_status = item.get("provider_status", item.get("providerStatus"))
+    if provider_status in (None, ""):
+        provider_status = raw_status
+
+    if raw_state in (None, "") or not str(raw_state).strip():
+        # Older agents may not return State. Accept a non-health status as a
+        # compatibility fallback, but fail closed for generic provider text.
+        candidate = str(raw_status or "").strip()
+        raw_state = "Unknown" if _remote_state_key(candidate) in _REMOTE_PROVIDER_HEALTH_STATES else candidate
+
+    state = _canonical_remote_vm_state(raw_state)
+    item["state"] = state
+    item["status"] = state
+    if provider_status not in (None, ""):
+        item["provider_status"] = str(provider_status)
+    item["running"] = state.casefold() == "running"
+    item.setdefault("exists", True)
+    return item
+
+
 class RemoteAgentError(RuntimeError):
     """A transport or agent-level failure, with no secret material in the text."""
 
@@ -585,9 +643,8 @@ class RemoteAgentHost:
     def normalize_inventory(self, instances: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
         result = []
         for raw in instances:
-            item = dict(raw)
+            item = normalize_remote_vm_record(raw)
             item.setdefault("name", "")
-            item.setdefault("status", item.get("state", "unknown"))
             item.setdefault("url", item.get("url", ""))
             item.update({
                 "placement": "remote",
@@ -646,7 +703,16 @@ class RemoteAgentHost:
 
     def status(self, name: str) -> dict[str, Any]:
         try:
-            return self.client.status(name)
+            response = self.client.status(name)
+            if not isinstance(response, Mapping):
+                return response
+            normalized = dict(response)
+            vm = normalized.get("vm")
+            if isinstance(vm, Mapping):
+                normalized["vm"] = normalize_remote_vm_record(vm)
+            elif "state" in normalized or "status" in normalized or "State" in normalized or "Status" in normalized:
+                normalized = normalize_remote_vm_record(normalized)
+            return normalized
         except RemoteAgentError as exc:
             raise self._host_error(exc) from exc
 

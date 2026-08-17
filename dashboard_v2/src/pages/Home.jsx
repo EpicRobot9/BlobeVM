@@ -4,6 +4,7 @@ import { Cpu, Memory, HardDrives, Network, Plus, ArrowRight, PlayCircle, CheckCi
 import apiFetch from '../lib/fetchWrapper'
 import Button from '../components/Button'
 import { formatBytes, formatDuration } from '../lib/formatters.js'
+import { normalizeVmStatus } from '../lib/vmStatus.js'
 
 function Metric({icon:Icon,label,value,detail,tone='ok'}){
   return <div className="host-metric"><div className="metric-label"><Icon size={21}/><span>{label}</span></div><strong>{value}</strong><div className="metric-track"><i style={{width:`${Math.min(Number.parseFloat(value)||0,100)}%`}}/></div><div className="metric-foot"><span>{detail}</span><em className={`tone-${tone}`}>{tone === 'ok' ? 'Healthy' : 'Attention'}</em></div></div>
@@ -53,7 +54,7 @@ export default function Home(){
 
   const host = overview.host || {}; const stats = overview.stats || {}
   const fleetPending = fleet === null
-  const instances = fleet || []
+  const instances = (fleet || []).map(normalizeVmStatus)
   const activity = overview.activity || []
   const cpu = Number(stats.cpu?.usage); const memory = stats.memory || {}; const disk = stats.disk?.[0] || {}; const network = stats.network || {}
   const running = instances.filter(vm=>String(vm.status || '').toLowerCase().includes('running')).length

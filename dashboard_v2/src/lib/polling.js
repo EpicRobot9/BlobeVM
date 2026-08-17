@@ -4,7 +4,12 @@ const DEFAULT_HIDDEN_DELAY_MS = 60_000
 export function instanceNamesKey(instances = []) {
   return [...new Set(
     instances
-      .map(instance => String(instance?.name ?? ''))
+      .map(instance => {
+        const name = String(instance?.name ?? '')
+        if(!name) return ''
+        const hostId = String(instance?.host_id ?? 'local')
+        return `${hostId}:${name}`
+      })
       .filter(Boolean)
   )].sort().join('\u0000')
 }

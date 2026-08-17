@@ -8,8 +8,13 @@ import { instanceNamesKey, pollDelayMs } from '../lib/polling'
 import { canCacheVmSettingsResponse, clearRemovedVmState, createLoadInFlightRunner, createLogSelectionTracker } from '../lib/vmManagerRaces'
 import { canUseRemotePlacement, createPlacementPayload, getEligibleRemoteHosts, getPlacementValidationReason, hostOptionLabel, normalizeHostInventory, provisioningProfileDisabledReason, remotePlacementDisabledReason } from '../lib/hostPlacement'
 import { canClaimProvisioningJob, canOpenInventoryVm, canOpenProvisionedVm, canRetryProvisioningConsole, deprovisioningPayload, gamingPartitionPayload, provisioningClaimPayload, provisioningConsoleRetryPayload, provisioningCreatePayload, provisioningFailureReason, provisioningProgress } from '../lib/provisioningUi'
+import { normalizeVmStatus } from '../lib/vmStatus.js'
 
 const OPTIONAL_REQUEST_TIMEOUT_MS = 2500
+
+function vmSettingsKey(name, hostId = 'local'){
+  return `${String(hostId || 'local')}\u0000${String(name || '')}`
+}
 
 function fetchOptional(path){
   const controller = new AbortController()
@@ -327,24 +332,26 @@ export default function VMManager(){
   if(!loadRunnerRef.current) loadRunnerRef.current = createLoadInFlightRunner()
   if(!logSelectionTrackerRef.current) logSelectionTrackerRef.current = createLogSelectionTracker()
 
-  async function fetchVmSettings(name, requestSequence = loadSequenceRef.current){
-    if(vmSettingsCacheRef.current.has(name)) return vmSettingsCacheRef.current.get(name)
-    const existing = vmSettingsInFlightRef.current.get(name)
+  async function fetchVmSettings(name, hostId = 'local', requestSequence = loadSequenceRef.current){
+    const cacheKey = vmSettingsKey(name, hostId)
+    if(vmSettingsCacheRef.current.has(cacheKey)) return vmSettingsCacheRef.current.get(cacheKey)
+    const existing = vmSettingsInFlightRef.current.get(cacheKey)
     if(existing) return existing
     const requestGeneration = vmSettingsGenerationRef.current
+    const query = hostId && hostId !== 'local' ? `?host_id=${encodeURIComponent(hostId)}` : ''
     const request = (async()=>{
       try{
-        const resp = await apiFetch(`/vm-settings/${encodeURIComponent(name)}`)
+        const resp = await apiFetch(`/vm-settings/${encodeURIComponent(name)}${query}`)
         const data = await resp.json().catch(()=>({ ok:false }))
-        if(resp.ok && data && data.ok !== false && requestSequence === loadSequenceRef.current && requestGeneration === vmSettingsGenerationRef.current && vmSettingsNamesRef.current.has(name)) vmSettingsCacheRef.current.set(name, data)
+        if(resp.ok && data && data.ok !== false && requestSequence === loadSequenceRef.current && requestGeneration === vmSettingsGenerationRef.current && vmSettingsNamesRef.current.has(cacheKey)) vmSettingsCacheRef.current.set(cacheKey, data)
         return data
       }catch(_e){
         return null
       }finally{
-        if(vmSettingsInFlightRef.current.get(name) === request) vmSettingsInFlightRef.current.delete(name)
+        if(vmSettingsInFlightRef.current.get(cacheKey) === request) vmSettingsInFlightRef.current.delete(cacheKey)
       }
     })()
-    vmSettingsInFlightRef.current.set(name, request)
+    vmSettingsInFlightRef.current.set(cacheKey, request)
     return request
   }
 
@@ -402,36 +409,39 @@ export default function VMManager(){
       const profileMap = (optJ && optJ.profiles) || {}
       const titleMap = (settingsJ && settingsJ.vm_titles) || {}
 
-      const listedInstances = j.instances || []
+      const listedInstances = (j.instances || []).map(normalizeVmStatus)
       const namesKey = instanceNamesKey(listedInstances)
       if(namesKey !== instanceNamesKeyRef.current){
         instanceNamesKeyRef.current = namesKey
-        const currentNames = new Set(listedInstances.map(it => it.name))
-        const removedNames = [...vmSettingsNamesRef.current].filter(name => !currentNames.has(name))
+        const currentKeys = new Set(listedInstances.map(it => vmSettingsKey(it.name, it.host_id || 'local')))
+        const removedKeys = [...vmSettingsNamesRef.current].filter(key => !currentKeys.has(key))
         vmSettingsGenerationRef.current += 1
-        vmSettingsNamesRef.current = currentNames
-        for(const name of vmSettingsCacheRef.current.keys()){
-          if(!currentNames.has(name)) vmSettingsCacheRef.current.delete(name)
+        vmSettingsNamesRef.current = currentKeys
+        for(const key of vmSettingsCacheRef.current.keys()){
+          if(!currentKeys.has(key)) vmSettingsCacheRef.current.delete(key)
         }
-        for(const name of vmSettingsInFlightRef.current.keys()){
-          if(!currentNames.has(name)) vmSettingsInFlightRef.current.delete(name)
+        for(const key of vmSettingsInFlightRef.current.keys()){
+          if(!currentKeys.has(key)) vmSettingsInFlightRef.current.delete(key)
         }
-        clearRemovedVmState(prevStatsRef.current, lastAnnounceRef.current, removedNames)
+        clearRemovedVmState(prevStatsRef.current, lastAnnounceRef.current, removedKeys.map(key => key.split('\u0000').pop()))
       }
-      const missingSettings = listedInstances.filter(it => !vmSettingsCacheRef.current.has(it.name))
-      await Promise.all(missingSettings.map(it => fetchVmSettings(it.name, requestSequence)))
+      const missingSettings = listedInstances.filter(it => !vmSettingsCacheRef.current.has(vmSettingsKey(it.name, it.host_id || 'local')))
+      await Promise.all(missingSettings.map(it => fetchVmSettings(it.name, it.host_id || 'local', requestSequence)))
       if(!mountedRef.current || requestSequence !== loadSequenceRef.current) return
       const vmSettingsMap = Object.fromEntries([...vmSettingsCacheRef.current.entries()])
 
-      const insts = (j.instances || []).map(it => ({
-        ...it,
-        _stats: statsMap[it.name] || statsMap[''+it.name] || statsMap[it.name],
-        _optimizer: optimizerVmMap[it.name] || {},
-        _profile: profileMap[it.name] || 'desktop',
-        _title: vmSettingsMap[it.name]?.title || titleMap[it.name] || '',
-        _hostOverride: vmSettingsMap[it.name]?.hostOverride || '',
-        _faviconUrl: vmSettingsMap[it.name]?.faviconUrl || ''
-      }))
+      const insts = listedInstances.map(it => {
+        const settings = vmSettingsMap[vmSettingsKey(it.name, it.host_id || 'local')] || {}
+        return {
+          ...it,
+          _stats: statsMap[it.name] || statsMap[''+it.name] || statsMap[it.name],
+          _optimizer: optimizerVmMap[it.name] || {},
+          _profile: profileMap[it.name] || it.profile || 'desktop',
+          _title: settings.title || titleMap[it.name] || '',
+          _hostOverride: settings.hostOverride || '',
+          _faviconUrl: settings.faviconUrl || ''
+        }
+      })
 
       try{
         const prev = prevStatsRef.current || {}
@@ -861,29 +871,49 @@ export default function VMManager(){
   async function openManage(name, hostId = 'local'){
     const requestSequence = ++manageRequestSequenceRef.current
     const requestGeneration = vmSettingsGenerationRef.current
+    const cacheKey = vmSettingsKey(name, hostId)
     setManageVm(name)
     setManageVmHostId(hostId || 'local')
     setManageBusy(true)
     setFaviconFile(null)
     try{
-      const r = await apiFetch(`/vm-settings/${encodeURIComponent(name)}`)
+      const query = hostId && hostId !== 'local' ? `?host_id=${encodeURIComponent(hostId)}` : ''
+      const r = await apiFetch(`/vm-settings/${encodeURIComponent(name)}${query}`)
       const j = await r.json().catch(()=>({}))
       if(!r.ok || j.ok === false) throw new Error(j.error || 'Failed to load VM settings')
       if(!mountedRef.current || requestSequence !== manageRequestSequenceRef.current) return
-      if(canCacheVmSettingsResponse({ requestSequence, currentSequence: manageRequestSequenceRef.current, requestGeneration, currentGeneration: vmSettingsGenerationRef.current, namePresent: vmSettingsNamesRef.current.has(name) })){
-        vmSettingsCacheRef.current.set(name, j)
+      if(canCacheVmSettingsResponse({ requestSequence, currentSequence: manageRequestSequenceRef.current, requestGeneration, currentGeneration: vmSettingsGenerationRef.current, namePresent: vmSettingsNamesRef.current.has(cacheKey) })){
+        vmSettingsCacheRef.current.set(cacheKey, j)
         setManageDraft({
           title: j.title || '',
           hostOverride: j.hostOverride || '',
           faviconUrl: j.faviconUrl || '',
           accessMode: j.accessMode || 'public',
-          assignedUsers: j.assignedUsers || []
+          assignedUsers: j.assignedUsers || [],
+          placement: j.placement || (hostId !== 'local' ? 'remote' : 'local'),
+          state: j.state || j.status || 'Unknown',
+          status: j.status || j.state || 'Unknown',
+          provider_status: j.provider_status || '',
+          running: Boolean(j.running),
+          vm_id: j.vm_id || '',
+          profile: j.profile || 'standard',
+          cpuUsagePercent: j.cpuUsagePercent,
+          memoryAssignedBytes: j.memoryAssignedBytes,
+          uptimeSeconds: j.uptimeSeconds
         })
       }
     }catch(e){
       if(mountedRef.current && requestSequence === manageRequestSequenceRef.current) addToast({ title:'Load failed', message:String(e), type:'error', timeout:7000 })
     }
     if(mountedRef.current && requestSequence === manageRequestSequenceRef.current) setManageBusy(false)
+  }
+
+  async function manageLifecycle(cmd){
+    const name = manageVm
+    const hostId = manageVmHostId
+    if(!name || !hostId || hostId === 'local') return
+    setManageVm(null)
+    await action(cmd, name, { hostId })
   }
 
   async function saveManageSettings(){
@@ -1276,39 +1306,69 @@ export default function VMManager(){
 
       <Modal open={!!manageVm} title={`Manage VM: ${manageVm}`} onClose={()=>setManageVm(null)} width={760}>
         <div style={{display:'grid', gap:14}}>
-          <div style={{color:'var(--muted)'}}>{manageVmHostId === 'local' ? 'Edit the custom host/domain this VM uses, the browser tab title shown in the wrapper, and optionally upload a per-VM favicon.' : 'RemoteVM settings are managed on the host agent. Delete remains available here; presentation settings are local-only for now.'}</div>
-          <label style={{display:'grid', gap:6}}>
-            <span>Custom domain / host override</span>
-            <input value={manageDraft.hostOverride || ''} onChange={e=>setManageDraft(s => ({ ...s, hostOverride: e.target.value }))} placeholder="vm42.example.com (leave blank to use default)" style={{background:'rgba(2,6,23,.7)', color:'#fff', border:'1px solid rgba(255,255,255,.12)', borderRadius:12, padding:'12px 14px'}} />
-          </label>
-          <label style={{display:'grid', gap:6}}>
-            <span>Browser tab title</span>
-            <input value={manageDraft.title || ''} onChange={e=>setManageDraft(s => ({ ...s, title: e.target.value }))} placeholder="My Cool VM" style={{background:'rgba(2,6,23,.7)', color:'#fff', border:'1px solid rgba(255,255,255,.12)', borderRadius:12, padding:'12px 14px'}} />
-          </label>
-          <label style={{display:'grid', gap:6}}>
-            <span>Access mode</span>
-            <select value={manageDraft.accessMode || 'public'} onChange={e=>setManageDraft(s => ({ ...s, accessMode: e.target.value }))} style={{background:'rgba(2,6,23,.7)', color:'#fff', border:'1px solid rgba(255,255,255,.12)', borderRadius:12, padding:'12px 14px'}}>
-              <option value="public">Public</option>
-              <option value="restricted">Restricted (login + assignment required)</option>
-            </select>
-          </label>
-          {manageDraft.accessMode === 'restricted' ? (
-            <div style={{color:'var(--muted)'}}>Users currently assigned to this VM: {(manageDraft.assignedUsers || []).length ? manageDraft.assignedUsers.join(', ') : 'none yet'} — edit assignments from the Users & Access page.</div>
-          ) : null}
-          <label style={{display:'grid', gap:6}}>
-            <span>VM favicon / tab icon</span>
-            <input type="file" accept=".ico,image/x-icon,image/png,image/webp,image/jpeg" onChange={e=>setFaviconFile(e.target.files?.[0] || null)} style={{background:'rgba(2,6,23,.7)', color:'#fff', border:'1px solid rgba(255,255,255,.12)', borderRadius:12, padding:'12px 14px'}} />
-          </label>
-          {manageDraft.faviconUrl ? (
-            <div style={{display:'flex', alignItems:'center', gap:10, color:'var(--muted)'}}>
-              <img src={`${manageDraft.faviconUrl}?v=${Date.now()}`} alt="VM favicon" style={{width:20,height:20,borderRadius:4}} />
-              <span>Existing favicon detected for this VM.</span>
+        {manageVmHostId !== 'local' ? (
+          <>
+            <div className="vm-placement-notice" role="status">
+              <div style={{display:'flex', justifyContent:'space-between', gap:12, alignItems:'center', flexWrap:'wrap'}}>
+                <strong>Live RemoteVM state</strong>
+                <StatusBadge status={manageDraft.status || 'Unknown'} />
+              </div>
+              <div style={{display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))', gap:10, marginTop:12, color:'var(--muted)', fontSize:13}}>
+                <span>Host: <strong style={{color:'#fff'}}>{manageVmHostId}</strong></span>
+                <span>VM ID: <code>{manageDraft.vm_id || 'Unavailable'}</code></span>
+                <span>Profile: <strong style={{color:'#fff'}}>{manageDraft.profile || 'standard'}</strong></span>
+                <span>Power state: <strong style={{color:'#fff'}}>{manageDraft.state || 'Unknown'}</strong></span>
+              </div>
+              <div style={{marginTop:10, color:'var(--muted)', fontSize:13}}>
+                Provider health: {manageDraft.provider_status || 'Unavailable'} · {manageDraft.running ? 'Guest is running' : 'Guest is not running'}
+              </div>
             </div>
-          ) : null}
-          <div style={{display:'flex', gap:10, flexWrap:'wrap'}}>
-            <Button onClick={saveManageSettings} disabled={manageBusy || manageVmHostId !== 'local'}>{manageBusy ? 'Saving…' : 'Save VM settings'}</Button>
-            <Button onClick={()=>deleteVm(manageVm, manageVmHostId)} disabled={manageBusy} style={{background:'linear-gradient(135deg,#ef4444,#b91c1c)', color:'#fff'}}>Delete VM</Button>
-          </div>
+            <div style={{color:'var(--muted)', fontSize:13}}>This state is read from the selected Windows host. Start, stop, and restart are sent to that host; no local VM is substituted.</div>
+            <div style={{display:'flex', gap:10, flexWrap:'wrap'}}>
+              <Button onClick={()=>manageLifecycle('start')} disabled={manageBusy}>{manageBusy ? 'Working…' : 'Start'}</Button>
+              <Button onClick={()=>manageLifecycle('stop')} disabled={manageBusy}>{manageBusy ? 'Working…' : 'Stop'}</Button>
+              <Button onClick={()=>manageLifecycle('restart')} disabled={manageBusy}>{manageBusy ? 'Working…' : 'Restart'}</Button>
+              <Button onClick={()=>openManage(manageVm, manageVmHostId)} disabled={manageBusy}>{manageBusy ? 'Refreshing…' : 'Refresh live state'}</Button>
+              <Button onClick={()=>deleteVm(manageVm, manageVmHostId)} disabled={manageBusy} style={{background:'linear-gradient(135deg,#ef4444,#b91c1c)', color:'#fff'}}>Delete VM</Button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div style={{color:'var(--muted)'}}>Edit the custom host/domain this VM uses, the browser tab title shown in the wrapper, and optionally upload a per-VM favicon.</div>
+            <label style={{display:'grid', gap:6}}>
+              <span>Custom domain / host override</span>
+              <input value={manageDraft.hostOverride || ''} onChange={e=>setManageDraft(s => ({ ...s, hostOverride: e.target.value }))} placeholder="vm42.example.com (leave blank to use default)" style={{background:'rgba(2,6,23,.7)', color:'#fff', border:'1px solid rgba(255,255,255,.12)', borderRadius:12, padding:'12px 14px'}} />
+            </label>
+            <label style={{display:'grid', gap:6}}>
+              <span>Browser tab title</span>
+              <input value={manageDraft.title || ''} onChange={e=>setManageDraft(s => ({ ...s, title: e.target.value }))} placeholder="My Cool VM" style={{background:'rgba(2,6,23,.7)', color:'#fff', border:'1px solid rgba(255,255,255,.12)', borderRadius:12, padding:'12px 14px'}} />
+            </label>
+            <label style={{display:'grid', gap:6}}>
+              <span>Access mode</span>
+              <select value={manageDraft.accessMode || 'public'} onChange={e=>setManageDraft(s => ({ ...s, accessMode: e.target.value }))} style={{background:'rgba(2,6,23,.7)', color:'#fff', border:'1px solid rgba(255,255,255,.12)', borderRadius:12, padding:'12px 14px'}}>
+                <option value="public">Public</option>
+                <option value="restricted">Restricted (login + assignment required)</option>
+              </select>
+            </label>
+            {manageDraft.accessMode === 'restricted' ? (
+              <div style={{color:'var(--muted)'}}>Users currently assigned to this VM: {(manageDraft.assignedUsers || []).length ? manageDraft.assignedUsers.join(', ') : 'none yet'} — edit assignments from the Users & Access page.</div>
+            ) : null}
+            <label style={{display:'grid', gap:6}}>
+              <span>VM favicon / tab icon</span>
+              <input type="file" accept=".ico,image/x-icon,image/png,image/webp,image/jpeg" onChange={e=>setFaviconFile(e.target.files?.[0] || null)} style={{background:'rgba(2,6,23,.7)', color:'#fff', border:'1px solid rgba(255,255,255,.12)', borderRadius:12, padding:'12px 14px'}} />
+            </label>
+            {manageDraft.faviconUrl ? (
+              <div style={{display:'flex', alignItems:'center', gap:10, color:'var(--muted)'}}>
+                <img src={`${manageDraft.faviconUrl}?v=${Date.now()}`} alt="VM favicon" style={{width:20,height:20,borderRadius:4}} />
+                <span>Existing favicon detected for this VM.</span>
+              </div>
+            ) : null}
+            <div style={{display:'flex', gap:10, flexWrap:'wrap'}}>
+              <Button onClick={saveManageSettings} disabled={manageBusy}>{manageBusy ? 'Saving…' : 'Save VM settings'}</Button>
+              <Button onClick={()=>deleteVm(manageVm, manageVmHostId)} disabled={manageBusy} style={{background:'linear-gradient(135deg,#ef4444,#b91c1c)', color:'#fff'}}>Delete VM</Button>
+            </div>
+          </>
+        )}
         </div>
       </Modal>
     </div>
