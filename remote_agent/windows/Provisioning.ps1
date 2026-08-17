@@ -23,7 +23,7 @@ $script:EpicVMProvisioningFailureDetailCodes = @(
     'SUNSHINE_LISTENER_VERIFY',
     'GAMING_GPU_DEVICE_MISSING', 'GAMING_GPU_DEVICE_ERROR',
     'GAMING_GPU_DRIVER_INJECTION', 'GAMING_GPU_DXDIAG',
-    'GAMING_GPU_WEBGL', 'GAMING_GPU_ENCODER'
+    'GAMING_GPU_WEBGL', 'GAMING_GPU_FRAME', 'GAMING_GPU_ENCODER'
 )
 
 function New-EpicVMProvisioningOperationId {
@@ -1208,6 +1208,16 @@ function Invoke-EpicVMProvisioningGuestRecovery {
         }
 
         $started = $false
+        $reverify = [bool](Get-EpicVMProperty -Object $Request -Name 'reverify' -Default $false)
+        $recoveryContext = [pscustomobject]@{
+            ReadyReverify = $false
+            PreviousState = $null
+            PreviousStages = @()
+            PreviousTailnetIp = $null
+            PreviousTailnetDeviceId = $null
+            PreviousManagementTransport = $null
+            PreviousManagementReadyAt = $null
+        }
         try {
             Invoke-EpicVMProvisioningStoreLocked -Action {
                 $diskStore = New-EpicVMProvisioningStore -Config $State.Config
@@ -1216,23 +1226,39 @@ function Invoke-EpicVMProvisioningGuestRecovery {
                 $Job.state = ConvertTo-EpicVMCanonicalProvisioningState -Record $Job
                 $stages = @(Get-EpicVMProvisioningCompletedStages -Value $Job.completedStages)
                 $claimHash = [string](Get-EpicVMProperty -Object $Job -Name 'claimHash' -Default '')
-                if ($Job.state -ne 'setup_failed:network' -or
-                    -not [bool](Get-EpicVMProperty -Object $Job -Name 'claimConsumed' -Default $false) -or
-                    -not [bool](Get-EpicVMProperty -Object $Job -Name 'claimUsed' -Default $false) -or
-                    ($stages -notcontains 'claim') -or ($stages -notcontains 'guest_setup') -or
-                    ($stages -contains 'network_setup') -or ($stages -contains 'management_handoff') -or
-                    -not [string]::IsNullOrWhiteSpace($claimHash)) {
-                    throw (New-EpicVMProvisioningError -Code 'network_recovery_not_allowed' -Message 'Only a retained, consumed network-stage failure may be recovered.' -Status 409)
+                $claimConsumed = [bool](Get-EpicVMProperty -Object $Job -Name 'claimConsumed' -Default $false)
+                $claimUsed = [bool](Get-EpicVMProperty -Object $Job -Name 'claimUsed' -Default $false)
+                $hasVmId = -not [string]::IsNullOrWhiteSpace([string](Get-EpicVMProperty -Object $Job -Name 'vmId' -Default ''))
+                $networkFailureRecoveryAllowed = $Job.state -eq 'setup_failed:network' -and
+                    $claimConsumed -and $claimUsed -and
+                    ($stages -contains 'claim') -and ($stages -contains 'guest_setup') -and
+                    ($stages -notcontains 'network_setup') -and ($stages -notcontains 'management_handoff') -and
+                    [string]::IsNullOrWhiteSpace($claimHash)
+                $readyReverifyAllowed = $reverify -and $Job.state -eq 'ready' -and
+                    $claimConsumed -and $claimUsed -and $hasVmId -and
+                    ($stages -contains 'claim') -and ($stages -contains 'guest_setup') -and
+                    ($stages -contains 'network_setup') -and ($stages -contains 'management_handoff')
+                $recoveryContext.ReadyReverify = [bool]$readyReverifyAllowed
+                if (-not ($networkFailureRecoveryAllowed -or $readyReverifyAllowed)) {
+                    throw (New-EpicVMProvisioningError -Code 'network_recovery_not_allowed' -Message 'Only a retained, consumed network-stage failure or an explicitly requested ready-state revalidation may be recovered.' -Status 409)
                 }
-                if ([string]::IsNullOrWhiteSpace([string](Get-EpicVMProperty -Object $Job -Name 'vmId' -Default ''))) {
+                if (-not $hasVmId) {
                     throw (New-EpicVMProvisioningError -Code 'network_recovery_vm_missing' -Message 'The retained VM identity is unavailable.' -Status 409)
+                }
+                if ($readyReverifyAllowed) {
+                    $recoveryContext.PreviousState = [string]$Job.state
+                    $recoveryContext.PreviousStages = @($stages)
+                    $recoveryContext.PreviousTailnetIp = Get-EpicVMProperty -Object $Job -Name 'tailnetIp' -Default $null
+                    $recoveryContext.PreviousTailnetDeviceId = Get-EpicVMProperty -Object $Job -Name 'tailnetDeviceId' -Default $null
+                    $recoveryContext.PreviousManagementTransport = Get-EpicVMProperty -Object $Job -Name 'managementTransport' -Default $null
+                    $recoveryContext.PreviousManagementReadyAt = Get-EpicVMProperty -Object $Job -Name 'managementReadyAt' -Default $null
                 }
                 $Job.state = 'network_setup'
                 $Job.failureStage = $null
                 $Job.failureDetailCode = $null
                 $Job.errorCode = $null
                 $Job.errorMessage = $null
-                $Job.lastAttemptCode = 'network_recovery_started'
+                $Job.lastAttemptCode = if ($readyReverifyAllowed) { 'network_reverify_started' } else { 'network_recovery_started' }
                 $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
                 $State.Provisioning.Jobs[$Job.id] = $Job
                 Save-EpicVMProvisioningStore -Store $State.Provisioning
@@ -1302,15 +1328,38 @@ function Invoke-EpicVMProvisioningGuestRecovery {
             if ($started) {
                 $code = [string](Get-EpicVMProperty -Object $_.Exception -Name 'ErrorCode' -Default 'network_recovery_failed')
                 if ([string]::IsNullOrWhiteSpace($code) -or $code -in @('network_recovery_not_allowed','network_recovery_vm_missing')) { $code = 'network_recovery_failed' }
-                $Job.state = Get-EpicVMProvisioningFailureState -Code $code
-                $Job.failureStage = switch -Regex ($Job.state) { 'network' { 'network' }; 'management' { 'management_handoff' }; 'gaming_gpu' { 'gaming_gpu' }; default { 'network' } }
-                $Job.errorCode = $code
-                $Job.failureDetailCode = $null
-                $Job.lastAttemptCode = $code
-                $Job.claimConsumed = $true
-                $Job.errorMessage = 'Network recovery stopped safely; the owned VM was retained for diagnosis.'
-                $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
-                Save-EpicVMProvisioningStore -Store $State.Provisioning
+                if ($recoveryContext.ReadyReverify) {
+                    # Ready-state revalidation is not a provisioning transition.
+                    # Restore the last known-good checkpoint if the guest cannot be
+                    # revalidated; the dashboard will retry without consuming a
+                    # claim or falsely reporting the guest as healthy.
+                    $Job.state = if ([string]::IsNullOrWhiteSpace([string]$recoveryContext.PreviousState)) { 'ready' } else { [string]$recoveryContext.PreviousState }
+                    $Job.completedStages = @($recoveryContext.PreviousStages)
+                    $Job.tailnetIp = $recoveryContext.PreviousTailnetIp
+                    $Job.tailnetDeviceId = $recoveryContext.PreviousTailnetDeviceId
+                    $Job.managementTransport = $recoveryContext.PreviousManagementTransport
+                    $Job.managementReadyAt = $recoveryContext.PreviousManagementReadyAt
+                    $Job.failureStage = $null
+                    $Job.failureDetailCode = $null
+                    $Job.errorCode = $null
+                    $Job.errorMessage = $null
+                    $Job.lastAttemptCode = $code
+                    $Job.consoleRepairOutcome = 'failed'
+                    $Job.consoleRepairErrorCode = $code
+                    $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
+                    Save-EpicVMProvisioningStore -Store $State.Provisioning
+                }
+                else {
+                    $Job.state = Get-EpicVMProvisioningFailureState -Code $code
+                    $Job.failureStage = switch -Regex ($Job.state) { 'network' { 'network' }; 'management' { 'management_handoff' }; 'gaming_gpu' { 'gaming_gpu' }; default { 'network' } }
+                    $Job.errorCode = $code
+                    $Job.failureDetailCode = $null
+                    $Job.lastAttemptCode = $code
+                    $Job.claimConsumed = $true
+                    $Job.errorMessage = 'Network recovery stopped safely; the owned VM was retained for diagnosis.'
+                    $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
+                    Save-EpicVMProvisioningStore -Store $State.Provisioning
+                }
             }
             throw
         }
@@ -1424,9 +1473,9 @@ function Set-EpicVMProvisioningConsoleCredentials {
             $Job | Add-Member -MemberType NoteProperty -Name $propertyName -Value $null
         }
     }
-    $readyReconcile = $reconcileOnly -and $reconcileState -in @('ready', 'setup_failed:streaming') -and
+    $readyReconcile = $reconcileOnly -and $reconcileState -in @('ready', 'setup_failed:streaming', 'setup_failed:agent_restart') -and
         (@(Get-EpicVMProvisioningCompletedStages -Value $Job.completedStages) -contains 'management_handoff')
-    if ($Job.state -notin @('streaming_setup', 'setup_failed:streaming') -and -not $readyReconcile) {
+    if ($Job.state -notin @('streaming_setup', 'setup_failed:streaming', 'setup_failed:agent_restart') -and -not $readyReconcile) {
         throw (New-EpicVMProvisioningError -Code 'console_credentials_not_allowed' -Message 'The job is not awaiting console configuration.' -Status 409)
     }
     $guestUsername = [string](Get-EpicVMProperty -Object $Request -Name 'username' -Default '')
@@ -1518,7 +1567,7 @@ function Set-EpicVMProvisioningConsoleFailed {
 
 function Complete-EpicVMProvisioningConsole {
     param([Parameter(Mandatory)] [object] $State, [Parameter(Mandatory)] [object] $Job, [Parameter(Mandatory)] [object] $Request)
-    if ($Job.state -notin @('streaming_setup', 'setup_failed:streaming')) {
+    if ($Job.state -notin @('streaming_setup', 'setup_failed:streaming', 'setup_failed:agent_restart')) {
         throw (New-EpicVMProvisioningError -Code 'console_complete_not_allowed' -Message 'The job is not awaiting console verification.' -Status 409)
     }
     $expectedRoute = '/vm/' + $Job.name + '/'

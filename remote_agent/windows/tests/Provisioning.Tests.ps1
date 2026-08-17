@@ -444,6 +444,43 @@ Describe 'EpicVM network-stage recovery' {
         (Get-Content -LiteralPath $config.ProvisioningStatePath -Raw) | Should -Not -Match 'transient-password|operator'
     }
 
+    It 'revalidates a ready retained VM when its guest network disappears without reissuing a claim' {
+        $config=Get-EpicVMDefaultConfig
+        $config.ProvisioningStatePath=Join-Path $TestDrive 'ready-network-recovery.json'
+        $script:readyNetworkDirectCalls=0
+        $provider=New-ProvisioningTestProvider
+        $provider | Add-Member NoteProperty PowerShellDirectInvoker { param($name,$credential,$scriptBlock,$args)
+            $script:readyNetworkDirectCalls++
+            if($scriptBlock.ToString() -match 'Get-NetIPAddress') { return @{ok=$true;ip='100.111.82.2'} }
+            return @{ok=$true;managementEndpoint=$true;firewallScoped=$true}
+        }
+        $provider | Add-Member NoteProperty TailscaleOAuthClientId 'client-id'
+        $provider | Add-Member NoteProperty TailscaleOAuthSecretPath 'mock://oauth-secret'
+        $provider | Add-Member NoteProperty TailscaleTailnet 'example.ts.net'
+        $provider | Add-Member NoteProperty TailscaleOAuthSecretLoader { [PSCredential]::new('oauth-secret',(ConvertTo-SecureString ('z' * 24) -AsPlainText -Force)) }
+        $provider | Add-Member NoteProperty TailscaleOAuthInvoker { @{access_token='access'} }
+        $provider | Add-Member NoteProperty TailscaleHttpInvoker { param($method,$url,$headers,$body) @{devices=@(@{id='device-ready-network';hostname='ready-network-recoverable';addresses=@('100.111.82.2')})} }
+        $state=New-EpicVMAgentState -Config $config -Token 'agent-token' -Provider $provider
+        $job=New-EpicVMProvisioningJobObject -Id 'job-ready-network-recovery' -Name 'ready-network-recoverable' -Profile 'standard' -State 'ready'
+        $job.vmId='5b3c52d1-7fd9-4a85-86f8-467d54fa0710'
+        $job.claimConsumed=$true; $job.claimUsed=$true; $job.claimHash=$null
+        $job.completedStages=@('claim','guest_setup','network_setup','management_handoff')
+        $job.guestSetupVerified=$true; $job.managementTransport='tailscale_winrm'; $job.managementReadyAt=[DateTime]::UtcNow.ToString('o'); $job.tailnetIp='100.111.82.1'; $job.tailnetDeviceId='device-old-network'
+        $job.consoleVerifiedAt=[DateTime]::UtcNow.ToString('o'); $job.streamValidationVerified=$true
+        $state.Provisioning.Jobs[$job.id]=$job
+        Save-EpicVMProvisioningStore -Store $state.Provisioning
+
+        Invoke-EpicVMProvisioningNetworkRecovery -State $state -Job $job -Request @{username='operator';password='transient-password';reverify=$true} | Out-Null
+
+        $job.state | Should -Be 'streaming_setup'
+        $job.tailnetIp | Should -Be '100.111.82.2'
+        $job.tailnetDeviceId | Should -Be 'device-ready-network'
+        $job.managementTransport | Should -Be 'tailscale_winrm'
+        $job.claimConsumed | Should -BeTrue
+        $script:readyNetworkDirectCalls | Should -Be 2
+        (Get-Content -LiteralPath $config.ProvisioningStatePath -Raw) | Should -Not -Match 'transient-password|operator'
+    }
+
     It 'rejects network recovery outside the exact retained boundary' {
         $config=Get-EpicVMDefaultConfig
         $config.ProvisioningStatePath=Join-Path $TestDrive 'network-recovery-reject.json'

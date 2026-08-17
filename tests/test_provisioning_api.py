@@ -485,6 +485,9 @@ def test_remote_moonlight_retry_returns_pending_and_deduplicates(monkeypatch, tm
         def pair_staged(self, name, sunshine_username, sunshine_password):
             return {"routePrefix": f"/vm/{name}/", "guestTcpVerified": True}
 
+        def repair_staged(self, name, **kwargs):
+            return {"ok": True, "routePrefix": f"/vm/{name}/", "guestTcpVerified": True}
+
         def stop_staged(self, name):
             return None
 
@@ -649,10 +652,16 @@ def test_claim_uses_protected_default_sunshine_credentials(monkeypatch, tmp_path
         def start_staged(self, name):
             return {'routePrefix': f'/vm/{name}/', 'guestTcpVerified': True}
 
+        def repair_staged(self, name, **kwargs):
+            return {'ok': True, 'routePrefix': f'/vm/{name}/', 'guestTcpVerified': True}
+
         def pair_staged(self, name, sunshine_username, sunshine_password):
             assert sunshine_username == 'sun-default'
             assert sunshine_password == 'sun-default-password'
             return {'routePrefix': f'/vm/{name}/', 'guestTcpVerified': True}
+
+        def repair_staged(self, name, **kwargs):
+            return {'ok': True, 'routePrefix': f'/vm/{name}/', 'guestTcpVerified': True}
 
         def stop_staged(self, name):
             return None
@@ -733,10 +742,16 @@ def test_automatic_mode_claims_with_protected_defaults_and_returns_no_claim_secr
         def start_staged(self, name):
             return {'routePrefix': f'/vm/{name}/', 'guestTcpVerified': True}
 
+        def repair_staged(self, name, **kwargs):
+            return {'ok': True, 'routePrefix': f'/vm/{name}/', 'guestTcpVerified': True}
+
         def pair_staged(self, name, sunshine_username, sunshine_password):
             assert sunshine_username == 'sun-default'
             assert sunshine_password == 'sun-default-password'
             return {'routePrefix': f'/vm/{name}/', 'guestTcpVerified': True}
+
+        def repair_staged(self, name, **kwargs):
+            return {'ok': True, 'routePrefix': f'/vm/{name}/', 'guestTcpVerified': True}
 
         def stop_staged(self, name):
             return None

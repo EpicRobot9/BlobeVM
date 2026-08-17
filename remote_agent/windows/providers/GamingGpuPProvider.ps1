@@ -489,6 +489,8 @@ function Get-EpicVMGamingGuestValidationScript {
         $videoOk = $false
         $dxdiagOk = $false
         $webglOk = $false
+        $webglHardwareOk = $false
+        $renderFrameOk = $false
         $encoderOk = $false
         try {
             $displayDevices = @(Get-PnpDevice -Class Display -ErrorAction Stop)
@@ -536,7 +538,7 @@ function Get-EpicVMGamingGuestValidationScript {
 
         $webglPath = Join-Path $env:TEMP ('epicvm-gaming-webgl-' + [guid]::NewGuid().ToString('N') + '.html')
         try {
-            $webglHtml = '<!doctype html><html><body><canvas id="c"></canvas><script>const c=document.getElementById("c");const g=c.getContext("webgl2")||c.getContext("webgl");let r="";try{const i=g&&g.getExtension("WEBGL_debug_renderer_info");r=i?g.getParameter(i.UNMASKED_RENDERER_WEBGL):""}catch(e){}document.body.innerText="WEBGL_CONTEXT="+!!g+";WEBGL_RENDERER="+r;</script></body></html>'
+            $webglHtml = '<!doctype html><html><body style="margin:0;background:#000"><canvas id="c" width="320" height="180"></canvas><div id="m"></div><script>const c=document.getElementById("c");const g=c.getContext("webgl2")||c.getContext("webgl");let r="";if(g){try{const i=g.getExtension("WEBGL_debug_renderer_info");r=i?g.getParameter(i.UNMASKED_RENDERER_WEBGL):"";g.viewport(0,0,c.width,c.height);g.clearColor(0.08,0.32,0.86,1);g.clear(g.COLOR_BUFFER_BIT);g.finish()}catch(e){}}document.getElementById("m").innerText="WEBGL_CONTEXT="+!!g+";WEBGL_RENDERER="+r;</script></body></html>'
             Set-Content -LiteralPath $webglPath -Value $webglHtml -Encoding UTF8 -NoNewline
             $edgePaths = @(
                 @(
@@ -567,6 +569,7 @@ function Get-EpicVMGamingGuestValidationScript {
                         $edgeProfilePath = Join-Path $env:TEMP ('epicvm-gaming-edge-' + [guid]::NewGuid().ToString('N'))
                         $edgeOutputPath = Join-Path $env:TEMP ('epicvm-gaming-edge-out-' + [guid]::NewGuid().ToString('N') + '.txt')
                         $edgeErrorPath = Join-Path $env:TEMP ('epicvm-gaming-edge-err-' + [guid]::NewGuid().ToString('N') + '.txt')
+                        $edgeFramePath = Join-Path $env:TEMP ('epicvm-gaming-edge-frame-' + [guid]::NewGuid().ToString('N') + '.png')
                         $edgeProcess = $null
                         try {
                             New-Item -ItemType Directory -Path $edgeProfilePath -Force -ErrorAction Stop | Out-Null
@@ -576,6 +579,8 @@ function Get-EpicVMGamingGuestValidationScript {
                                 '--no-default-browser-check'
                             ) + @($edgeVariant) + @(
                                 '--disable-extensions',
+                                '--window-size=320,220',
+                                ('--screenshot=' + $edgeFramePath),
                                 '--dump-dom',
                                 '--virtual-time-budget=5000',
                                 ("file:///{0}" -f ($webglPath -replace '\\','/'))
@@ -593,6 +598,30 @@ function Get-EpicVMGamingGuestValidationScript {
                             $diagnostics.webglRendererOk = $webglRendererOk
                             $diagnostics.webglDomMarker = if (-not $webglContextOk) { 'hardware_false' } elseif (-not $webglRendererOk) { 'hardware_renderer_mismatch' } else { 'hardware_true' }
                             if ($webglContextOk -and $webglRendererOk) {
+                                $webglHardwareOk = $true
+                                $bitmap = $null
+                                try {
+                                    if (Test-Path -LiteralPath $edgeFramePath -PathType Leaf) {
+                                        Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
+                                        $bitmap = [System.Drawing.Bitmap]::new($edgeFramePath)
+                                        $sampleX = [Math]::Min([Math]::Max([int]($bitmap.Width / 2), 0), [Math]::Max($bitmap.Width - 1, 0))
+                                        $sampleY = [Math]::Min([Math]::Max([int]($bitmap.Height / 2), 0), [Math]::Max($bitmap.Height - 1, 0))
+                                        $pixel = $bitmap.GetPixel($sampleX, $sampleY)
+                                        $frameLuma = [int]$pixel.R + [int]$pixel.G + [int]$pixel.B
+                                        $renderFrameOk = $bitmap.Width -ge 64 -and $bitmap.Height -ge 64 -and $frameLuma -ge 60
+                                        $diagnostics.renderFrameWidth = $bitmap.Width
+                                        $diagnostics.renderFrameHeight = $bitmap.Height
+                                        $diagnostics.renderFrameLuma = $frameLuma
+                                    }
+                                    else { $diagnostics.renderFrameProbe = 'screenshot_missing' }
+                                }
+                                catch { $diagnostics.renderFrameProbe = 'failed' }
+                                finally {
+                                    if ($null -ne $bitmap) { $bitmap.Dispose() }
+                                }
+                                $diagnostics.renderFrameOk = $renderFrameOk
+                            }
+                            if ($webglContextOk -and $webglRendererOk -and $renderFrameOk) {
                                 $webglOk = $true
                                 $diagnostics.webglVariant = ($edgeVariant -join ' ')
                                 break
@@ -603,6 +632,7 @@ function Get-EpicVMGamingGuestValidationScript {
                             Remove-Item -LiteralPath $edgeProfilePath -Recurse -Force -ErrorAction SilentlyContinue
                             Remove-Item -LiteralPath $edgeOutputPath -Force -ErrorAction SilentlyContinue
                             Remove-Item -LiteralPath $edgeErrorPath -Force -ErrorAction SilentlyContinue
+                            Remove-Item -LiteralPath $edgeFramePath -Force -ErrorAction SilentlyContinue
                         }
                     }
                     if (-not $webglOk -and $webglAttempt -lt $webglAttempts) { Start-Sleep -Milliseconds 500 }
@@ -612,7 +642,10 @@ function Get-EpicVMGamingGuestValidationScript {
         }
         catch { $diagnostics.webglProbe = 'failed' }
         finally { Remove-Item -LiteralPath $webglPath -Force -ErrorAction SilentlyContinue }
-        if (-not $webglOk) { $errors.Add('Edge/WebGL did not report hardware acceleration.') }
+        if (-not $webglOk) {
+            if (-not $webglHardwareOk) { $errors.Add('Edge/WebGL did not report hardware acceleration.') }
+            else { $errors.Add('The guest GPU render probe produced no usable frame.') }
+        }
 
         try {
             $service = Get-Service -Name ([string]$SunshineServiceName) -ErrorAction Stop
@@ -634,7 +667,10 @@ function Get-EpicVMGamingGuestValidationScript {
         $safeMarker = $null
         if (-not $displayOk -or -not $videoOk) { $failureDetailCode = 'GAMING_GPU_DEVICE_MISSING'; $safeMarker = 'EPICVM_GAMING_GPU_VALIDATION_FAILED' }
         elseif (-not $dxdiagOk) { $failureDetailCode = 'GAMING_GPU_DXDIAG'; $safeMarker = 'EPICVM_GAMING_GPU_VALIDATION_FAILED' }
-        elseif (-not $webglOk) { $failureDetailCode = 'GAMING_GPU_WEBGL'; $safeMarker = 'EPICVM_GAMING_GPU_VALIDATION_FAILED' }
+        elseif (-not $webglOk) {
+            if ($webglHardwareOk) { $failureDetailCode = 'GAMING_GPU_FRAME' } else { $failureDetailCode = 'GAMING_GPU_WEBGL' }
+            $safeMarker = 'EPICVM_GAMING_GPU_VALIDATION_FAILED'
+        }
         elseif (-not $encoderOk) { $failureDetailCode = 'GAMING_GPU_ENCODER'; $safeMarker = 'EPICVM_GAMING_ENCODER_UNAVAILABLE' }
         return [ordered]@{
             ok = ($errors.Count -eq 0)
@@ -642,6 +678,7 @@ function Get-EpicVMGamingGuestValidationScript {
             videoControllerOk = $videoOk
             dxdiagOk = $dxdiagOk
             webglOk = $webglOk
+            renderFrameOk = $renderFrameOk
             sunshineEncoderOk = $encoderOk
             diagnostics = $diagnostics
             errors = @($errors)

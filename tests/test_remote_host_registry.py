@@ -200,6 +200,37 @@ def test_remote_provisioning_status_has_bounded_store_read_timeout():
     assert calls[0] == 30
 
 
+def test_remote_network_recovery_forwards_reverify_without_logging_credentials():
+    calls = []
+
+    class FakeResponse:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self): return b'{"ok":true,"job":{"state":"streaming_setup"}}'
+
+    def fake_open(req, timeout):
+        calls.append((req, timeout))
+        return FakeResponse()
+
+    RemoteAgentClient("http://100.64.0.2:8765", "token", timeout=2.0, opener=fake_open).network_recovery(
+        "job-ready-1",
+        guest_username="operator",
+        guest_password="transient-password",
+        reverify=True,
+    )
+
+    request, timeout = calls[0]
+    assert request.get_method() == "POST"
+    assert request.full_url.endswith("/v1/provisioning-jobs/job-ready-1/network-recovery")
+    assert json.loads(request.data.decode("utf-8")) == {
+        "username": "operator",
+        "password": "transient-password",
+        "reverify": True,
+    }
+    assert timeout == 120
+
+
 def test_remote_gaming_provision_forwards_initial_resources_and_partition_percent():
     calls = []
 
@@ -503,7 +534,35 @@ def test_remote_inventory_gets_public_vm_link(monkeypatch, tmp_path):
     ):
         items = module.manager_json_list("epic-pc")
 
-    assert items[0]["url"] == "https://techexplore.us/vm/testre/?host_id=epic-pc"
+    assert items[0]["url"] == "https://techexplore.us/dashboard/console/testre/?host_id=epic-pc"
+
+
+def test_remote_inventory_not_ready_uses_retrying_console_warmup(monkeypatch, tmp_path):
+    import importlib
+
+    monkeypatch.setenv("BLOBEDASH_STATE", str(tmp_path))
+    module = importlib.import_module("dashboard.app")
+    monkeypatch.setattr(module, "_external_base_url", lambda: "https://techexplore.us")
+
+    class FakeHost:
+        kind = "remote"
+        host_id = "epic-pc"
+        host_name = "Epic PC"
+
+        def list_vms(self):
+            return [{"name": "testprov", "state": "Running", "consoleReady": False, "consolePending": True}]
+
+        def normalize_inventory(self, instances):
+            return [{**item, "placement": "remote", "host_id": self.host_id, "host_name": self.host_name} for item in instances]
+
+    class FakeRegistry:
+        def refresh(self): return None
+        def get(self, host_id="local"): return FakeHost()
+
+    monkeypatch.setattr(module, "VM_HOST_REGISTRY", FakeRegistry())
+    with module.app.test_request_context("/dashboard/api/list", headers={"Host": "techexplore.us", "X-Forwarded-Proto": "https", "X-Forwarded-Host": "techexplore.us"}):
+        items = module.manager_json_list("epic-pc")
+    assert items[0]["url"] == "https://techexplore.us/dashboard/console/testprov/?host_id=epic-pc"
 
 
 def test_ready_remote_inventory_uses_verified_console_route(monkeypatch, tmp_path):
@@ -1016,7 +1075,7 @@ def test_manager_list_uses_request_host_when_called_without_explicit_host_id(mon
     ):
         items = module.manager_json_list()
 
-    assert items[0]["url"] == "https://techexplore.us/vm/alpha/?host_id=epic-pc"
+    assert items[0]["url"] == "https://techexplore.us/dashboard/console/alpha/?host_id=epic-pc"
 
 
 def test_remote_ownership_check_does_not_probe_other_hosts_live(monkeypatch, tmp_path):

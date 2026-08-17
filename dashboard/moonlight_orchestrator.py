@@ -796,6 +796,35 @@ networks:
                 self.stop_staged(safe)
             except Exception:
                 pass
+            if quarantine is not None:
+                replacement = self._instance_root(safe)
+                if replacement.exists():
+                    # stage_plan created this directory after the old bundle
+                    # was moved.  Remove only an EpicVM-owned replacement;
+                    # never delete an unrelated directory during rollback.
+                    try:
+                        replacement_plan = self._read_plan(safe)
+                        owned = (
+                            replacement_plan.get("owner") == "EpicVM"
+                            and replacement_plan.get("backend") == "moonlight"
+                            and replacement_plan.get("name") == safe
+                        )
+                        if owned:
+                            shutil.rmtree(replacement)
+                    except Exception:
+                        pass
+                if not replacement.exists():
+                    # Never leave the last known-good bundle stranded in the
+                    # quarantine directory.  The replacement may have failed
+                    # after the new container was created, so restore the old
+                    # bundle before re-raising the original, structured error.
+                    try:
+                        self.restore_quarantined(safe, quarantine, start=True)
+                    except Exception:
+                        # The old files are still restored even if Docker itself
+                        # is temporarily unavailable.  The next verification
+                        # request can start the retained bundle safely.
+                        pass
             raise
 
     def has_auto_login(self, name: str) -> bool:
@@ -829,10 +858,52 @@ networks:
         if not target.is_dir():
             return None
         self.stop_staged(safe)
-        quarantine = target.parent / "quarantine" / f"{safe}-{int(time.time())}"
+        quarantine = target.parent / "quarantine" / f"{safe}-{int(time.time())}-{secrets.token_hex(4)}"
         quarantine.parent.mkdir(mode=0o700, exist_ok=True)
         target.rename(quarantine)
         return quarantine
+
+    def restore_quarantined(self, name: str, quarantine: Path | str, *, start: bool = True) -> Path:
+        """Restore a previously quarantined owned bundle without data loss.
+
+        The path is accepted only from this orchestrator's private quarantine
+        directory and must contain the matching EpicVM plan.  Renaming the
+        directory back happens before any Docker start attempt, so a transient
+        Docker failure cannot strand the bundle or turn a repair failure into
+        a missing-console failure.
+        """
+        safe = validate_vm_name(name)
+        root = self.root.resolve()
+        quarantine_path = Path(quarantine)
+        if not quarantine_path.is_absolute():
+            quarantine_path = (self.root / quarantine_path).resolve()
+        else:
+            quarantine_path = quarantine_path.resolve()
+        expected_parent = (root / "quarantine").resolve()
+        if quarantine_path.parent != expected_parent:
+            raise ConsoleOrchestrationError("The quarantine path is outside the managed store.", status=403, code="ownership_required")
+        if not quarantine_path.is_dir() or quarantine_path.is_symlink():
+            raise ConsoleOrchestrationError("The quarantined console bundle is unavailable.", status=404, code="console_bundle_missing")
+        if not quarantine_path.name.startswith(f"{safe}-"):
+            raise ConsoleOrchestrationError("The quarantined console bundle does not match the VM.", status=403, code="ownership_required")
+        try:
+            plan = json.loads((quarantine_path / "plan.json").read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ConsoleOrchestrationError("The quarantined console metadata is invalid.", status=403, code="ownership_required") from exc
+        if plan.get("owner") != "EpicVM" or plan.get("backend") != "moonlight" or plan.get("name") != safe:
+            raise ConsoleOrchestrationError("The quarantined console instance is not owned by EpicVM.", status=403, code="ownership_required")
+        target = self._instance_root(safe)
+        if target.exists():
+            raise ConsoleOrchestrationError("The console target already exists.", status=409, code="console_exists")
+        quarantine_path.rename(target)
+        if start:
+            try:
+                self.start_staged(safe)
+            except Exception:
+                # Keep the restored files in place for the next bounded
+                # reconciliation attempt; never move them back to quarantine.
+                raise
+        return target
 
     def teardown(self, *, name: str, confirm_name: str, device_id: str | None = None, revoke: Callable[[str], Any] | None = None) -> dict[str, Any]:
         safe = validate_vm_name(name)

@@ -111,6 +111,11 @@ export function provisioningFailureReason(job){
      legacy_state_uncertain: 'Persisted provisioning checkpoints are inconsistent; the VM was retained for diagnosis.',
   }
   const base = reasons[code] || ''
+  if(code === 'gaming_gpu_validation_failed'){
+    const detail = String(job?.failureDetailCode || '').trim().toLowerCase()
+    if(detail === 'gaming_gpu_frame') return `${base} The guest produced no usable rendered frame; it will not be published as ready.`
+    if(detail === 'gaming_gpu_webgl') return `${base} Hardware WebGL did not pass the render gate.`
+  }
   if(code === 'guest_account_failed'){
     const detail = String(job?.failureDetailCode || '').trim().toLowerCase()
     const detailReasons = {

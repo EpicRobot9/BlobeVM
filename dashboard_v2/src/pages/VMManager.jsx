@@ -70,7 +70,8 @@ function VmCard({ vm, host, onAction, onDetails, onProfileChange, onManage, onTe
   const profile = vm._profile || vm._optimizer?.profile || vm.profile || 'desktop'
   const isGaming = profile === 'gaming' || String(vm.profile || '').toLowerCase() === 'gaming' || vm.gpuPartitionPercent !== undefined
   const isRemote = vm.placement === 'remote'
-  const consoleReady = canOpenInventoryVm(vm) && (!isRemote || vm.running === true)
+  const consoleReady = canOpenInventoryVm(vm) && (!isRemote || (vm.running === true && vm.consoleReady === true && vm.consoleRouteReady !== false))
+  const consoleLaunchable = isRemote ? (vm.running === true && !!vm.url) : consoleReady
   const placementLabel = isRemote ? 'RemoteVM' : 'Local VM'
   const hostName = vm.host_name || host?.display_name || (isRemote ? vm.host_id || 'Remote host' : 'EpicVM Server')
   const hostUnavailable = isRemote && host?.online !== true
@@ -144,7 +145,7 @@ function VmCard({ vm, host, onAction, onDetails, onProfileChange, onManage, onTe
         <Button disabled={busyAction || hostUnavailable} onClick={()=>onAction('start', vm.name)}>Start</Button>
         <Button disabled={busyAction || hostUnavailable} onClick={()=>onAction('stop', vm.name)}>Stop</Button>
         <Button disabled={busyAction || hostUnavailable} onClick={()=>onAction('restart', vm.name)}>Restart</Button>
-        <Button disabled={busyAction || !consoleReady} title={consoleReady ? 'Open console' : 'Console is available only after provisioning verification'} onClick={()=>onDetails(vm.name)}>Console</Button>
+        <Button disabled={busyAction || !consoleLaunchable} title={consoleReady ? 'Open console' : (isRemote ? 'Open console recovery page' : 'Console is available only after provisioning verification')} onClick={()=>onDetails(vm.name)}>Console</Button>
         <Button disabled={busyAction || hostUnavailable} onClick={()=>onManage(vm.name)}>Manage</Button>
         {isRemote ? <Button disabled={busyAction || hostUnavailable} onClick={()=>onTeardown(vm.name, vm.host_id)}>Tear down</Button> : null}
       </div>
@@ -882,8 +883,9 @@ export default function VMManager(){
           nextUrl = `${reconciled.routePrefix}?host_id=${encodeURIComponent(hostId)}`
         }
       }catch(error){
-        addToast({ title:`${name}`, message:String(error), type:'error', timeout:9000 })
-        return
+        addToast({ title:`${name}`, message:'The remote console is still recovering; opening its retry page.', type:'info', timeout:7000 })
+        // Keep the inventory-provided warmup URL. It retries through the
+        // dashboard and transitions to Moonlight once the route is verified.
       }
     }
     logSelectionTrackerRef.current.select(name)

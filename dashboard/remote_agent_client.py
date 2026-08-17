@@ -286,6 +286,29 @@ class RemoteAgentClient:
         result = self._request("GET", f"/v1/provisioning-jobs/{safe_id}", timeout=self.provisioning_status_timeout)
         return result if isinstance(result, dict) else {"job": result}
 
+    def network_recovery(
+        self,
+        job_id: str,
+        *,
+        guest_username: str,
+        guest_password: str,
+        reverify: bool = False,
+    ) -> dict[str, Any]:
+        """Revalidate a retained guest network without reissuing its claim."""
+        safe_id = quote(str(job_id), safe="")
+        payload = {
+            "username": str(guest_username),
+            "password": str(guest_password),
+            "reverify": bool(reverify),
+        }
+        result = self._request(
+            "POST",
+            f"/v1/provisioning-jobs/{safe_id}/network-recovery",
+            payload,
+            timeout=self.console_write_timeout,
+        )
+        return result if isinstance(result, dict) else {"ok": True, "job": result}
+
     def provisioning_jobs(self) -> list[dict[str, Any]]:
         result = self._request("GET", "/v1/provisioning-jobs")
         if isinstance(result, dict):
@@ -436,6 +459,24 @@ class RemoteAgentHost:
     def provisioning_status(self, job_id: str) -> dict[str, Any]:
         try:
             return self.client.provisioning_status(job_id)
+        except RemoteAgentError as exc:
+            raise self._host_error(exc) from exc
+
+    def network_recovery(
+        self,
+        job_id: str,
+        *,
+        guest_username: str,
+        guest_password: str,
+        reverify: bool = False,
+    ) -> dict[str, Any]:
+        try:
+            return self.client.network_recovery(
+                job_id,
+                guest_username=guest_username,
+                guest_password=guest_password,
+                reverify=reverify,
+            )
         except RemoteAgentError as exc:
             raise self._host_error(exc) from exc
 

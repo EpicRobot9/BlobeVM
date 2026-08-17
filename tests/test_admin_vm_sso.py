@@ -78,7 +78,7 @@ def test_forward_auth_preflights_scoped_moonlight_host_request(monkeypatch, tmp_
     monkeypatch.setattr(module, "_console_route_host_id", lambda name, forwarded_uri: "epic-pc")
     calls = []
 
-    def reconcile(name, host_id, *, wait=False, wait_timeout=60.0):
+    def reconcile(name, host_id, *, wait=False, wait_timeout=90.0):
         calls.append((name, host_id, wait, wait_timeout))
         return {"ok": True, "healthy": True}
 
@@ -94,6 +94,140 @@ def test_forward_auth_preflights_scoped_moonlight_host_request(monkeypatch, tmp_
 
     assert response.status_code == 200
     assert calls == [("gaming-gpup-pilot-03", "epic-pc", True, 90.0)]
+
+
+def test_remote_console_entry_renders_retry_page_before_moonlight_is_ready(monkeypatch, tmp_path):
+    module = load_app(monkeypatch)
+    monkeypatch.setenv("BLOBEDASH_STATE", str(tmp_path))
+    monkeypatch.setattr(module, "_current_portal_user", lambda: None)
+    monkeypatch.setattr(module, "_admin_credentials", lambda: ("Epic", "test-password"))
+    monkeypatch.setattr(module, "_verify_v2_token", lambda token: {"admin": True} if token else None)
+    monkeypatch.setattr(module, "_vm_access_mode", lambda name: "restricted")
+    monkeypatch.setattr(
+        module,
+        "_reconcile_remote_console",
+        lambda *args, **kwargs: {"ok": True, "healthy": False, "pending": True, "failureCode": "console_repair_pending"},
+    )
+
+    client = module.app.test_client()
+    client.set_cookie("Dashboard-Auth", "valid-admin-session")
+    response = client.get("/dashboard/console/testprov/?host_id=epic-pc")
+
+    assert response.status_code == 200
+    assert "Remote console warming up" in response.get_data(as_text=True)
+    assert "The VM is running" in response.get_data(as_text=True)
+    assert response.headers["Retry-After"] == "3"
+    assert response.headers["X-EpicVM-Console-Code"] == "console_repair_pending"
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_ready_remote_console_queues_guest_network_recovery_on_sunshine_unavailable(monkeypatch):
+    module = load_app(monkeypatch)
+    calls = []
+
+    class Orchestrator:
+        backend = "moonlight"
+
+        def verify_staged(self, *args, **kwargs):
+            raise module.ConsoleOrchestrationError(
+                "guest unavailable",
+                status=503,
+                code="sunshine_tcp_unavailable",
+            )
+
+    class Host:
+        kind = "remote"
+
+    monkeypatch.setattr(module, "_console_orchestrator", lambda: Orchestrator())
+    monkeypatch.setattr(module, "_vm_host", lambda host_id: Host())
+    monkeypatch.setattr(
+        module,
+        "_remote_console_job",
+        lambda host, name: {
+            "job_id": "job-ready-network",
+            "guest_ip": "100.83.6.71",
+            "job": {"name": name, "state": "ready"},
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "_queue_remote_guest_network_recovery",
+        lambda **kwargs: calls.append(kwargs) or {
+            "ok": True,
+            "healthy": False,
+            "pending": True,
+            "failureCode": "network_recovery_pending",
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "_queue_remote_console_repair",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("bundle repair must not be queued first")),
+    )
+
+    result = module._reconcile_remote_console("claimmode-canary-1", "epic-pc", wait=False)
+
+    assert result["failureCode"] == "network_recovery_pending"
+    assert calls and calls[0]["job_id"] == "job-ready-network"
+    assert calls[0]["name"] == "claimmode-canary-1"
+
+
+def test_guest_network_recovery_worker_repairs_with_new_verified_address(monkeypatch):
+    module = load_app(monkeypatch)
+    task_key = ("epic-pc", "job-ready-network")
+    module._CONSOLE_RETRY_TASKS.clear()
+    module._CONSOLE_RETRY_TASKS[task_key] = {
+        "operationId": "op-network",
+        "status": "pending",
+        "startedAt": 1,
+        "kind": "network_recovery",
+    }
+    calls = []
+
+    class Host:
+        def provisioning_status(self, job_id):
+            return {"job": {"state": "ready", "name": "claimmode-canary-1"}}
+
+        def network_recovery(self, job_id, **kwargs):
+            calls.append(("network_recovery", job_id, kwargs))
+            return {"job": {"state": "streaming_setup", "tailnetIp": "100.83.6.72"}}
+
+        def console_credentials(self, job_id, **kwargs):
+            calls.append(("console_credentials", job_id, kwargs))
+            return {"ok": True}
+
+        def console_complete(self, job_id, **kwargs):
+            calls.append(("console_complete", job_id, kwargs))
+            return {"ok": True}
+
+    class Orchestrator:
+        def repair_staged(self, *args, **kwargs):
+            calls.append(("repair_staged", args, kwargs))
+            return {"ok": True, "routePrefix": "/vm/claimmode-canary-1--epic-pc/", "guestTcpVerified": True}
+
+    module._start_remote_guest_network_recovery(
+        host=Host(),
+        host_id="epic-pc",
+        job_id="job-ready-network",
+        name="claimmode-canary-1",
+        route_name="claimmode-canary-1--epic-pc",
+        guest_username="operator",
+        guest_password="transient-password",
+        sunshine_username="sunshine",
+        sunshine_password="sunshine-password",
+        orchestrator=Orchestrator(),
+        operation_id="op-network",
+    )
+
+    assert calls[0] == (
+        "network_recovery",
+        "job-ready-network",
+        {"guest_username": "operator", "guest_password": "transient-password", "reverify": True},
+    )
+    assert any(item[0] == "repair_staged" and item[2]["guest_ip"] == "100.83.6.72" for item in calls)
+    assert any(item[0] == "console_complete" for item in calls)
+    assert module._CONSOLE_RETRY_TASKS[task_key]["status"] == "ready"
+    assert "transient-password" not in repr(module._CONSOLE_RETRY_TASKS)
 
 
 def test_forward_auth_does_not_preflight_unrelated_vm_requests(monkeypatch, tmp_path):

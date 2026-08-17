@@ -4,6 +4,7 @@ import shutil
 import re
 from urllib import request as urlrequest, error as urlerror
 from urllib.parse import quote as url_quote, urlparse
+from html import escape as html_escape
 from functools import wraps
 from flask import Flask, jsonify, request, abort, send_from_directory, render_template_string, Response, send_file, redirect
 from werkzeug.security import check_password_hash
@@ -402,13 +403,12 @@ def _start_remote_moonlight_console_retry(*, host, host_id, job_id, name, guest_
             _set_console_retry_result(key, status='ready', operation_id=operation_id)
             app.logger.info('EpicVM console retry became idempotent operation=%s status=ready', operation_id)
             return
-        if current_state not in ('streaming_setup', 'setup_failed:streaming'):
+        if current_state not in ('streaming_setup', 'setup_failed:streaming', 'setup_failed:agent_restart'):
             raise ConsoleOrchestrationError(
                 'The console is no longer waiting for credentials.',
                 status=409,
                 code='console_retry_not_allowed',
             )
-        orchestrator.quarantine_staged(name)
         host.console_credentials(
             job_id,
             guest_username=guest_username,
@@ -416,17 +416,16 @@ def _start_remote_moonlight_console_retry(*, host, host_id, job_id, name, guest_
             sunshine_username=sunshine_username,
             sunshine_password=sunshine_password,
         )
-        plan = orchestrator.build_plan(name=name, guest_ip=guest_ip, route_name=route_name)
-        orchestrator.stage_plan(plan)
-        started = orchestrator.start_staged(name)
-        started = orchestrator.pair_staged(
+        started = orchestrator.repair_staged(
             name,
+            guest_ip=guest_ip,
+            route_name=route_name,
             sunshine_username=sunshine_username,
             sunshine_password=sunshine_password,
         )
         host.console_complete(
             job_id,
-            route_prefix=str(started.get('routePrefix') or plan.route_prefix),
+            route_prefix=str(started.get('routePrefix') or _remote_console_route_name(name, host_id)),
             guest_tcp_verified=bool(started.get('guestTcpVerified')),
         )
         _set_console_retry_result(key, status='ready', operation_id=operation_id)
@@ -434,10 +433,6 @@ def _start_remote_moonlight_console_retry(*, host, host_id, job_id, name, guest_
     except ConsoleOrchestrationError as exc:
         failure_code = _safe_console_retry_code(getattr(exc, 'code', 'console_failed'))
         _set_console_retry_result(key, status='failed', operation_id=operation_id, failure_code=failure_code)
-        try:
-            orchestrator.stop_staged(name)
-        except Exception:
-            pass
         try:
             if failure_code not in ('console_retry_not_allowed',):
                 host.console_failed(job_id, code=failure_code)
@@ -448,20 +443,12 @@ def _start_remote_moonlight_console_retry(*, host, host_id, job_id, name, guest_
         failure_code = _safe_console_retry_code(getattr(exc, 'code', 'console_failed'))
         _set_console_retry_result(key, status='failed', operation_id=operation_id, failure_code=failure_code)
         try:
-            orchestrator.stop_staged(name)
-        except Exception:
-            pass
-        try:
             host.console_failed(job_id, code=failure_code)
         except Exception:
             pass
         app.logger.warning('EpicVM console retry failed operation=%s code=%s', operation_id, failure_code)
     except Exception:
         _set_console_retry_result(key, status='failed', operation_id=operation_id, failure_code='console_failed')
-        try:
-            orchestrator.stop_staged(name)
-        except Exception:
-            pass
         try:
             host.console_failed(job_id, code='console_failed')
         except Exception:
@@ -542,7 +529,7 @@ def _start_remote_moonlight_console_repair(*, host, host_id, job_id, name, guest
         current = host.provisioning_status(job_id)
         current_job = current.get('job') if isinstance(current, dict) else None
         current_state = str(current_job.get('state') or '') if isinstance(current_job, dict) else ''
-        if current_state not in ('ready', 'setup_failed:streaming'):
+        if current_state not in ('ready', 'streaming_setup', 'setup_failed:streaming', 'setup_failed:agent_restart'):
             raise ConsoleOrchestrationError(
                 'Only a ready or recoverable remote VM console can be repaired.',
                 status=409,
@@ -598,31 +585,117 @@ def _start_remote_moonlight_console_repair(*, host, host_id, job_id, name, guest
                 status=502,
                 code='console_verification_failed',
             )
+        if current_state != 'ready':
+            host.console_complete(
+                job_id,
+                route_prefix=str(started.get('routePrefix') or _remote_console_route_name(name, host_id)),
+                guest_tcp_verified=bool(started.get('guestTcpVerified')),
+            )
         _set_console_retry_result(key, status='ready', operation_id=operation_id)
         app.logger.info('EpicVM console repair completed operation=%s status=ready', operation_id)
     except ConsoleOrchestrationError as exc:
         failure_code = _safe_console_retry_code(getattr(exc, 'code', 'console_failed'))
         _set_console_retry_result(key, status='failed', operation_id=operation_id, failure_code=failure_code)
-        try:
-            orchestrator.stop_staged(name)
-        except Exception:
-            pass
         app.logger.warning('EpicVM console repair failed operation=%s code=%s', operation_id, failure_code)
     except VmHostUnavailable as exc:
         failure_code = _safe_console_retry_code(getattr(exc, 'code', 'console_failed'))
         _set_console_retry_result(key, status='failed', operation_id=operation_id, failure_code=failure_code)
-        try:
-            orchestrator.stop_staged(name)
-        except Exception:
-            pass
         app.logger.warning('EpicVM console repair failed operation=%s code=%s', operation_id, failure_code)
     except Exception:
         _set_console_retry_result(key, status='failed', operation_id=operation_id, failure_code='console_failed')
-        try:
-            orchestrator.stop_staged(name)
-        except Exception:
-            pass
         app.logger.warning('EpicVM console repair failed operation=%s code=console_failed', operation_id)
+    finally:
+        guest_username = guest_password = sunshine_username = sunshine_password = ''
+
+def _start_remote_guest_network_recovery(*, host, host_id, job_id, name,
+                                          route_name, guest_username,
+                                          guest_password, sunshine_username,
+                                          sunshine_password, orchestrator,
+                                          operation_id):
+    """Revalidate a retained guest network, then repair its console bundle.
+
+    This is intentionally separate from Moonlight bundle repair. A VM can be
+    Hyper-V-running while its guest Tailscale/WinRM endpoint has disappeared;
+    in that case pairing cannot succeed until the retained network checkpoint
+    is revalidated. The agent endpoint is stage-limited and never reissues a
+    claim or persists the request credentials.
+    """
+    key = (str(host_id), str(job_id))
+    try:
+        current = host.provisioning_status(job_id)
+        current_job = current.get('job') if isinstance(current, dict) else None
+        current_state = str(current_job.get('state') or '') if isinstance(current_job, dict) else ''
+        if current_state == 'ready':
+            if not hasattr(host, 'network_recovery'):
+                raise ConsoleOrchestrationError(
+                    'The remote host lacks the retained-network recovery boundary.',
+                    status=503,
+                    code='network_recovery_unavailable',
+                )
+            recovered = host.network_recovery(
+                job_id,
+                guest_username=guest_username,
+                guest_password=guest_password,
+                reverify=True,
+            )
+        elif current_state in ('streaming_setup', 'setup_failed:streaming', 'setup_failed:agent_restart'):
+            # A concurrent request may have completed network revalidation
+            # before this worker started. Continue idempotently from the
+            # console gate rather than sending a second recovery request.
+            recovered = {'job': current_job}
+        else:
+            raise ConsoleOrchestrationError(
+                'The retained VM is no longer eligible for network recovery.',
+                status=409,
+                code='network_recovery_not_allowed',
+            )
+        recovered_job = recovered.get('job') if isinstance(recovered, dict) else None
+        recovered_ip = str(recovered_job.get('tailnetIp') or '') if isinstance(recovered_job, dict) else ''
+        if not recovered_ip:
+            raise ConsoleOrchestrationError(
+                'The remote host did not return a verified guest address after network recovery.',
+                status=422,
+                code='tailnet_ip_missing',
+            )
+        host.console_credentials(
+            job_id,
+            guest_username=guest_username,
+            guest_password=guest_password,
+            sunshine_username=sunshine_username,
+            sunshine_password=sunshine_password,
+            reconcile_only=True,
+        )
+        started = orchestrator.repair_staged(
+            name,
+            guest_ip=recovered_ip,
+            route_name=route_name,
+            sunshine_username=sunshine_username,
+            sunshine_password=sunshine_password,
+        )
+        if not isinstance(started, dict) or not bool(started.get('ok')):
+            raise ConsoleOrchestrationError(
+                'The recovered Moonlight console did not pass verification.',
+                status=502,
+                code='console_verification_failed',
+            )
+        host.console_complete(
+            job_id,
+            route_prefix=str(started.get('routePrefix') or _remote_console_route_name(name, host_id)),
+            guest_tcp_verified=bool(started.get('guestTcpVerified')),
+        )
+        _set_console_retry_result(key, status='ready', operation_id=operation_id)
+        app.logger.info('EpicVM guest network recovery completed operation=%s status=ready', operation_id)
+    except ConsoleOrchestrationError as exc:
+        failure_code = _safe_console_retry_code(getattr(exc, 'code', 'network_recovery_failed'))
+        _set_console_retry_result(key, status='failed', operation_id=operation_id, failure_code=failure_code)
+        app.logger.warning('EpicVM guest network recovery failed operation=%s code=%s', operation_id, failure_code)
+    except VmHostUnavailable as exc:
+        failure_code = _safe_console_retry_code(getattr(exc, 'code', 'network_recovery_failed'))
+        _set_console_retry_result(key, status='failed', operation_id=operation_id, failure_code=failure_code)
+        app.logger.warning('EpicVM guest network recovery failed operation=%s code=%s', operation_id, failure_code)
+    except Exception:
+        _set_console_retry_result(key, status='failed', operation_id=operation_id, failure_code='network_recovery_failed')
+        app.logger.warning('EpicVM guest network recovery failed operation=%s code=network_recovery_failed', operation_id)
     finally:
         guest_username = guest_password = sunshine_username = sunshine_password = ''
 
@@ -773,7 +846,7 @@ def _remote_console_job(host, name: str) -> dict:
         item for item in jobs
         if isinstance(item, dict)
         and str(item.get('name') or '').strip().lower() == str(name).strip().lower()
-        and str(item.get('state') or '') in ('ready', 'setup_failed:streaming')
+        and str(item.get('state') or '') in ('ready', 'streaming_setup', 'setup_failed:streaming', 'setup_failed:agent_restart')
         and (
             str(item.get('state') or '') == 'ready'
             or 'management_handoff' in {
@@ -886,8 +959,77 @@ def _queue_remote_console_repair(*, host, host_id: str, job_id: str, name: str,
     }
 
 
+def _queue_remote_guest_network_recovery(*, host, host_id: str, job_id: str,
+                                          name: str, route_name: str,
+                                          orchestrator) -> dict:
+    """Queue one retained-guest network revalidation for a stale VM."""
+    resolved_sunshine = _default_sunshine_credentials()
+    if not resolved_sunshine:
+        raise ConsoleOrchestrationError(
+            'The protected Sunshine default is not configured on this dashboard.',
+            status=503,
+            code='sunshine_credentials_unavailable',
+        )
+    resolved_guest = _default_guest_credentials()
+    if not resolved_guest:
+        raise ConsoleOrchestrationError(
+            'The protected guest default is not configured on this dashboard.',
+            status=503,
+            code='guest_credentials_unavailable',
+        )
+    sunshine_username, sunshine_password = resolved_sunshine
+    guest_username, guest_password = resolved_guest
+    task_key = (str(host_id), str(job_id))
+    _prune_console_retry_tasks()
+    worker = None
+    with _CONSOLE_RETRY_LOCK:
+        pending = _CONSOLE_RETRY_TASKS.get(task_key)
+        if isinstance(pending, dict) and str(pending.get('status') or 'pending') == 'pending':
+            operation_id = str(pending.get('operationId') or '')
+            return {
+                'ok': True, 'healthy': False, 'pending': True, 'repaired': False,
+                'host_id': str(host_id), 'name': str(name),
+                'operationId': operation_id, 'jobId': str(job_id),
+                'routePrefix': f'/vm/{route_name}/',
+                'failureCode': 'network_recovery_pending',
+            }
+        if isinstance(pending, dict) and str(pending.get('status') or '') == 'ready':
+            return {
+                'ok': True, 'healthy': True, 'pending': False, 'repaired': True,
+                'host_id': str(host_id), 'name': str(name),
+                'operationId': str(pending.get('operationId') or ''),
+                'jobId': str(job_id), 'routePrefix': f'/vm/{route_name}/',
+            }
+        operation_id = secrets.token_hex(16)
+        _CONSOLE_RETRY_TASKS[task_key] = {
+            'operationId': operation_id, 'startedAt': time.time(),
+            'status': 'pending', 'failureCode': '', 'routeReady': False,
+            'kind': 'network_recovery',
+        }
+        worker = threading.Thread(
+            target=_start_remote_guest_network_recovery,
+            kwargs={
+                'host': host, 'host_id': str(host_id), 'job_id': str(job_id),
+                'name': str(name), 'route_name': str(route_name),
+                'guest_username': guest_username, 'guest_password': guest_password,
+                'sunshine_username': sunshine_username, 'sunshine_password': sunshine_password,
+                'orchestrator': orchestrator, 'operation_id': operation_id,
+            },
+            name=f'epicvm-network-recovery-{operation_id[:8]}', daemon=True,
+        )
+    if worker is not None:
+        worker.start()
+    return {
+        'ok': True, 'healthy': False, 'pending': True, 'repaired': False,
+        'host_id': str(host_id), 'name': str(name),
+        'operationId': operation_id, 'jobId': str(job_id),
+        'routePrefix': f'/vm/{route_name}/',
+        'failureCode': 'network_recovery_pending',
+    }
+
+
 def _reconcile_remote_console(name: str, host_id: str, *, wait: bool = False,
-                              wait_timeout: float = 60.0) -> dict:
+                              wait_timeout: float = 90.0) -> dict:
     """Verify a remote Moonlight host, repairing stale client state once.
 
     ``wait=True`` is used by the forward-auth boundary so Moonlight never sees
@@ -919,19 +1061,25 @@ def _reconcile_remote_console(name: str, host_id: str, *, wait: bool = False,
             **verified,
         }
     except ConsoleOrchestrationError as exc:
-        # If the guest itself is down, do not quarantine a working bundle. The
-        # next request will retry after the bounded Sunshine readiness window.
         if getattr(exc, 'code', '') == 'sunshine_tcp_unavailable':
-            raise
-    queued = _queue_remote_console_repair(
-        host=host,
-        host_id=str(host_id),
-        job_id=job_id,
-        name=safe_name,
-        guest_ip=guest_ip,
-        route_name=route_name,
-        orchestrator=orchestrator,
-    )
+            queued = _queue_remote_guest_network_recovery(
+                host=host,
+                host_id=str(host_id),
+                job_id=job_id,
+                name=safe_name,
+                route_name=route_name,
+                orchestrator=orchestrator,
+            )
+        else:
+            queued = _queue_remote_console_repair(
+                host=host,
+                host_id=str(host_id),
+                job_id=job_id,
+                name=safe_name,
+                guest_ip=guest_ip,
+                route_name=route_name,
+                orchestrator=orchestrator,
+            )
     if not wait or not queued.get('pending'):
         return queued
     deadline = time.monotonic() + max(1.0, float(wait_timeout))
@@ -2521,6 +2669,23 @@ def _build_remote_console_url(name: str, host_id: str, route_prefix: str) -> str
     root = f'{base}{route}' if base else route
     return f'{root}?host_id={url_quote(str(host_id), safe="")}'
 
+
+def _build_remote_console_warmup_url(name: str, host_id: str) -> str:
+    """Build the non-Moonlight recovery page for a remote VM.
+
+    A remote inventory record may be Running before its guest management and
+    streaming path is usable.  Never point that state at the generic VM page:
+    that page is a permanent unreachable screen and cannot transition to
+    Moonlight.  The recovery endpoint is deliberately same-origin and carries
+    only the host selector.
+    """
+    base = _external_base_url()
+    safe_name = url_quote(str(name or '').strip().lower(), safe='')
+    safe_host = url_quote(str(host_id or '').strip(), safe='')
+    path = f'/dashboard/console/{safe_name}/'
+    root = f'{base}{path}' if base else path
+    return f'{root}?host_id={safe_host}'
+
 def manager_json_list(host_id=None):
     """Return a list of instances with best-effort status and URL.
     Tries the selected provider's manager list first. Falls back to scanning
@@ -2546,7 +2711,7 @@ def manager_json_list(host_id=None):
                     if item.get('consoleReady') and item.get('consoleRoutePrefix'):
                         item['url'] = _build_remote_console_url(item['name'], effective_host_id, item.get('consoleRoutePrefix'))
                     else:
-                        item['url'] = _build_vm_url(item['name'], host_id=effective_host_id)
+                        item['url'] = _build_remote_console_warmup_url(item['name'], effective_host_id)
             if hasattr(VM_HOST_REGISTRY, 'remember_inventory'):
                 try:
                     VM_HOST_REGISTRY.remember_inventory(effective_host_id, normalized)
@@ -2597,7 +2762,7 @@ def manager_json_list(host_id=None):
                         if item.get('consoleReady') and item.get('consoleRoutePrefix'):
                             item['url'] = _build_remote_console_url(item['name'], effective_host_id, item.get('consoleRoutePrefix'))
                         else:
-                            item['url'] = _build_vm_url(item['name'], host_id=effective_host_id)
+                            item['url'] = _build_remote_console_warmup_url(item['name'], effective_host_id)
                 return cached
             raise
     except Exception:
@@ -3114,6 +3279,59 @@ def dashboard_console_entry(name):
     safe = str(name or '').strip().lower()
     if not re.fullmatch(r'[a-z0-9][a-z0-9._-]{0,62}', safe):
         return Response('Invalid VM name.', 400)
+
+    # Remote inventory is authoritative for power state, but Running is not
+    # equivalent to a usable guest/stream.  Send the card to this bounded
+    # warm-up endpoint instead of the generic VM page, which otherwise remains
+    # on the permanent "unreachable" screen and never transitions to Moonlight.
+    requested_host_id = str(request.args.get('host_id') or '').strip()
+    if requested_host_id and requested_host_id != 'local':
+        try:
+            reconciled = _reconcile_remote_console(safe, requested_host_id, wait=False)
+            route_prefix = str(reconciled.get('routePrefix') or '').strip()
+            if reconciled.get('healthy') and route_prefix:
+                response = redirect(_build_remote_console_url(safe, requested_host_id, route_prefix))
+                response.headers['Cache-Control'] = 'no-store'
+                response.headers['Referrer-Policy'] = 'no-referrer'
+                return response
+            code = _safe_console_retry_code(
+                reconciled.get('failureCode') or 'console_repair_pending',
+                'console_repair_pending',
+            )
+        except (ConsoleOrchestrationError, VmHostUnavailable) as exc:
+            code = _safe_console_retry_code(
+                getattr(exc, 'code', 'console_repair_pending'),
+                'console_repair_pending',
+            )
+        except Exception:
+            code = 'console_reconcile_failed'
+        retry_path = f'/dashboard/console/{url_quote(safe, safe="")}/'
+        retry_url = f'{retry_path}?host_id={url_quote(requested_host_id, safe="")}'
+        safe_code = html_escape(code, quote=True)
+        safe_name = html_escape(safe, quote=True)
+        safe_retry_url = html_escape(retry_url, quote=True)
+        page = (
+            '<!doctype html><html><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            '<meta http-equiv="refresh" content="3;url=' + safe_retry_url + '">'
+            '<title>Remote console recovering</title>'
+            '<style>body{margin:0;background:#050816;color:#e7f0f4;font:15px system-ui;display:grid;place-items:center;min-height:100vh}'
+            '.card{width:min(560px,calc(100vw - 48px));background:#071117;border:1px solid #1a2b33;padding:28px;box-sizing:border-box}'
+            '.muted{color:#9db2bb}code{color:#7ee7ff}</style></head><body><main class="card">'
+            '<h1>Remote console warming up</h1>'
+            '<p>The VM is running, but its guest management or streaming path is still initializing.</p>'
+            '<p class="muted">EpicVM will retry automatically. This is a readiness state, not a failed VM.</p>'
+            '<p class="muted">VM: <strong>' + safe_name + '</strong> · code: <code>' + safe_code + '</code></p>'
+            '<script>setTimeout(()=>location.replace(' + json.dumps(retry_url) + '),3000)</script>'
+            '</main></body></html>'
+        )
+        response = Response(page, status=200, mimetype='text/html')
+        response.headers['Cache-Control'] = 'no-store'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Retry-After'] = '3'
+        response.headers['X-EpicVM-Console-Code'] = code
+        return response
+
     orchestrator = _console_for_vm(safe)
     if _moonlight_console(orchestrator) and orchestrator.has_auto_login(safe):
         return redirect(f'/vm/{url_quote(safe, safe="")}/')

@@ -171,6 +171,8 @@ Describe 'Gaming GPU-P mounted volume selection' {
         $text | Should -Match 'AMD Radeon RX 6800 XT'
         $text | Should -Match '\$webglAttempts\s*=\s*3'
         $text | Should -Match 'WaitForExit\(15000\)'
+        $text | Should -Match 'renderFrameOk'
+        $text | Should -Match '--screenshot='
     }
 
     It 'uses the AMD-compatible WebGL path without forcing the GPU blocklist bypass' {

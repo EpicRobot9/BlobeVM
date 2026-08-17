@@ -307,6 +307,39 @@ def test_repair_preserves_existing_bundle_when_guest_tcp_is_unavailable(tmp_path
     assert not list(tmp_path.glob(".quarantine-*"))
 
 
+def test_repair_rolls_back_old_bundle_when_replacement_fails(tmp_path):
+    orch = make_orchestrator(tmp_path)
+    target = orch.stage_plan(orch.build_plan(name="alpha", guest_ip="100.111.82.1"))
+    old_plan = json.loads((target / "plan.json").read_text())
+    old_plan["paired"] = True
+    (target / "plan.json").write_text(json.dumps(old_plan))
+    starts = []
+
+    def start(name):
+        starts.append(name)
+        if len(starts) == 1:
+            raise ConsoleOrchestrationError("replacement failed", status=502, code="console_start_failed")
+        return {"ok": True, "routePrefix": "/vm/alpha--epic-pc/", "guestTcpVerified": True}
+
+    orch.start_staged = start
+    orch.stop_staged = lambda _name: None
+
+    with pytest.raises(ConsoleOrchestrationError) as failure:
+        orch.repair_staged(
+            "alpha",
+            guest_ip="100.111.82.1",
+            route_name="alpha--epic-pc",
+            sunshine_username="sunshine-user",
+            sunshine_password="secret-value",
+        )
+
+    assert failure.value.code == "console_start_failed"
+    assert starts == ["alpha", "alpha"]
+    assert target.exists()
+    assert json.loads((target / "plan.json").read_text()) == old_plan
+    assert not list((tmp_path / "quarantine").glob("alpha-*/plan.json"))
+
+
 def test_sunshine_pair_retries_when_sunshine_reports_pending_session(tmp_path):
     calls = []
     pin_responses = [

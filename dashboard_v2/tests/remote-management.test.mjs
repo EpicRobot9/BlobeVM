@@ -24,3 +24,9 @@ test('remote start and restart reconcile Moonlight before releasing the action',
   assert.match(source, /await reconcileRemoteConsole\(name, hostId\)/)
   assert.match(source, /remote console is still recovering/)
 })
+
+test('remote console opens a warmup route before the Moonlight route is verified', () => {
+  assert.match(source, /consoleLaunchable = isRemote \? \(vm\.running === true && !!vm\.url\)/)
+  assert.match(source, /consoleRouteReady !== false/)
+  assert.match(source, /opening its retry page/)
+})
