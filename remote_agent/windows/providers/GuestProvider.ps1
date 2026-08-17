@@ -1359,8 +1359,20 @@ function Invoke-EpicVMSunshineConfiguration {
         # selected 100.64/10 address is reachable; it does not prove WinRM.
         $transport=$null
         $managementInvoker=Get-EpicVMHyperVValue -Object $Provider -Name 'ManagementInvoker' -Default $null
-        if($null -eq $managementInvoker -and -not (Test-EpicVMGuestRdpReachability -Address $GuestAddress -Port 3389 -TimeoutMilliseconds 3000)){
-            throw (New-EpicVMHyperVError -Code 'tailscale_unreachable' -Message 'The guest Tailscale address is not reachable.')
+        if($null -eq $managementInvoker){
+            if($ManagementHandoffAlreadyVerified){
+                # A restart can briefly withdraw the guest's Tailscale-facing
+                # RDP listener even while the VM is already Running. Treat it
+                # as a bounded read-only recovery race, not a permanent guest
+                # failure, before checking WinRM.
+                $tailscaleDeadline=[DateTime]::UtcNow.AddSeconds(30)
+                while(-not (Test-EpicVMGuestRdpReachability -Address $GuestAddress -Port 3389 -TimeoutMilliseconds 2000)){
+                    if([DateTime]::UtcNow -ge $tailscaleDeadline){throw (New-EpicVMHyperVError -Code 'tailscale_unreachable' -Message 'The guest Tailscale address is not reachable.')}
+                    Start-Sleep -Seconds 2
+                }
+            } elseif(-not (Test-EpicVMGuestRdpReachability -Address $GuestAddress -Port 3389 -TimeoutMilliseconds 3000)){
+                throw (New-EpicVMHyperVError -Code 'tailscale_unreachable' -Message 'The guest Tailscale address is not reachable.')
+            }
         }
         $managementInitialTimeout=if($null -eq $managementInvoker){20}else{30}
         $managementRecoveryTimeout=if($null -eq $managementInvoker){20}else{30}
@@ -1375,12 +1387,27 @@ function Invoke-EpicVMSunshineConfiguration {
             # spending the full remoting timeout before the one allowed,
             # stage-limited management-handoff repair.
             if ($ManagementHandoffAlreadyVerified) {
-                # A persisted handoff is authoritative for this stage. The
-                # console retry must never re-enter Direct or replay a
-                # destructive handoff repair. Sunshine will use WinRM below;
-                # any failure there is reported as management transport, not
-                # mislabelled as a LocalSystem Direct failure.
-                $transport=[ordered]@{ok=$true;managementEndpoint=$true;checkpointReused=$true}
+                # A persisted handoff is a checkpoint, not proof that a reboot
+                # left WinRM listening. Wait on the read-only management gate;
+                # if the listener is still absent, the catch block below may
+                # perform exactly one bounded LocalSystem management repair and
+                # then requires a fresh Tailscale/WinRM readiness check. It
+                # never replays the credential-bearing Sunshine write here.
+                # An injected ManagementInvoker is a deterministic test seam
+                # and has already represented the handoff checkpoint, so do not
+                # manufacture an extra remoting call before the Sunshine test.
+                if ($null -eq $managementInvoker) {
+                    $managementDeadline = [DateTime]::UtcNow.AddSeconds(30)
+                    while (-not (Test-EpicVMManagementPort -Address $GuestAddress -Port $managementPort -TimeoutMilliseconds 2000)) {
+                        if ([DateTime]::UtcNow -ge $managementDeadline) {
+                            throw 'EPICVM_MANAGEMENT_OPEN_TIMEOUT'
+                        }
+                        Start-Sleep -Seconds 2
+                    }
+                    $transport=Invoke-EpicVMManagementTransport -Provider $Provider -Address $GuestAddress -Credential $credential -Script (Get-EpicVMManagementReadinessScript) -TimeoutSeconds $managementRecoveryTimeout -RetryCount 1
+                } else {
+                    $transport=[ordered]@{ok=$true;managementEndpoint=$true;handoffAlreadyVerified=$true}
+                }
             } else {
                 if($null -eq $managementInvoker -and -not (Test-EpicVMManagementPort -Address $GuestAddress -Port $managementPort -TimeoutMilliseconds 2000)){
                     throw 'EPICVM_MANAGEMENT_OPEN_FAILED'
@@ -1391,18 +1418,69 @@ function Invoke-EpicVMSunshineConfiguration {
             $managementMessage=[string]$_.Exception.Message
             if($managementMessage -match 'EPICVM_MANAGEMENT_CREDENTIAL_REJECTED') { throw }
             if($managementMessage -notmatch 'EPICVM_MANAGEMENT_(OPEN_FAILED|OPEN_TIMEOUT|OPERATION_FAILED|OPERATION_TIMEOUT|UNAVAILABLE)') { throw }
-            if(-not $ManagementHandoffAlreadyVerified -and $null -eq $managementInvoker){
-                # The LocalSystem diagnostic is read-only. Only if it is
-                # conclusively successful may Direct perform this one bounded
-                # WinRM handoff write. Sunshine never runs through Direct.
-                $diagnostic=Invoke-EpicVMPowerShellDirectDiagnostic -Provider $Provider -VmName $VmName -VmId $vmId -Credential $directCredential
-                if([string]$diagnostic.code -ne 'ok'){
-                    throw (New-EpicVMHyperVError -Code ([string]$diagnostic.code) -Message 'The LocalSystem PowerShell Direct diagnostic did not pass.')
+            if($ManagementHandoffAlreadyVerified -and $null -eq $managementInvoker){
+                # After a VM restart the TCP listener can be open before the
+                # WinRM endpoint accepts a real authenticated request. Retry
+                # only the read-only readiness script inside a bounded window.
+                # If the listener never returns, perform one stage-limited
+                # LocalSystem repair of the WinRM endpoint, then verify the
+                # repaired endpoint over Tailscale/WinRM before proceeding.
+                # This repairs stale handoff checkpoints without replaying the
+                # credential-bearing Sunshine operation.
+                $readinessDeadline=[DateTime]::UtcNow.AddSeconds(30)
+                $lastManagementError=$null
+                $readinessVerified=$false
+                while([DateTime]::UtcNow -lt $readinessDeadline){
+                    try {
+                        $transport=Invoke-EpicVMManagementTransport -Provider $Provider -Address $GuestAddress -Credential $credential -Script (Get-EpicVMManagementReadinessScript) -TimeoutSeconds $managementRecoveryTimeout -RetryCount 1
+                        $readinessVerified=$true
+                        break
+                    } catch {
+                        $lastManagementError=$_.Exception
+                        $retryMessage=[string]$_.Exception.Message
+                        if($retryMessage -notmatch 'EPICVM_MANAGEMENT_(OPEN_FAILED|OPEN_TIMEOUT|OPERATION_FAILED|OPERATION_TIMEOUT|UNAVAILABLE)') { throw }
+                        Start-Sleep -Seconds 2
+                    }
                 }
-                $repair=Invoke-EpicVMPowerShellDirectOnce -Provider $Provider -VmName $VmName -VmId $vmId -Credential $directCredential -Script (Get-EpicVMGuestManagementConfigurationScript) -ArgumentList @($managementPort,$managementUseSsl) -TimeoutSeconds 45
-                if(-not [bool](Get-EpicVMHyperVValue -Object $repair -Name 'ok' -Default $false)){throw 'EPICVM_MANAGEMENT_ENDPOINT_FAILED'}
+                if(-not $readinessVerified){
+                    $diagnostic=Invoke-EpicVMPowerShellDirectDiagnostic -Provider $Provider -VmName $VmName -VmId $vmId -Credential $directCredential
+                    if([string]$diagnostic.code -ne 'ok'){
+                        throw $lastManagementError
+                    }
+                    $repair=Invoke-EpicVMPowerShellDirectOnce -Provider $Provider -VmName $VmName -VmId $vmId -Credential $directCredential -Script (Get-EpicVMGuestManagementConfigurationScript) -ArgumentList @($managementPort,$managementUseSsl) -TimeoutSeconds 45
+                    if(-not [bool](Get-EpicVMHyperVValue -Object $repair -Name 'ok' -Default $false) -or
+                       -not [bool](Get-EpicVMHyperVValue -Object $repair -Name 'managementEndpoint' -Default $false) -or
+                       -not [bool](Get-EpicVMHyperVValue -Object $repair -Name 'firewallScoped' -Default $false)){
+                        throw (New-EpicVMHyperVError -Code 'management_handoff_failed' -Message 'The bounded management endpoint repair did not verify.')
+                    }
+                    $postRepairDeadline=[DateTime]::UtcNow.AddSeconds(30)
+                    while($true){
+                        try {
+                            $transport=Invoke-EpicVMManagementTransport -Provider $Provider -Address $GuestAddress -Credential $credential -Script (Get-EpicVMManagementReadinessScript) -TimeoutSeconds $managementRecoveryTimeout -RetryCount 1
+                            break
+                        } catch {
+                            $lastManagementError=$_.Exception
+                            $retryMessage=[string]$_.Exception.Message
+                            if($retryMessage -notmatch 'EPICVM_MANAGEMENT_(OPEN_FAILED|OPEN_TIMEOUT|OPERATION_FAILED|OPERATION_TIMEOUT|UNAVAILABLE)') { throw }
+                            if([DateTime]::UtcNow -ge $postRepairDeadline){ throw $lastManagementError }
+                            Start-Sleep -Seconds 2
+                        }
+                    }
+                }
+            } else {
+                if(-not $ManagementHandoffAlreadyVerified -and $null -eq $managementInvoker){
+                    # The LocalSystem diagnostic is read-only. Only if it is
+                    # conclusively successful may Direct perform this one bounded
+                    # WinRM handoff write. Sunshine never runs through Direct.
+                    $diagnostic=Invoke-EpicVMPowerShellDirectDiagnostic -Provider $Provider -VmName $VmName -VmId $vmId -Credential $directCredential
+                    if([string]$diagnostic.code -ne 'ok'){
+                        throw (New-EpicVMHyperVError -Code ([string]$diagnostic.code) -Message 'The LocalSystem PowerShell Direct diagnostic did not pass.')
+                    }
+                    $repair=Invoke-EpicVMPowerShellDirectOnce -Provider $Provider -VmName $VmName -VmId $vmId -Credential $directCredential -Script (Get-EpicVMGuestManagementConfigurationScript) -ArgumentList @($managementPort,$managementUseSsl) -TimeoutSeconds 45
+                    if(-not [bool](Get-EpicVMHyperVValue -Object $repair -Name 'ok' -Default $false)){throw 'EPICVM_MANAGEMENT_ENDPOINT_FAILED'}
+                }
+                $transport=Invoke-EpicVMManagementTransport -Provider $Provider -Address $GuestAddress -Credential $credential -Script (Get-EpicVMManagementReadinessScript) -TimeoutSeconds $managementRecoveryTimeout -RetryCount 1
             }
-            $transport=Invoke-EpicVMManagementTransport -Provider $Provider -Address $GuestAddress -Credential $credential -Script (Get-EpicVMManagementReadinessScript) -TimeoutSeconds $managementRecoveryTimeout -RetryCount 1
         }
         if(-not [bool](Get-EpicVMHyperVValue -Object $transport -Name 'ok' -Default $false)){throw 'EPICVM_MANAGEMENT_UNAVAILABLE'}
         if($null -ne $ManagementCheckpoint -and -not $ManagementHandoffAlreadyVerified){

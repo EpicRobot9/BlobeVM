@@ -150,7 +150,7 @@ def _safe_provisioning_job(job: object) -> dict:
         'failureDetailCode', 'tailnetIp', 'vmId', 'consoleRoutePrefix',
         'completedStages', 'claimConsumed', 'claimUsed', 'updatedAt',
         'createdAt', 'operationId', 'consoleRetryPending', 'consoleRetryOutcome',
-        'consoleRepairPending', 'consoleRepairOutcome', 'consoleOperationId',
+        'consoleRepairPending', 'consoleRepairOutcome', 'consoleRepairErrorCode', 'consoleOperationId',
         'autonomousPending', 'autonomousOperationId', 'autonomousStage',
         'autonomousOutcome', 'autonomousErrorCode',
         'cpuCount', 'memoryBytes', 'diskSizeBytes', 'gpuPartitionPercent',
@@ -527,10 +527,11 @@ def _start_remote_autonomous_provisioning(*, host, host_id, job_id, name,
 
 
 def _start_remote_moonlight_console_repair(*, host, host_id, job_id, name, guest_ip,
-                                             route_name, sunshine_username,
+                                             route_name, guest_username,
+                                             guest_password, sunshine_username,
                                              sunshine_password, orchestrator,
                                              operation_id):
-    """Repair only a retained Moonlight bundle for an already-ready VM.
+    """Repair only a retained Moonlight bundle for a ready/recoverable VM.
 
     The provisioning job is deliberately read-only here.  This worker exists
     for the case where the VM and its guest checkpoints are healthy but the
@@ -541,12 +542,31 @@ def _start_remote_moonlight_console_repair(*, host, host_id, job_id, name, guest
         current = host.provisioning_status(job_id)
         current_job = current.get('job') if isinstance(current, dict) else None
         current_state = str(current_job.get('state') or '') if isinstance(current_job, dict) else ''
-        if current_state != 'ready':
+        if current_state not in ('ready', 'setup_failed:streaming'):
             raise ConsoleOrchestrationError(
-                'Only a ready remote VM console can be repaired.',
+                'Only a ready or recoverable remote VM console can be repaired.',
                 status=409,
                 code='console_repair_not_allowed',
             )
+        if not hasattr(host, 'console_credentials'):
+            raise ConsoleOrchestrationError(
+                'Automatic Sunshine setup is unavailable on this host.',
+                status=503,
+                code='sunshine_setup_unavailable',
+            )
+        # Reconcile the guest-side Sunshine account before replacing the
+        # Moonlight bundle.  This is deliberately a ready-state, stage-limited
+        # agent operation: it does not reprovision, re-enroll, or mutate the VM
+        # claim, and prevents a stale/changed Sunshine credential from causing
+        # the same repair loop again.
+        host.console_credentials(
+            job_id,
+            guest_username=guest_username,
+            guest_password=guest_password,
+            sunshine_username=sunshine_username,
+            sunshine_password=sunshine_password,
+            reconcile_only=True,
+        )
         started = orchestrator.repair_staged(
             name,
             guest_ip=guest_ip,
@@ -586,7 +606,7 @@ def _start_remote_moonlight_console_repair(*, host, host_id, job_id, name, guest
             pass
         app.logger.warning('EpicVM console repair failed operation=%s code=console_failed', operation_id)
     finally:
-        sunshine_username = sunshine_password = ''
+        guest_username = guest_password = sunshine_username = sunshine_password = ''
 
 def _remote_console_route_name(name: str, host_id: str) -> str:
     """Return a stable route namespace for a remote host's VM name.
@@ -785,10 +805,11 @@ def _ensure_remote_vm_exists(host, name):
                 inventories.append(cached_inventory(candidate_id))
             except Exception:
                 pass
-        try:
-            inventories.append(candidate.list_vms())
-        except Exception:
-            pass
+        # Do not fan out live inventory calls to every other enrolled host
+        # while servicing an action for the selected host. A dead host used to
+        # hold stop/start/restart open until the reverse proxy timed out. The
+        # selected host remains authoritative; other hosts are checked only
+        # through the redacted cache populated by normal inventory refreshes.
         if any(str(item.get('name', '')) == str(name) for inventory in inventories for item in inventory):
             owners.append(candidate_id)
     if owners:
@@ -2249,24 +2270,29 @@ def manager_json_list(host_id=None):
     the instances directory and asking the provider for each URL individually.
     """
     host_provider = _vm_host(host_id)
+    # _vm_host(None) resolves request values for callers such as
+    # /dashboard/api/list. Preserve that resolved identity when constructing
+    # links; otherwise remote cards silently receive localhost URLs.
+    effective_host_id = str(host_id or getattr(host_provider, 'host_id', 'local') or 'local').strip() or 'local'
+    is_remote_host = getattr(host_provider, 'kind', 'local') == 'remote' and effective_host_id != 'local'
     instances = []
     try:
         # Fast path: let the provider parse its inventory while preserving the
         # existing manager command and output format.
         instances = host_provider.list_vms()
-        if host_id and host_id != 'local':
+        if is_remote_host:
             # A remote provider owns its inventory; never fall back to the
             # dashboard server's local instance directory for an empty result.
             normalized = host_provider.normalize_inventory(instances)
             for item in normalized:
                 if item.get('name'):
                     if item.get('consoleReady') and item.get('consoleRoutePrefix'):
-                        item['url'] = _build_remote_console_url(item['name'], host_id, item.get('consoleRoutePrefix'))
+                        item['url'] = _build_remote_console_url(item['name'], effective_host_id, item.get('consoleRoutePrefix'))
                     else:
-                        item['url'] = _build_vm_url(item['name'], host_id=host_id)
+                        item['url'] = _build_vm_url(item['name'], host_id=effective_host_id)
             if hasattr(VM_HOST_REGISTRY, 'remember_inventory'):
                 try:
-                    VM_HOST_REGISTRY.remember_inventory(host_id, normalized)
+                    VM_HOST_REGISTRY.remember_inventory(effective_host_id, normalized)
                 except Exception:
                     pass
             return normalized
@@ -2304,23 +2330,23 @@ def manager_json_list(host_id=None):
         # A remote host owns its inventory. Falling back to this server's
         # instance directory would relabel local VMs as remote and can send
         # later actions to the wrong destination.
-        if host_id and host_id != 'local':
-            cached = VM_HOST_REGISTRY.cached_inventory(host_id) if hasattr(VM_HOST_REGISTRY, 'cached_inventory') else []
+        if is_remote_host:
+            cached = VM_HOST_REGISTRY.cached_inventory(effective_host_id) if hasattr(VM_HOST_REGISTRY, 'cached_inventory') else []
             if cached:
                 for item in cached:
                     item['host_online'] = False
                     item['status'] = 'offline'
                     if item.get('name'):
                         if item.get('consoleReady') and item.get('consoleRoutePrefix'):
-                            item['url'] = _build_remote_console_url(item['name'], host_id, item.get('consoleRoutePrefix'))
+                            item['url'] = _build_remote_console_url(item['name'], effective_host_id, item.get('consoleRoutePrefix'))
                         else:
-                            item['url'] = _build_vm_url(item['name'], host_id=host_id)
+                            item['url'] = _build_vm_url(item['name'], host_id=effective_host_id)
                 return cached
             raise
     except Exception:
         # Local discovery remains best-effort for legacy deployments. A remote
         # provider must never fall back to this server's instance directory.
-        if host_id and host_id != 'local':
+        if is_remote_host:
             raise
         # likely docker CLI or manager is not present -> fall back
         pass
@@ -2436,7 +2462,7 @@ def _docker_inspect_vm(name: str):
         return None, str(e)
 
 
-def _vm_status_payload(name: str):
+def _vm_status_payload(name: str, *, include_optimizer: bool = True):
     info, err = _docker_inspect_vm(name)
     url = _build_vm_url(name) or ''
     payload = {
@@ -2480,23 +2506,24 @@ def _vm_status_payload(name: str):
         restarting or
         payload['status'] == 'dead'
     )
-    try:
-        opt = dash_optimizer.status()
-        vm_states = ((opt.get('stats') or {}).get('vmStates') or []) if isinstance(opt, dict) else []
-        vm_meta = next((v for v in vm_states if v.get('name') == name), None)
-        if vm_meta:
-            payload['optimizer'] = vm_meta
-            payload['recoveryState'] = vm_meta.get('recoveryState')
-            payload['protectedVm'] = bool(vm_meta.get('protected'))
-            payload['activityClass'] = vm_meta.get('activityClass')
-            payload['profile'] = vm_meta.get('profile')
-            payload['unstable'] = bool(vm_meta.get('unstable'))
+    if include_optimizer:
         try:
-            payload['notifications'] = dash_optimizer.get_vm_notifications(name)
+            opt = dash_optimizer.status()
+            vm_states = ((opt.get('stats') or {}).get('vmStates') or []) if isinstance(opt, dict) else []
+            vm_meta = next((v for v in vm_states if v.get('name') == name), None)
+            if vm_meta:
+                payload['optimizer'] = vm_meta
+                payload['recoveryState'] = vm_meta.get('recoveryState')
+                payload['protectedVm'] = bool(vm_meta.get('protected'))
+                payload['activityClass'] = vm_meta.get('activityClass')
+                payload['profile'] = vm_meta.get('profile')
+                payload['unstable'] = bool(vm_meta.get('unstable'))
+            try:
+                payload['notifications'] = dash_optimizer.get_vm_notifications(name)
+            except Exception:
+                payload['notifications'] = []
         except Exception:
-            payload['notifications'] = []
-    except Exception:
-        pass
+            pass
     return payload
 
 
@@ -3263,7 +3290,6 @@ def api_get_vm_settings(name):
         try:
             host = _vm_host(requested_host_id)
             if getattr(host, 'kind', 'local') == 'remote':
-                _ensure_remote_vm_exists(host, name)
                 envelope = host.status(name)
                 raw_vm = envelope.get('vm') if isinstance(envelope, dict) else envelope
                 vm = normalize_remote_vm_record(raw_vm if isinstance(raw_vm, dict) else {})
@@ -3321,7 +3347,6 @@ def api_set_vm_settings(name):
         if requested_host_id != 'local':
             host = _vm_host(requested_host_id)
             if getattr(host, 'kind', 'local') == 'remote':
-                _ensure_remote_vm_exists(host, name)
                 return jsonify({
                     'ok': False,
                     'code': 'remote_settings_read_only',
@@ -3399,7 +3424,6 @@ def dashboard_vm_wrapper(name):
         if is_remote_wrapper:
                 try:
                         remote_host = _vm_host(host_id)
-                        _ensure_remote_vm_exists(remote_host, name)
                         remote_status_fn = getattr(remote_host, 'status', None)
                         if not callable(remote_status_fn):
                                 raise RuntimeError('selected remote host does not support status')
@@ -3442,7 +3466,10 @@ def dashboard_vm_wrapper(name):
                 url = ''
         else:
                 url = _build_vm_embed_url(name) or ''
-                initial_status = _vm_status_payload(name)
+                # Keep the page-render path bounded. Optimizer/docker metadata
+                # is available from the explicit status endpoint and must not
+                # delay the VM page behind a slow control-plane probe.
+                initial_status = _vm_status_payload(name, include_optimizer=False)
         cfg = _load_dashboard_settings()
         vm_titles = cfg.get('vm_titles', {}) if isinstance(cfg.get('vm_titles', {}), dict) else {}
         title = vm_titles.get(name) or f"EpicVM - {name}"
@@ -4698,6 +4725,10 @@ def api_provisioning_job_repair_console(job_id):
     if not resolved_sunshine:
         return jsonify({'ok': False, 'error': {'code': 'sunshine_credentials_unavailable', 'message': 'The protected Sunshine default is not configured on this dashboard.'}}), 503
     sunshine_username, sunshine_password = resolved_sunshine
+    resolved_guest = _default_guest_credentials()
+    if not resolved_guest:
+        return jsonify({'ok': False, 'error': {'code': 'guest_credentials_unavailable', 'message': 'The protected guest default is not configured on this dashboard.'}}), 503
+    guest_username, guest_password = resolved_guest
     try:
         host = _vm_host(host_id)
         if getattr(host, 'kind', 'local') != 'remote':
@@ -4709,9 +4740,15 @@ def api_provisioning_job_repair_console(job_id):
         current = host.provisioning_status(job_id)
         job = current.get('job') if isinstance(current, dict) else None
         current_state = str(job.get('state') or '') if isinstance(job, dict) else ''
-        if current_state != 'ready':
+        completed_stages = job.get('completedStages') if isinstance(job, dict) else []
+        completed_stages = completed_stages if isinstance(completed_stages, list) else []
+        recoverable_state = current_state == 'ready' or (
+            current_state == 'setup_failed:streaming' and
+            'management_handoff' in {str(stage) for stage in completed_stages}
+        )
+        if not recoverable_state:
             raise ConsoleOrchestrationError(
-                'Only a ready remote VM console can be repaired.',
+                'Only a ready or recoverable remote VM console can be repaired.',
                 status=409,
                 code='console_repair_not_allowed',
             )
@@ -4750,6 +4787,8 @@ def api_provisioning_job_repair_console(job_id):
                 'name': name,
                 'guest_ip': guest_ip,
                 'route_name': _remote_console_route_name(name, host_id),
+                'guest_username': guest_username,
+                'guest_password': guest_password,
                 'sunshine_username': sunshine_username,
                 'sunshine_password': sunshine_password,
                 'orchestrator': orchestrator,
@@ -4897,7 +4936,6 @@ def api_vm_status(name):
     """Return rich state for the selected local or remote VM."""
     try:
         host = _vm_host()
-        _ensure_remote_vm_exists(host, name)
         if getattr(host, 'kind', 'local') == 'remote':
             envelope = host.status(name)
             envelope = dict(envelope) if isinstance(envelope, dict) else {}
@@ -4924,6 +4962,134 @@ def api_vm_status(name):
         return _vm_host_error_response(exc)
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.post('/dashboard/api/vm/<name>/console-reconcile')
+@auth_required
+def api_vm_console_reconcile(name):
+    """Verify or safely repair a ready remote VM's Moonlight bundle.
+
+    The inventory's ``consoleReady`` flag is a provisioning checkpoint, not a
+    live Sunshine certificate check. This endpoint is the last-mile boundary
+    used before opening a remote console. It returns immediately when the
+    authenticated host query passes, and schedules a bounded repair when the
+    persisted bundle is stale. Guest TCP is checked before any quarantine.
+    """
+    if not _request_is_https():
+        return jsonify({'ok': False, 'error': 'Console reconciliation requires HTTPS'}), 426
+    payload = request.get_json(silent=True) if request.is_json else request.form.to_dict(flat=True)
+    payload = payload if isinstance(payload, dict) else {}
+    host_id = str(payload.get('host_id') or payload.get('host') or '').strip()
+    if not host_id:
+        return jsonify({'ok': False, 'error': 'host_id is required'}), 400
+    orchestrator = _console_orchestrator()
+    if not _moonlight_console(orchestrator):
+        return jsonify({'ok': False, 'error': {'code': 'console_repair_not_allowed', 'message': 'Moonlight console reconciliation is unavailable on this host.'}}), 409
+    try:
+        host = _vm_host(host_id)
+        if getattr(host, 'kind', 'local') != 'remote' or not hasattr(host, 'provisioning_jobs'):
+            return jsonify({'ok': False, 'error': {'code': 'console_repair_not_allowed', 'message': 'Only enrolled remote VM consoles can be reconciled.'}}), 409
+        jobs = host.provisioning_jobs()
+        matching = [
+            item for item in jobs
+            if isinstance(item, dict)
+            and str(item.get('name') or '').strip().lower() == str(name).strip().lower()
+            and str(item.get('state') or '') in ('ready', 'setup_failed:streaming')
+            and (
+                str(item.get('state') or '') == 'ready' or
+                'management_handoff' in {
+                    str(stage) for stage in (
+                        item.get('completedStages')
+                        if isinstance(item.get('completedStages'), list) else []
+                    )
+                }
+            )
+        ]
+        matching.sort(key=lambda item: str(item.get('updatedAt') or item.get('createdAt') or ''), reverse=True)
+        job = matching[0] if matching else None
+        if not job:
+            return jsonify({'ok': False, 'error': {'code': 'console_repair_not_allowed', 'message': 'No ready or recoverable provisioning record exists for this remote VM.'}}), 409
+        job_id = str(job.get('id') or '').strip()
+        guest_ip = str(job.get('tailnetIp') or '').strip()
+        safe_name = str(job.get('name') or name).strip().lower()
+        if not job_id or not guest_ip:
+            return jsonify({'ok': False, 'error': {'code': 'console_repair_not_allowed', 'message': 'The ready VM has no verified guest address for console reconciliation.'}}), 409
+        route_name = _remote_console_route_name(safe_name, host_id)
+        try:
+            verified = orchestrator.verify_staged(safe_name, guest_ip=guest_ip, route_name=route_name)
+            response = jsonify({'ok': True, 'healthy': True, 'repaired': False, 'host_id': host_id, 'name': safe_name, **verified})
+            response.headers['Cache-Control'] = 'no-store'
+            return response
+        except ConsoleOrchestrationError as exc:
+            # Do not quarantine a working bundle when the guest itself is down.
+            # repair_staged also repeats this gate before moving the old bundle.
+            if getattr(exc, 'code', '') == 'sunshine_tcp_unavailable':
+                response = jsonify({'ok': False, 'healthy': False, 'error': {'code': 'sunshine_tcp_unavailable', 'message': 'The remote guest is not reachable on the Sunshine listeners; the existing console bundle was preserved.'}})
+                response.headers['Cache-Control'] = 'no-store'
+                return response, 409
+        resolved_sunshine = _default_sunshine_credentials()
+        if not resolved_sunshine:
+            return jsonify({'ok': False, 'error': {'code': 'sunshine_credentials_unavailable', 'message': 'The protected Sunshine default is not configured on this dashboard.'}}), 503
+        sunshine_username, sunshine_password = resolved_sunshine
+        resolved_guest = _default_guest_credentials()
+        if not resolved_guest:
+            return jsonify({'ok': False, 'error': {'code': 'guest_credentials_unavailable', 'message': 'The protected guest default is not configured on this dashboard.'}}), 503
+        guest_username, guest_password = resolved_guest
+        task_key = (host_id, job_id)
+        with _CONSOLE_RETRY_LOCK:
+            pending = _CONSOLE_RETRY_TASKS.get(task_key)
+            if isinstance(pending, dict) and str(pending.get('status') or 'pending') == 'pending':
+                operation_id = str(pending.get('operationId') or '')
+            else:
+                operation_id = secrets.token_hex(16)
+                _CONSOLE_RETRY_TASKS[task_key] = {
+                    'operationId': operation_id,
+                    'startedAt': time.time(),
+                    'status': 'pending',
+                    'failureCode': '',
+                    'routeReady': False,
+                    'kind': 'repair',
+                }
+                worker = threading.Thread(
+                    target=_start_remote_moonlight_console_repair,
+                    kwargs={
+                        'host': host,
+                        'host_id': host_id,
+                        'job_id': job_id,
+                        'name': safe_name,
+                        'guest_ip': guest_ip,
+                        'route_name': route_name,
+                        'guest_username': guest_username,
+                        'guest_password': guest_password,
+                        'sunshine_username': sunshine_username,
+                        'sunshine_password': sunshine_password,
+                        'orchestrator': orchestrator,
+                        'operation_id': operation_id,
+                    },
+                    name=f'epicvm-console-reconcile-{operation_id[:8]}',
+                    daemon=True,
+                )
+                worker.start()
+        response = jsonify({
+            'ok': True,
+            'healthy': False,
+            'pending': True,
+            'repaired': False,
+            'host_id': host_id,
+            'name': safe_name,
+            'operationId': operation_id,
+            'jobId': job_id,
+            'routePrefix': f'/vm/{route_name}/',
+        })
+        response.headers['Cache-Control'] = 'no-store'
+        response.headers['Pragma'] = 'no-cache'
+        return response, 202
+    except VmHostUnavailable as exc:
+        return _vm_host_error_response(exc)
+    except Exception:
+        response = jsonify({'ok': False, 'error': {'code': 'console_reconcile_failed', 'message': 'Remote console reconciliation failed safely.'}})
+        response.headers['Cache-Control'] = 'no-store'
+        return response, 502
 
 
 @app.post('/dashboard/api/vm/<name>/gpu-partition')
@@ -5005,7 +5171,9 @@ def api_stop(name):
     try:
         host = _vm_host()
         _ensure_remote_vm_exists(host, name)
-        host.check_call('stop', name)
+        result = host.run_manager('stop', name, capture_output=True, text=True)
+        if getattr(result, 'returncode', 0) != 0:
+            return jsonify({'ok': False, 'error': getattr(result, 'stderr', '') or getattr(result, 'stdout', '') or 'Failed to stop VM'}), 502
         return jsonify({'ok': True})
     except VmHostUnavailable as exc:
         return _vm_host_error_response(exc)

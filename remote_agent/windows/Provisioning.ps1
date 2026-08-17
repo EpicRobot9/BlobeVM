@@ -1417,7 +1417,16 @@ function Set-EpicVMProvisioningConsoleCredentials {
         [Parameter(Mandatory)] [object] $Job,
         [Parameter(Mandatory)] [object] $Request
     )
-    if ($Job.state -notin @('streaming_setup', 'setup_failed:streaming')) {
+    $reconcileOnly = [bool](Get-EpicVMProperty -Object $Request -Name 'reconcileOnly' -Default $false)
+    $reconcileState = [string]$Job.state
+    foreach ($propertyName in @('consoleRepairOutcome', 'consoleRepairErrorCode', 'lastAttemptCode', 'failureDetailCode', 'failureStage', 'errorCode', 'errorMessage')) {
+        if (-not ($Job.PSObject.Properties.Name -contains $propertyName)) {
+            $Job | Add-Member -MemberType NoteProperty -Name $propertyName -Value $null
+        }
+    }
+    $readyReconcile = $reconcileOnly -and $reconcileState -in @('ready', 'setup_failed:streaming') -and
+        (@(Get-EpicVMProvisioningCompletedStages -Value $Job.completedStages) -contains 'management_handoff')
+    if ($Job.state -notin @('streaming_setup', 'setup_failed:streaming') -and -not $readyReconcile) {
         throw (New-EpicVMProvisioningError -Code 'console_credentials_not_allowed' -Message 'The job is not awaiting console configuration.' -Status 409)
     }
     $guestUsername = [string](Get-EpicVMProperty -Object $Request -Name 'username' -Default '')
@@ -1446,6 +1455,12 @@ function Set-EpicVMProvisioningConsoleCredentials {
             if(-not [string]::IsNullOrWhiteSpace($transport)){$Job.managementTransport=$transport}
             if([bool](Get-EpicVMProperty -Object $sunshineResult -Name 'managementReady' -Default $false)){$Job.managementReadyAt=[DateTime]::UtcNow.ToString('o')}
         }
+        if ($readyReconcile) {
+            $Job.state = 'ready'
+            $Job.failureStage = $null
+            $Job.consoleRepairOutcome = 'ready'
+            $Job.consoleRepairErrorCode = $null
+        }
         $Job.errorCode = $null
         $Job.errorMessage = $null
         $Job.failureDetailCode = $null
@@ -1456,11 +1471,27 @@ function Set-EpicVMProvisioningConsoleCredentials {
     catch {
         $code = [string](Get-EpicVMProperty -Object $_.Exception -Name 'ErrorCode' -Default 'sunshine_setup_failed')
         $detail = [string](Get-EpicVMProperty -Object $_.Exception -Name 'FailureDetailCode' -Default '')
-        $Job.state = 'setup_failed:streaming'
-        $Job.failureStage = 'streaming'
-        $Job.errorCode = $code
-        if ($script:EpicVMProvisioningFailureDetailCodes -contains $detail) { $Job.failureDetailCode = $detail } else { $Job.failureDetailCode = $null }
-        $Job.errorMessage = 'Automatic Sunshine setup failed; the VM and stopped console data were retained.'
+        if ($readyReconcile) {
+            # A repair is not a provisioning transition. Preserve the ready
+            # checkpoint and expose only a safe retry diagnostic; the dashboard
+            # may attempt reconciliation again without sending the VM through
+            # the failed-streaming state machine.
+            $Job.state = if ($reconcileState -eq 'ready') { 'ready' } else { 'setup_failed:streaming' }
+            $Job.failureStage = if ($reconcileState -eq 'ready') { $null } else { 'streaming' }
+            $Job.errorCode = if ($reconcileState -eq 'ready') { $null } else { $code }
+            $Job.errorMessage = if ($reconcileState -eq 'ready') { $null } else { 'Automatic Sunshine setup failed; the VM and stopped console data were retained.' }
+            $Job.failureDetailCode = $null
+            $Job.lastAttemptCode = $code
+            $Job.consoleRepairOutcome = 'failed'
+            $Job.consoleRepairErrorCode = $code
+        }
+        else {
+            $Job.state = 'setup_failed:streaming'
+            $Job.failureStage = 'streaming'
+            $Job.errorCode = $code
+            if ($script:EpicVMProvisioningFailureDetailCodes -contains $detail) { $Job.failureDetailCode = $detail } else { $Job.failureDetailCode = $null }
+            $Job.errorMessage = 'Automatic Sunshine setup failed; the VM and stopped console data were retained.'
+        }
         $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
         Save-EpicVMProvisioningStore -Store $State.Provisioning
         throw (New-EpicVMProvisioningError -Code $code -Message 'Automatic Sunshine setup failed.' -Status 422 -DetailCode $detail)

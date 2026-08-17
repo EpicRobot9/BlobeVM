@@ -252,6 +252,61 @@ def test_repair_rebuilds_bundle_and_requires_authenticated_host_query(tmp_path):
     assert "secret-value" not in (tmp_path / "alpha" / "plan.json").read_text()
 
 
+def test_verify_staged_requires_authenticated_host_details(tmp_path):
+    calls = []
+
+    class Response:
+        def __init__(self, payload=b""):
+            self.payload = payload
+
+        def read(self, *_args):
+            return self.payload
+
+        def close(self):
+            return None
+
+    def http(method, url, *, headers, body, timeout):
+        calls.append((method, url))
+        if url.endswith("/api/hosts"):
+            return Response(payload=b'{"hosts":[{"address":"100.111.82.1","http_port":47989,"host_id":"1251941260"}]}')
+        if "/api/host?host_id=" in url:
+            return Response(payload=b'{"host":{"host_id":"1251941260"}}')
+        raise AssertionError(url)
+
+    orch = make_orchestrator(tmp_path, http_request=http)
+    orch.stage_plan(orch.build_plan(name="alpha", guest_ip="100.111.82.1", route_name="alpha--epic-pc"))
+    plan_path = tmp_path / "alpha" / "plan.json"
+    plan = json.loads(plan_path.read_text())
+    plan["paired"] = True
+    plan_path.write_text(json.dumps(plan))
+    orch._container_url = lambda _name, _route_prefix=None: "http://172.20.0.2:8080/vm/alpha--epic-pc"
+
+    result = orch.verify_staged("alpha", guest_ip="100.111.82.1", route_name="alpha--epic-pc")
+
+    assert result["healthy"] is True
+    assert result["guestTcpVerified"] is True
+    assert any("/api/host?host_id=1251941260" in url for _, url in calls)
+
+
+def test_repair_preserves_existing_bundle_when_guest_tcp_is_unavailable(tmp_path):
+    orch = make_orchestrator(tmp_path)
+    target = orch.stage_plan(orch.build_plan(name="alpha", guest_ip="100.111.82.1"))
+    orch.tcp_probe = lambda *_: False
+
+    with pytest.raises(ConsoleOrchestrationError) as failure:
+        orch.repair_staged(
+            "alpha",
+            guest_ip="100.111.82.1",
+            route_name="alpha--epic-pc",
+            sunshine_username="sunshine-user",
+            sunshine_password="secret-value",
+        )
+
+    assert failure.value.code == "sunshine_tcp_unavailable"
+    assert target.exists()
+    assert not list(tmp_path.glob(".quarantine-*"))
+
+
 def test_sunshine_pair_retries_when_sunshine_reports_pending_session(tmp_path):
     calls = []
     pin_responses = [

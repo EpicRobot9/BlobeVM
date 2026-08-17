@@ -318,6 +318,7 @@ class RemoteAgentClient:
         guest_password: str,
         sunshine_username: str,
         sunshine_password: str,
+        reconcile_only: bool = False,
     ) -> dict[str, Any]:
         """Send request-only guest/Sunshine credentials to the Windows agent."""
         safe_id = quote(str(job_id), safe="")
@@ -327,6 +328,8 @@ class RemoteAgentClient:
             "sunshineUsername": str(sunshine_username),
             "sunshinePassword": str(sunshine_password),
         }
+        if reconcile_only:
+            payload["reconcileOnly"] = True
         result = self._request(
             "POST",
             f"/v1/provisioning-jobs/{safe_id}/console-credentials",
@@ -470,6 +473,7 @@ class RemoteAgentHost:
         guest_password: str,
         sunshine_username: str,
         sunshine_password: str,
+        reconcile_only: bool = False,
     ) -> dict[str, Any]:
         try:
             return self.client.console_credentials(
@@ -478,6 +482,7 @@ class RemoteAgentHost:
                 guest_password=guest_password,
                 sunshine_username=sunshine_username,
                 sunshine_password=sunshine_password,
+                reconcile_only=reconcile_only,
             )
         except RemoteAgentError as exc:
             raise self._host_error(exc) from exc

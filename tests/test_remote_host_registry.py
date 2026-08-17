@@ -733,7 +733,7 @@ def test_duplicate_remote_vm_names_fail_closed(monkeypatch, tmp_path):
             return self.providers[host_id]
 
         def cached_inventory(self, host_id):
-            return []
+            return [{"name": "alpha"}] if host_id == "other-pc" else []
 
     monkeypatch.setattr(module, "VM_HOST_REGISTRY", FakeRegistry())
     response = module.app.test_client().post("/dashboard/api/start/alpha?host_id=epic-pc")
@@ -926,7 +926,7 @@ def test_remote_lifecycle_routes_forward_start_stop_restart_to_selected_host(mon
     assert client.post("/dashboard/api/restart/alpha?host_id=epic-pc").status_code == 200
     assert [(entry[0], entry[1]) for entry in calls] == [
         ("run_manager", "start"),
-        ("check_call", "stop"),
+        ("run_manager", "stop"),
         ("run_manager", "restart"),
     ]
     assert all(entry[2] == "alpha" for entry in calls)
@@ -976,6 +976,77 @@ def test_remote_status_endpoint_flattens_live_state_for_legacy_ui(monkeypatch, t
     assert body["provider_status"] == "Operating normally"
     assert body["running"] is True
     assert body["vm"]["state"] == "Running"
+
+
+def test_manager_list_uses_request_host_when_called_without_explicit_host_id(monkeypatch, tmp_path):
+    monkeypatch.setenv("BLOBEVM_ALLOW_INSECURE_DASHBOARD", "1")
+    monkeypatch.setenv("BLOBEDASH_STATE", str(tmp_path))
+    import importlib
+
+    module = importlib.import_module("dashboard.app")
+
+    class FakeHost:
+        kind = "remote"
+        host_id = "epic-pc"
+        host_name = "Epic PC"
+
+        def list_vms(self):
+            return [{"name": "alpha", "state": "Running"}]
+
+        def normalize_inventory(self, instances):
+            return [{
+                **item,
+                "placement": "remote",
+                "host_id": self.host_id,
+                "host_name": self.host_name,
+            } for item in instances]
+
+    class FakeRegistry:
+        def refresh(self):
+            return None
+
+        def get(self, host_id="local"):
+            assert host_id == "epic-pc"
+            return FakeHost()
+
+    monkeypatch.setattr(module, "VM_HOST_REGISTRY", FakeRegistry())
+    with module.app.test_request_context(
+        "/dashboard/api/list?host_id=epic-pc",
+        headers={"Host": "techexplore.us", "X-Forwarded-Proto": "https", "X-Forwarded-Host": "techexplore.us"},
+    ):
+        items = module.manager_json_list()
+
+    assert items[0]["url"] == "https://techexplore.us/vm/alpha/?host_id=epic-pc"
+
+
+def test_remote_ownership_check_does_not_probe_other_hosts_live(monkeypatch, tmp_path):
+    monkeypatch.setenv("BLOBEVM_ALLOW_INSECURE_DASHBOARD", "1")
+    monkeypatch.setenv("BLOBEDASH_STATE", str(tmp_path))
+    import importlib
+
+    module = importlib.import_module("dashboard.app")
+
+    class SelectedHost:
+        kind = "remote"
+        host_id = "epic-pc"
+
+        def list_vms(self):
+            return [{"name": "alpha"}]
+
+    class DeadOtherHost:
+        kind = "remote"
+
+        def list_vms(self):
+            raise AssertionError("ownership checks must not fan out to live hosts")
+
+    class Registry:
+        providers = {"local": object(), "epic-pc": SelectedHost(), "other-pc": DeadOtherHost()}
+
+        def cached_inventory(self, host_id):
+            return []
+
+    monkeypatch.setattr(module, "VM_HOST_REGISTRY", Registry())
+    module._ensure_remote_vm_exists(Registry.providers["epic-pc"], "alpha")
 
 
 def test_remote_manage_settings_cannot_write_local_presentation_state(monkeypatch, tmp_path):

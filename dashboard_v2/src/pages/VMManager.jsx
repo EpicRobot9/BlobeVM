@@ -70,7 +70,7 @@ function VmCard({ vm, host, onAction, onDetails, onProfileChange, onManage, onTe
   const profile = vm._profile || vm._optimizer?.profile || vm.profile || 'desktop'
   const isGaming = profile === 'gaming' || String(vm.profile || '').toLowerCase() === 'gaming' || vm.gpuPartitionPercent !== undefined
   const isRemote = vm.placement === 'remote'
-  const consoleReady = canOpenInventoryVm(vm)
+  const consoleReady = canOpenInventoryVm(vm) && (!isRemote || vm.running === true)
   const placementLabel = isRemote ? 'RemoteVM' : 'Local VM'
   const hostName = vm.host_name || host?.display_name || (isRemote ? vm.host_id || 'Remote host' : 'EpicVM Server')
   const hostUnavailable = isRemote && host?.online !== true
@@ -831,7 +831,47 @@ export default function VMManager(){
     setProfileBusy('')
   }
 
+  async function reconcileRemoteConsole(name, hostId){
+    const res = await apiFetch(`/vm/${encodeURIComponent(name)}/console-reconcile`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({ host_id:hostId })
+    })
+    const body = await res.json().catch(()=>({ ok:res.ok }))
+    const error = body?.error
+    const message = typeof error === 'object' ? (error.message || error.code) : error
+    if(!res.ok || body.ok === false) throw new Error(message || 'Remote console is not reachable')
+    if(!body.pending) return body
+    const jobId = String(body.jobId || '')
+    if(!jobId) throw new Error('Remote console repair did not return a tracking id')
+    for(let attempt = 0; attempt < 48; attempt += 1){
+      await new Promise(resolve => setTimeout(resolve, 2500))
+      const statusRes = await apiFetch(`/provisioning-jobs/${encodeURIComponent(jobId)}?host_id=${encodeURIComponent(hostId)}`)
+      const statusBody = await statusRes.json().catch(()=>({ ok:statusRes.ok }))
+      const job = statusBody?.job || {}
+      const outcome = String(job.consoleRepairOutcome || '')
+      if(outcome === 'ready') return { ...body, pending:false, healthy:true, repaired:true, routePrefix:body.routePrefix }
+      if(outcome === 'failed'){
+        throw new Error(`Remote console repair failed: ${job.consoleRepairErrorCode || 'console_failed'}`)
+      }
+    }
+    throw new Error('Remote console repair timed out safely; the VM was not reprovisioned')
+  }
+
   async function openDetails(name, hostId = 'local', vmUrl = ''){
+    let nextUrl = vmUrl || ''
+    if(hostId && hostId !== 'local'){
+      try{
+        addToast({ title:`${name}`, message:'Verifying the remote console path…', type:'info', timeout:5000 })
+        const reconciled = await reconcileRemoteConsole(name, hostId)
+        if(reconciled?.routePrefix){
+          nextUrl = `${reconciled.routePrefix}?host_id=${encodeURIComponent(hostId)}`
+        }
+      }catch(error){
+        addToast({ title:`${name}`, message:String(error), type:'error', timeout:9000 })
+        return
+      }
+    }
     logSelectionTrackerRef.current.select(name)
     logRequestSequenceRef.current += 1
     setSelected(name)
@@ -840,7 +880,7 @@ export default function VMManager(){
     // ready remote VM through the legacy Guacamole launcher; that was the
     // source of the misleading "console" link after a successful retry.
     const launcherUrl = `/dashboard/console/${encodeURIComponent(name)}/?launch=${Date.now()}`
-    setSelectedVmUrl(hostId && hostId !== 'local' ? (vmUrl || launcherUrl) : (vmUrl || ''))
+    setSelectedVmUrl(hostId && hostId !== 'local' ? (nextUrl || launcherUrl) : nextUrl)
     await apiFetch(`/optimizer/activity/${encodeURIComponent(name)}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ source:'details-open' }) }).catch(()=>null)
     await fetchLogs(name, hostId)
   }

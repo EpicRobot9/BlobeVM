@@ -290,13 +290,37 @@ networks:
     driver: bridge
 '''
 
+    def _wait_for_sunshine(self, guest_ip: str, *, timeout: float = 30.0) -> None:
+        """Wait through the bounded guest-service restart window.
+
+        A VM restart can leave RDP/WinRM reachable while Sunshine is still
+        restarting. Treat that as a transient readiness condition rather than
+        immediately returning the same console error the UI saw before. The
+        timeout remains finite so a genuinely unreachable guest preserves the
+        existing bundle and fails closed.
+        """
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while True:
+            missing = [
+                port for port in (47989, 47990)
+                if not self.tcp_probe(str(guest_ip), port, 2.0)
+            ]
+            if not missing:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ConsoleOrchestrationError(
+                    "Sunshine is not reachable from kvm2.",
+                    status=409,
+                    code="sunshine_tcp_unavailable",
+                )
+            time.sleep(min(1.0, remaining))
+
     def build_plan(self, *, name: str, guest_ip: str, route_name: str | None = None) -> MoonlightPlan:
         safe = validate_vm_name(name)
         route = validate_vm_name(route_name or name)
         address = validate_guest_ip(guest_ip)
-        for port in (47989, 47990):
-            if not self.tcp_probe(address, port, 2.0):
-                raise ConsoleOrchestrationError("Sunshine is not reachable from kvm2.", status=409, code="sunshine_tcp_unavailable")
+        self._wait_for_sunshine(address)
         return MoonlightPlan(safe, address, f"/vm/{route}/", self.build_compose(name=safe, route_name=route), self.build_config(name=safe, route_name=route), '{"version":"3","users":{},"hosts":{},"roles":{}}\n')
 
     def stage_plan(self, plan: MoonlightPlan) -> Path:
@@ -405,8 +429,7 @@ networks:
     def start_staged(self, name: str) -> dict[str, Any]:
         plan = self._read_plan(name)
         target = self._instance_root(name)
-        if not self.tcp_probe(str(plan["guestIp"]), 47989, 2.0):
-            raise ConsoleOrchestrationError("Sunshine is not reachable from kvm2.", status=409, code="sunshine_tcp_unavailable")
+        self._wait_for_sunshine(str(plan["guestIp"]), timeout=30.0)
         try:
             self.command_runner(["docker", "compose", "-p", self._project_name(name), "up", "-d", "--wait", "--wait-timeout", "90"], cwd=str(target), check=True, capture_output=True, text=True)
         except (OSError, subprocess.SubprocessError) as exc:
@@ -509,7 +532,14 @@ networks:
             raise ConsoleOrchestrationError("Moonlight did not return a guest host id.", status=502, code="moonlight_host_failed")
         return self._coerce_host_id(host_id)
 
-    def _host_details(self, base: str, user: str, host_id: int) -> dict[str, Any]:
+    def _host_details(
+        self,
+        base: str,
+        user: str,
+        host_id: int,
+        *,
+        expected_guest_ip: str | None = None,
+    ) -> dict[str, Any]:
         """Verify that Moonlight can perform the first authenticated host query.
 
         `/api/hosts` only reads Moonlight's local database and can report a host
@@ -533,6 +563,17 @@ networks:
             host = payload.get("host") if isinstance(payload, dict) else None
             if not isinstance(host, dict) or self._coerce_host_id(host.get("host_id")) != int(host_id):
                 raise ConsoleOrchestrationError("Moonlight did not return verified guest host details.", status=502, code="moonlight_host_failed")
+            # A newly registered host can answer /api/host successfully before
+            # pairing. Treat that response as incomplete rather than allowing
+            # an unpaired record to make a stale console look healthy. Older
+            # controlled test providers omitted these fields, so missing values
+            # remain backwards-compatible during rollout.
+            paired = host.get("paired")
+            if paired is not None and str(paired).strip().lower() != "paired":
+                raise ConsoleOrchestrationError("Moonlight returned an unpaired guest host.", status=502, code="moonlight_host_failed")
+            address = str(host.get("address") or "").strip()
+            if expected_guest_ip and address and address != str(expected_guest_ip).strip():
+                raise ConsoleOrchestrationError("Moonlight returned the wrong guest host.", status=502, code="moonlight_host_failed")
             return host
         except ConsoleOrchestrationError:
             raise
@@ -593,6 +634,80 @@ networks:
                 raise ConsoleOrchestrationError("Sunshine did not accept the pairing request in time.", status=502, code="sunshine_pair_failed")
             time.sleep(min(0.25, remaining))
 
+    def verify_staged(
+        self,
+        name: str,
+        *,
+        guest_ip: str,
+        route_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Verify an existing console without mutating its bundle.
+
+        The Moonlight container healthcheck only proves that PID 1 is alive.
+        This probe verifies the authoritative guest address, both Sunshine
+        listeners, and the authenticated ``/api/host`` call. A stale client
+        certificate therefore becomes a repair decision instead of a false
+        ``consoleReady`` result.
+        """
+        safe = validate_vm_name(name)
+        guest = validate_guest_ip(guest_ip)
+        route = validate_vm_name(route_name or safe)
+        plan = self._read_plan(safe)
+        expected_prefix = f"/vm/{route}/"
+        if (
+            str(plan.get("guestIp") or "") != guest
+            or str(plan.get("routePrefix") or "") != expected_prefix
+            or plan.get("paired") is not True
+        ):
+            raise ConsoleOrchestrationError(
+                "The persisted Moonlight bundle does not match the authoritative VM record.",
+                status=409,
+                code="moonlight_stale_bundle",
+            )
+        self._wait_for_sunshine(guest, timeout=30.0)
+        base = self._container_url(safe, str(plan.get("routePrefix") or expected_prefix))
+        user = validate_vm_name(safe)
+        # /api/hosts exposes paired state but not always the guest address.
+        # Prefer an existing paired record so a stale client certificate is
+        # observed and repaired. Registering a fresh host here would create an
+        # unpaired record whose /api/host response is a false positive.
+        candidates: list[int] = []
+        for record in self._hosts(base, user):
+            paired = str(record.get("paired") or "").strip().lower() == "paired"
+            address = str(record.get("address") or "").strip()
+            port = str(record.get("http_port") or "47989").strip()
+            if paired or (address == guest and port == "47989"):
+                try:
+                    candidate = self._coerce_host_id(record.get("host_id"))
+                except ConsoleOrchestrationError:
+                    continue
+                if candidate not in candidates:
+                    candidates.append(candidate)
+        if not candidates:
+            raise ConsoleOrchestrationError(
+                "The persisted Moonlight bundle has no paired guest host.",
+                status=409,
+                code="moonlight_stale_bundle",
+            )
+        last_error: ConsoleOrchestrationError | None = None
+        for host_id in candidates:
+            try:
+                self._host_details(base, user, host_id, expected_guest_ip=guest)
+                break
+            except ConsoleOrchestrationError as exc:
+                last_error = exc
+        else:
+            if last_error is not None:
+                raise last_error
+            raise ConsoleOrchestrationError("Moonlight could not verify the paired guest.", status=502, code="moonlight_host_failed")
+        return {
+            "ok": True,
+            "healthy": True,
+            "repaired": False,
+            "routePrefix": str(plan.get("routePrefix") or expected_prefix),
+            "guestTcpVerified": True,
+        }
+
     def pair_staged(self, name: str, *, sunshine_username: str, sunshine_password: str) -> dict[str, Any]:
         plan = self._read_plan(name)
         base = self._container_url(name, str(plan.get("routePrefix") or ""))
@@ -601,7 +716,7 @@ networks:
         if not host_id:
             raise ConsoleOrchestrationError("Moonlight did not return a guest host id.", status=502, code="moonlight_host_failed")
         if plan.get("paired") is True:
-            self._host_details(base, user, host_id)
+            self._host_details(base, user, host_id, expected_guest_ip=str(plan.get("guestIp") or ""))
             return {"ok": True, "paired": True, "routePrefix": str(plan["routePrefix"]), "guestTcpVerified": True}
         headers = {"Content-Type": "application/json", "X-EpicVM-User": user}
         body = json.dumps({"host_id": host_id}, separators=(",", ":")).encode("utf-8")
@@ -631,7 +746,7 @@ networks:
         # Do not persist paired=true until the first authenticated host query
         # succeeds.  This catches stale/invalid client certificates before the
         # provisioning state machine is allowed to report a ready console.
-        self._host_details(base, user, host_id)
+        self._host_details(base, user, host_id, expected_guest_ip=str(plan.get("guestIp") or ""))
         target = self._instance_root(name)
         plan["paired"] = True
         plan["pairedAt"] = int(time.time())
@@ -660,9 +775,12 @@ networks:
         safe = validate_vm_name(name)
         guest = validate_guest_ip(guest_ip)
         route = validate_vm_name(route_name or safe)
+        # Build first: this verifies the authoritative guest TCP path before
+        # the existing bundle is stopped or moved. A transient guest outage
+        # must not destroy the last known-good console bundle.
+        plan = self.build_plan(name=safe, guest_ip=guest, route_name=route)
         quarantine = self.quarantine_staged(safe)
         try:
-            plan = self.build_plan(name=safe, guest_ip=guest, route_name=route)
             self.stage_plan(plan)
             self.start_staged(safe)
             result = self.pair_staged(

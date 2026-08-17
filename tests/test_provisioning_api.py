@@ -346,6 +346,12 @@ def test_ready_console_repair_is_async_read_only_and_does_not_expose_password(mo
             self.failed_codes.append(code)
             return super().console_failed(job_id, code)
 
+        def console_credentials(self, job_id, **kwargs):
+            assert kwargs["reconcile_only"] is True
+            assert kwargs["guest_username"] == "operator"
+            assert kwargs["guest_password"] == "guest-secret"
+            return {"ok": True}
+
     class MoonlightRepair:
         backend = "moonlight"
 
@@ -361,6 +367,7 @@ def test_ready_console_repair_is_async_read_only_and_does_not_expose_password(mo
 
     host = RepairHost()
     module.VM_HOST_REGISTRY.get = lambda host_id="local": host
+    module._default_guest_credentials = lambda: ("operator", "guest-secret")
     module._CONSOLE_ORCHESTRATOR = MoonlightRepair()
     client = authenticated_client(module)
     csrf = client.get("/dashboard/api/auth/csrf").get_json()["csrfToken"]
