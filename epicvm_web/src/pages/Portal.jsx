@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Desktop, WindowsLogo, GameController, Power, Plug, ArrowClockwise, Stop, Spinner, Plus } from '@phosphor-icons/react'
-import { myVms, logout } from '../api'
+import { Desktop, WindowsLogo, GameController, Power, Plug, ArrowClockwise, Stop, Spinner, Plus, CaretDown } from '@phosphor-icons/react'
+import { myVms, logout, startVm, stopVm, restartVm } from '../api'
 
 const TYPE_META = {
   linux: { label: 'Linux VM', icon: Desktop, cls: 't-linux', tag: 'BETA DEFAULT' },
@@ -43,6 +43,21 @@ export default function Portal({ user, onSignout }) {
   async function signout() {
     await logout().catch(() => {})
     window.location.assign('/EpicVM/')
+  }
+
+  const [openName, setOpenName] = useState(null)
+  const [busy, setBusy] = useState('')
+
+  const toggleManage = (n) => setOpenName((o) => (o === n ? null : n))
+
+  async function act(kind, vmName) {
+    setBusy(vmName + ':' + kind)
+    let res
+    if (kind === 'start') res = await startVm(vmName)
+    else if (kind === 'stop') res = await stopVm(vmName)
+    else if (kind === 'restart') res = await restartVm(vmName)
+    setBusy('')
+    if (res && res.ok) { load() } else if (res) alert(res.body.error || 'Action failed')
   }
 
   const username = user?.username || 'user'
@@ -90,6 +105,7 @@ export default function Portal({ user, onSignout }) {
             const Icon = tm.icon
             const ready = vm.readiness === 'ready'
             const provisioning = vm.readiness === 'provisioning'
+            const open = openName === vm.name
             return (
               <article key={vm.name} className={`evm-card ${tm.cls}`}>
                 <div className="evm-card-cut" />
@@ -118,7 +134,25 @@ export default function Portal({ user, onSignout }) {
                   ) : (
                     <button className="evm-btn evm-btn-ghost evm-btn-block" disabled><Plug size={18} /> NOT READY</button>
                   )}
-                  <button className="evm-btn evm-btn-sm" onClick={() => navigate(`/portal/${encodeURIComponent(vm.name)}`)}>MANAGE</button>
+                  <button
+                    className={`evm-btn evm-btn-sm evm-manage-btn ${open ? 'is-open' : ''}`}
+                    onClick={() => toggleManage(vm.name)}
+                    aria-expanded={open}
+                  >
+                    {open ? 'CLOSE' : 'MANAGE'} <CaretDown size={16} className={`evm-caret ${open ? 'up' : ''}`} />
+                  </button>
+                </div>
+                <div className={`evm-card-manage-panel ${open ? 'open' : ''}`}>
+                  <button className="evm-btn evm-btn-block evm-mp-btn" disabled={busy === vm.name + ':start' || provisioning} onClick={() => act('start', vm.name)}>
+                    {busy === vm.name + ':start' ? <Spinner size={16} className="spin" /> : <Power size={16} />} START
+                  </button>
+                  <button className="evm-btn evm-btn-block evm-mp-btn" disabled={busy === vm.name + ':restart'} onClick={() => act('restart', vm.name)}>
+                    {busy === vm.name + ':restart' ? <Spinner size={16} className="spin" /> : <ArrowClockwise size={16} />} RESTART
+                  </button>
+                  <button className="evm-btn evm-btn-block evm-mp-btn evm-btn-danger" disabled={busy === vm.name + ':stop'} onClick={() => act('stop', vm.name)}>
+                    {busy === vm.name + ':stop' ? <Spinner size={16} className="spin" /> : <Stop size={16} />} STOP
+                  </button>
+                  <a className="evm-mp-details" href={`/portal/${encodeURIComponent(vm.name)}`} onClick={(e) => { e.preventDefault(); navigate(`/portal/${encodeURIComponent(vm.name)}`) }}>Full details →</a>
                 </div>
               </article>
             )

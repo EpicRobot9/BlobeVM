@@ -324,7 +324,66 @@ body {
   .evm-portal-head { flex-wrap: wrap; }
 }
 
-/* responsive */
+/* portal: manage popover + landing motion */
+.evm-manage-btn { position: relative; }
+.evm-caret { transition: transform .2s ease; }
+.evm-caret.up { transform: rotate(180deg); }
+.evm-card-manage-panel {
+  display: grid; gap: 8px; overflow: hidden; max-height: 0; opacity: 0;
+  transform: translateY(-6px); transition: max-height .26s ease, opacity .2s ease, transform .2s ease, margin .26s ease;
+  margin-top: 0;
+}
+.evm-card-manage-panel.open {
+  max-height: 260px; opacity: 1; transform: translateY(0); margin-top: 10px;
+}
+.evm-card-manage-panel .evm-mp-btn:nth-child(1) { transition-delay: .02s; }
+.evm-card-manage-panel .evm-mp-btn:nth-child(2) { transition-delay: .06s; }
+.evm-card-manage-panel .evm-mp-btn:nth-child(3) { transition-delay: .10s; }
+.evm-card-manage-panel .evm-mp-btn {
+  opacity: 0; transform: translateX(-8px); animation: none;
+}
+.evm-card-manage-panel.open .evm-mp-btn {
+  opacity: 1; transform: translateX(0);
+  transition: opacity .25s ease, transform .25s ease;
+}
+.evm-card-manage-panel.open .evm-mp-btn:nth-child(1) { transition-delay: .04s; }
+.evm-card-manage-panel.open .evm-mp-btn:nth-child(2) { transition-delay: .09s; }
+.evm-card-manage-panel.open .evm-mp-btn:nth-child(3) { transition-delay: .14s; }
+.evm-mp-details {
+  text-align: center; font-size: 12px; font-weight: 700; color: var(--muted); text-decoration: none; padding: 4px 0;
+}
+.evm-mp-details:hover { color: var(--cyan); }
+
+/* landing entrance + hover tilt */
+@keyframes evm-pop {
+  0% { opacity: 0; transform: translateY(22px) scale(.96); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+.evm-landing .evm-hero-copy > * { animation: evm-pop .6s cubic-bezier(.2,.8,.25,1) both; }
+.evm-landing .evm-hero-copy .evm-pill { animation-delay: .02s; }
+.evm-landing .evm-hero-copy .evm-h1 { animation-delay: .08s; }
+.evm-landing .evm-hero-copy .evm-lead { animation-delay: .16s; }
+.evm-landing .evm-hero-copy .evm-hero-cta { animation-delay: .24s; }
+.evm-landing .evm-hero-visual { animation: evm-pop .6s cubic-bezier(.2,.8,.25,1) .3s both; }
+
+.evm-landing .evm-step,
+.evm-landing .evm-type,
+.evm-landing .evm-feature {
+  transition: transform .16s ease, box-shadow .16s ease;
+}
+.evm-landing .evm-step:hover,
+.evm-landing .evm-type:hover,
+.evm-landing .evm-feature:hover {
+  transform: translate(-2px, -4px) rotate(0deg);
+  box-shadow: 9px 9px 0 #000;
+}
+.evm-landing .evm-type:hover { transform: translate(-2px, -4px) rotate(0deg) scale(1.015); }
+@media (prefers-reduced-motion: reduce) {
+  .evm-landing .evm-hero-copy > *, .evm-landing .evm-hero-visual { animation: none; }
+  .evm-card-manage-panel, .evm-card-manage-panel.open .evm-mp-btn { transition: none; }
+}
+
+/* responsive (global) */
 @media (max-width: 720px) {
   .evm-nav-links { display: none; }
   .evm-steps, .evm-types, .evm-features { grid-template-columns: 1fr; }
