@@ -85,6 +85,23 @@ const FAQ = [
 export default function Landing({ authed, onSignout }) {
   const navigate = useNavigate()
   const go = (path) => navigate(path)
+  useEffect(() => {
+    const els = Array.from(document.querySelectorAll('.evm-landing .evm-section'))
+    if (!('IntersectionObserver' in window)) {
+      els.forEach((el) => el.classList.add('evm-reveal-in'))
+      return
+    }
+    const io = new IntersectionObserver((entries) => {
+      entries.forEach((en) => {
+        if (en.isIntersecting) {
+          en.target.classList.add('evm-reveal-in')
+          io.unobserve(en.target)
+        }
+      })
+    }, { threshold: 0.12, rootMargin: '0px 0px -8% 0px' })
+    els.forEach((el) => io.observe(el))
+    return () => io.disconnect()
+  }, [])
   return (
     <div className="evm-page evm-landing">
       <Nav authed={authed} onSignout={onSignout} />

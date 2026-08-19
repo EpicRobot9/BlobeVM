@@ -366,6 +366,33 @@ body {
 .evm-landing .evm-hero-copy .evm-hero-cta { animation-delay: .24s; }
 .evm-landing .evm-hero-visual { animation: evm-pop .6s cubic-bezier(.2,.8,.25,1) .3s both; }
 
+/* gentle idle float on the hero window */
+@keyframes evm-float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-9px); } }
+.evm-landing .evm-hero-visual .evm-window { animation: evm-float 6s ease-in-out 1s infinite; }
+
+/* scroll-reveal: sections fade + rise as they enter the viewport */
+.evm-landing .evm-section { opacity: 0; transform: translateY(26px); transition: opacity .6s ease, transform .6s cubic-bezier(.2,.8,.25,1); }
+.evm-landing .evm-section.evm-reveal-in { opacity: 1; transform: translateY(0); }
+/* stagger the items inside a revealed section */
+.evm-landing .evm-reveal-in .evm-step,
+.evm-landing .evm-reveal-in .evm-type,
+.evm-landing .evm-reveal-in .evm-feature,
+.evm-landing .evm-reveal-in .evm-faq-item { animation: evm-pop .55s cubic-bezier(.2,.8,.25,1) both; }
+.evm-landing .evm-reveal-in .evm-type:nth-child(2),
+.evm-landing .evm-reveal-in .evm-feature:nth-child(2),
+.evm-landing .evm-reveal-in .evm-step:nth-child(2) { animation-delay: .06s; }
+.evm-landing .evm-reveal-in .evm-type:nth-child(3),
+.evm-landing .evm-reveal-in .evm-feature:nth-child(3),
+.evm-landing .evm-reveal-in .evm-step:nth-child(3) { animation-delay: .12s; }
+@media (prefers-reduced-motion: reduce) {
+  .evm-landing .evm-section { opacity: 1; transform: none; transition: none; }
+  .evm-landing .evm-hero-visual .evm-window { animation: none; }
+  .evm-landing .evm-reveal-in .evm-step,
+  .evm-landing .evm-reveal-in .evm-type,
+  .evm-landing .evm-reveal-in .evm-feature,
+  .evm-landing .evm-reveal-in .evm-faq-item { animation: none; }
+}
+
 .evm-landing .evm-step,
 .evm-landing .evm-type,
 .evm-landing .evm-feature {
