@@ -43,9 +43,15 @@ export default function Machine({ user, onSignout }) {
     else if (res) alert(res.body.error || 'Action failed')
   }
 
-  if (loading) return <div className="evm-page evm-portal"><div className="evm-portal-loading"><Spinner size={26} className="spin" /> Loading…</div></div>
+  if (loading) return <div className="evm-page evm-portal evm-machine-page"><div className="evm-portal-loading"><Spinner size={26} className="spin" /> Loading…</div></div>
   if (!vm) return (
-    <div className="evm-page evm-portal">
+    <div className="evm-page evm-portal evm-machine-page">
+      <header className="evm-portal-head">
+        <div className="evm-ph-left">
+          <button className="evm-link-btn" onClick={() => navigate('/portal')}><CaretLeft size={18} /> Portal</button>
+          <span className="evm-brand-mark sm evm-bm-orange">E</span>
+        </div>
+      </header>
       <div className="evm-empty"><h3>Machine not found</h3><p>You don't have access to “{name}”.</p>
         <button className="evm-btn evm-btn-primary" onClick={() => navigate('/portal')}>Back to portal</button></div>
     </div>
@@ -57,16 +63,16 @@ export default function Machine({ user, onSignout }) {
   const provisioning = vm.readiness === 'provisioning'
 
   return (
-    <div className="evm-page evm-portal">
+    <div className="evm-page evm-portal evm-machine-page">
       <header className="evm-portal-head">
         <div className="evm-ph-left">
           <button className="evm-link-btn" onClick={() => navigate('/portal')}><CaretLeft size={18} /> Portal</button>
-          <span className="evm-brand-mark sm">E</span>
+          <span className="evm-brand-mark sm evm-bm-orange">E</span>
         </div>
         <div className="evm-ph-right"><button className="evm-btn evm-btn-ghost evm-btn-sm" onClick={onSignout}>Sign out</button></div>
       </header>
 
-      <article className={`evm-machine ${tm.cls}`}>
+      <article className={`evm-machine ${tm.cls} evm-pop`}>
         <div className="evm-m-top">
           <span className={`evm-type-tag ${tm.cls}`}><Icon size={14} /> {tm.tag}</span>
           {readinessBadge(vm.readiness)}

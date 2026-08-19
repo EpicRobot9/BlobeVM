@@ -51,8 +51,12 @@ export default function App() {
         element={<PortalGate><Portal user={user} onSignout={() => { setUser(false); window.location.assign('/EpicVM/') }} /></PortalGate>}
       />
       <Route
-        path="/portal/:name"
+        path="/vm/:name"
         element={<PortalGate><Machine user={user} onSignout={() => { setUser(false); window.location.assign('/EpicVM/') }} /></PortalGate>}
+      />
+      <Route
+        path="/portal/:name"
+        element={<Navigate to={(window.location.pathname.replace(/^\/EpicVM\/portal\//, '/EpicVM/vm/') || '/EpicVM/vm/')} replace />}
       />
       <Route
         path="/"

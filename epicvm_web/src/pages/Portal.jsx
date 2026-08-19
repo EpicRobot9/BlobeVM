@@ -151,7 +151,7 @@ export default function Portal({ user, onSignout }) {
                   <button className="evm-btn evm-btn-block evm-mp-btn evm-btn-danger" disabled={busy === vm.name + ':stop'} onClick={() => act('stop', vm.name)}>
                     {busy === vm.name + ':stop' ? <Spinner size={16} className="spin" /> : <Stop size={16} />} STOP
                   </button>
-                  <a className="evm-mp-details" href={`/portal/${encodeURIComponent(vm.name)}`} onClick={(e) => { e.preventDefault(); navigate(`/portal/${encodeURIComponent(vm.name)}`) }}>Full details →</a>
+                  <a className="evm-mp-details" href={`/vm/${encodeURIComponent(vm.name)}`} onClick={(e) => { e.preventDefault(); navigate(`/vm/${encodeURIComponent(vm.name)}`) }}>Full details →</a>
                 </div>
               </article>
             )
