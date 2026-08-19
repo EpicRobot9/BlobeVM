@@ -156,6 +156,7 @@ def _safe_provisioning_job(job: object) -> dict:
         'autonomousOutcome', 'autonomousErrorCode',
         'cpuCount', 'memoryBytes', 'diskSizeBytes', 'gpuPartitionPercent',
         'gpuDeviceIdentity', 'gamingGpuValidated', 'gamingValidationAt',
+        'gamingCaptureConfigured', 'gamingCaptureAt',
     )
     return {key: job[key] for key in allowed if key in job and job[key] is not None}
 
@@ -529,7 +530,7 @@ def _start_remote_moonlight_console_repair(*, host, host_id, job_id, name, guest
         current = host.provisioning_status(job_id)
         current_job = current.get('job') if isinstance(current, dict) else None
         current_state = str(current_job.get('state') or '') if isinstance(current_job, dict) else ''
-        if current_state not in ('ready', 'streaming_setup', 'setup_failed:streaming', 'setup_failed:agent_restart'):
+        if current_state not in ('ready', 'streaming_setup', 'setup_failed:streaming', 'setup_failed:agent_restart', 'setup_failed:legacy_state_uncertain'):
             raise ConsoleOrchestrationError(
                 'Only a ready or recoverable remote VM console can be repaired.',
                 status=409,
@@ -541,6 +542,32 @@ def _start_remote_moonlight_console_repair(*, host, host_id, job_id, name, guest
                 status=503,
                 code='sunshine_setup_unavailable',
             )
+        profile = str(current_job.get('profile') or 'standard').strip().lower() if isinstance(current_job, dict) else 'standard'
+        if profile == 'gaming' and not bool(current_job.get('gamingCaptureConfigured')):
+            # Existing Gaming jobs predate the capture marker. Configure the
+            # retained Sunshine path before repairing the Moonlight bundle;
+            # otherwise bundle verification can succeed and the later
+            # completion gate quite correctly rejects an unverified capture.
+            configured = host.console_credentials(
+                job_id,
+                guest_username=guest_username,
+                guest_password=guest_password,
+                sunshine_username=sunshine_username,
+                sunshine_password=sunshine_password,
+                reconcile_only=True,
+            )
+            configured_job = configured.get('job') if isinstance(configured, dict) else None
+            capture_configured = bool(configured.get('gamingCaptureConfigured')) if isinstance(configured, dict) else False
+            if isinstance(configured_job, dict):
+                capture_configured = capture_configured or bool(configured_job.get('gamingCaptureConfigured'))
+                if str(configured_job.get('state') or '') == 'ready':
+                    current_state = 'ready'
+            if not capture_configured:
+                raise ConsoleOrchestrationError(
+                    'Gaming Sunshine capture configuration was not verified.',
+                    status=503,
+                    code='gaming_capture_configuration_required',
+                )
         # A normal guest restart invalidates the Moonlight client certificate,
         # but it does not normally invalidate the existing Sunshine account.
         # Repair the bundle first so the common path does not wait on a slow
@@ -625,7 +652,7 @@ def _start_remote_guest_network_recovery(*, host, host_id, job_id, name,
         current = host.provisioning_status(job_id)
         current_job = current.get('job') if isinstance(current, dict) else None
         current_state = str(current_job.get('state') or '') if isinstance(current_job, dict) else ''
-        if current_state in ('ready', 'setup_failed:streaming', 'setup_failed:agent_restart'):
+        if current_state in ('ready', 'setup_failed:streaming', 'setup_failed:agent_restart', 'setup_failed:legacy_state_uncertain'):
             if not hasattr(host, 'network_recovery'):
                 raise ConsoleOrchestrationError(
                     'The remote host lacks the retained-network recovery boundary.',
@@ -657,7 +684,7 @@ def _start_remote_guest_network_recovery(*, host, host_id, job_id, name,
                 status=422,
                 code='tailnet_ip_missing',
             )
-        host.console_credentials(
+        credential_result = host.console_credentials(
             job_id,
             guest_username=guest_username,
             guest_password=guest_password,
@@ -665,6 +692,8 @@ def _start_remote_guest_network_recovery(*, host, host_id, job_id, name,
             sunshine_password=sunshine_password,
             reconcile_only=True,
         )
+        credential_job = credential_result.get('job') if isinstance(credential_result, dict) else None
+        credential_state = str(credential_job.get('state') or '') if isinstance(credential_job, dict) else ''
         started = orchestrator.repair_staged(
             name,
             guest_ip=recovered_ip,
@@ -678,11 +707,12 @@ def _start_remote_guest_network_recovery(*, host, host_id, job_id, name,
                 status=502,
                 code='console_verification_failed',
             )
-        host.console_complete(
-            job_id,
-            route_prefix=str(started.get('routePrefix') or _remote_console_route_name(name, host_id)),
-            guest_tcp_verified=bool(started.get('guestTcpVerified')),
-        )
+        if credential_state != 'ready':
+            host.console_complete(
+                job_id,
+                route_prefix=str(started.get('routePrefix') or _remote_console_route_name(name, host_id)),
+                guest_tcp_verified=bool(started.get('guestTcpVerified')),
+            )
         _set_console_retry_result(key, status='ready', operation_id=operation_id)
         app.logger.info('EpicVM guest network recovery completed operation=%s status=ready', operation_id)
     except ConsoleOrchestrationError as exc:
@@ -846,7 +876,7 @@ def _remote_console_job(host, name: str) -> dict:
         item for item in jobs
         if isinstance(item, dict)
         and str(item.get('name') or '').strip().lower() == str(name).strip().lower()
-        and str(item.get('state') or '') in ('ready', 'streaming_setup', 'setup_failed:streaming', 'setup_failed:agent_restart')
+        and str(item.get('state') or '') in ('ready', 'streaming_setup', 'setup_failed:streaming', 'setup_failed:agent_restart', 'setup_failed:legacy_state_uncertain')
         and (
             str(item.get('state') or '') == 'ready'
             or 'management_handoff' in {
@@ -1029,7 +1059,7 @@ def _queue_remote_guest_network_recovery(*, host, host_id: str, job_id: str,
 
 
 def _reconcile_remote_console(name: str, host_id: str, *, wait: bool = False,
-                              wait_timeout: float = 90.0) -> dict:
+                              wait_timeout: float = 150.0) -> dict:
     """Verify a remote Moonlight host, repairing stale client state once.
 
     ``wait=True`` is used by the forward-auth boundary so Moonlight never sees
@@ -1049,37 +1079,63 @@ def _reconcile_remote_console(name: str, host_id: str, *, wait: bool = False,
     guest_ip = details['guest_ip']
     safe_name = str(details['job'].get('name') or name).strip().lower()
     route_name = _remote_console_route_name(safe_name, host_id)
-    try:
-        verified = orchestrator.verify_staged(safe_name, guest_ip=guest_ip, route_name=route_name)
-        return {
-            'ok': True,
-            'healthy': True,
-            'pending': False,
-            'repaired': False,
-            'host_id': str(host_id),
-            'name': safe_name,
-            **verified,
-        }
-    except ConsoleOrchestrationError as exc:
-        if getattr(exc, 'code', '') == 'sunshine_tcp_unavailable':
-            queued = _queue_remote_guest_network_recovery(
-                host=host,
-                host_id=str(host_id),
-                job_id=job_id,
-                name=safe_name,
-                route_name=route_name,
-                orchestrator=orchestrator,
-            )
-        else:
-            queued = _queue_remote_console_repair(
-                host=host,
-                host_id=str(host_id),
-                job_id=job_id,
-                name=safe_name,
-                guest_ip=guest_ip,
-                route_name=route_name,
-                orchestrator=orchestrator,
-            )
+    queued = None
+    job_profile = str(details['job'].get('profile') or 'standard').strip().lower()
+    needs_gaming_capture = job_profile == 'gaming' and not bool(details['job'].get('gamingCaptureConfigured'))
+    if needs_gaming_capture:
+        # Hyper-V can show the guest framebuffer while Sunshine still has no
+        # usable Gaming capture target. Never trust an already-paired
+        # Moonlight bundle in that state: force the retained, stage-limited
+        # repair path to configure and verify Sunshine capture first.
+        task_key = (str(host_id), str(job_id))
+        with _CONSOLE_RETRY_LOCK:
+            existing_task = _CONSOLE_RETRY_TASKS.get(task_key)
+            if isinstance(existing_task, dict) and str(existing_task.get('status') or '') == 'ready':
+                # A terminal repair result without the persisted capture
+                # marker is stale/incomplete. Remove only that terminal
+                # metadata so the next request can perform a real repair.
+                _CONSOLE_RETRY_TASKS.pop(task_key, None)
+        queued = _queue_remote_console_repair(
+            host=host,
+            host_id=str(host_id),
+            job_id=job_id,
+            name=safe_name,
+            guest_ip=guest_ip,
+            route_name=route_name,
+            orchestrator=orchestrator,
+        )
+    else:
+        try:
+            verified = orchestrator.verify_staged(safe_name, guest_ip=guest_ip, route_name=route_name)
+            return {
+                'ok': True,
+                'healthy': True,
+                'pending': False,
+                'repaired': False,
+                'host_id': str(host_id),
+                'name': safe_name,
+                **verified,
+            }
+        except ConsoleOrchestrationError as exc:
+            if getattr(exc, 'code', '') == 'sunshine_tcp_unavailable':
+                queued = _queue_remote_guest_network_recovery(
+                    host=host,
+                    host_id=str(host_id),
+                    job_id=job_id,
+                    name=safe_name,
+                    route_name=route_name,
+                    orchestrator=orchestrator,
+                )
+            else:
+                queued = _queue_remote_console_repair(
+                    host=host,
+                    host_id=str(host_id),
+                    job_id=job_id,
+                    name=safe_name,
+                    guest_ip=guest_ip,
+                    route_name=route_name,
+                    orchestrator=orchestrator,
+                )
     if not wait or not queued.get('pending'):
         return queued
     deadline = time.monotonic() + max(1.0, float(wait_timeout))
@@ -3256,7 +3312,7 @@ def dashboard_vm_forward_auth(name):
             host_id = _console_route_host_id(name, forwarded_uri)
             if host_id:
                 try:
-                    _reconcile_remote_console(name, host_id, wait=True, wait_timeout=90.0)
+                    _reconcile_remote_console(name, host_id, wait=True, wait_timeout=150.0)
                 except (ConsoleOrchestrationError, VmHostUnavailable) as exc:
                     response = Response('Remote console is recovering; retry shortly.', status=503)
                     response.headers['Retry-After'] = '3'
