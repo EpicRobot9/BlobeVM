@@ -71,13 +71,38 @@ def _admin_credentials():
         return 'admin', legacy
     return None, None
 
+def _extra_admin_credentials():
+    # Additive secondary dashboard admin (e.g. a test account) without
+    # disturbing the primary BLOBEDASH_USER admin.
+    user = os.environ.get('BLOBEDASH_EXTRA_USER', '').strip()
+    password_hash = os.environ.get('BLOBEDASH_EXTRA_PASS_HASH', '').strip()
+    if user and password_hash:
+        return user, password_hash
+    password = os.environ.get('BLOBEDASH_EXTRA_PASS', '').strip()
+    if user and password:
+        return user, password
+    return None, None
+
+def _valid_dashboard_admin(username: str, pw: str) -> bool:
+    user, expected = _admin_credentials()
+    if user and expected and hmac.compare_digest(username, user) and _admin_password_matches(pw, expected):
+        return True
+    eu, ep = _extra_admin_credentials()
+    if eu and ep and hmac.compare_digest(username, eu) and _admin_password_matches(pw, ep):
+        return True
+    return False
+
 def _admin_password_matches(candidate: str, expected: str) -> bool:
-    password_hash = os.environ.get('BLOBEDASH_PASS_HASH', '').strip()
-    if password_hash and hmac.compare_digest(expected, password_hash):
-        try:
-            return bool(check_password_hash(password_hash, candidate))
-        except (TypeError, ValueError):
-            return False
+    if not expected:
+        return False
+    # Werkzeug hash formats look like "scrypt:32768:8:1$salt$hash" (the method
+    # prefix may include parameters before the first '$'). Try hash verification
+    # first and fall back to a constant-time plaintext compare if it isn't a hash.
+    try:
+        if check_password_hash(expected, candidate):
+            return True
+    except (TypeError, ValueError):
+        pass
     return hmac.compare_digest(candidate, expected)
 
 def need_auth():
@@ -4049,7 +4074,7 @@ def dashboard_v2_login_public():
         attempt = _LOGIN_ATTEMPTS.get(remote, {'count': 0, 'until': 0})
         if attempt['until'] > now:
             return jsonify({'ok': False, 'error': 'Try again shortly'}), 429
-    if not hmac.compare_digest(username, user) or not _admin_password_matches(pw, expected_password):
+    if not _valid_dashboard_admin(username, pw):
         with _LOGIN_LOCK:
             count = _LOGIN_ATTEMPTS.get(remote, {}).get('count', 0) + 1
             _LOGIN_ATTEMPTS[remote] = {'count': count, 'until': now + min(30, 2 ** min(count, 5))}
