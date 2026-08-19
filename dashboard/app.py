@@ -3075,7 +3075,7 @@ def _tail_vm_logs(name: str, lines: int = 160) -> str:
 
 def _recover_vm(name: str, source: str = 'manual', aggressive: bool = True, mode: str = 'standard'):
     attempts = []
-    before = _vm_status_payload(name)
+    before = _vm_status_payload_bounded(name)
     recovery_state = str(before.get('recoveryState') or '').lower()
     protected_vm = bool(before.get('protectedVm'))
     if before.get('running') and not before.get('crashed'):
@@ -3094,7 +3094,7 @@ def _recover_vm(name: str, source: str = 'manual', aggressive: bool = True, mode
             sequence.append('recreate')
     for action in sequence:
         try:
-            proc = _vm_host().run_manager(action, name, capture_output=True, text=True, timeout=90)
+            proc = _vm_host().run_manager(action, name, capture_output=True, text=True, timeout=60)
             attempt = {
                 'action': action,
                 'ok': proc.returncode == 0,
@@ -3106,9 +3106,19 @@ def _recover_vm(name: str, source: str = 'manual', aggressive: bool = True, mode
             attempt = {'action': action, 'ok': False, 'stdout': '', 'stderr': str(e), 'returncode': None}
         attempts.append(attempt)
         time.sleep(2.5)
-        current = _vm_status_payload(name)
+        current = _vm_status_payload_bounded(name)
         if current.get('running') and (current.get('healthy') or current.get('state') == 'running'):
             return {'ok': True, 'recovered': True, 'attempts': attempts, 'status': current, 'message': f'VM recovered via {action}', 'source': source, 'mode': mode}
+        # Chain actions only when needed: if this action succeeded but the VM
+        # is not yet healthy, give it a short grace period before the next
+        # step; if it failed outright, continue to the next recovery action.
+        if attempt['ok'] and action == 'start':
+            # start worked but not marked healthy yet; wait a little longer
+            # before deciding to escalate to restart/recreate.
+            time.sleep(6)
+            current = _vm_status_payload_bounded(name)
+            if current.get('running') and (current.get('healthy') or current.get('state') == 'running'):
+                return {'ok': True, 'recovered': True, 'attempts': attempts, 'status': current, 'message': f'VM recovered via {action}', 'source': source, 'mode': mode}
     final = _vm_status_payload(name)
     return {'ok': False, 'recovered': False, 'attempts': attempts, 'status': final, 'message': 'VM recovery failed', 'source': source, 'mode': mode}
 
@@ -3748,7 +3758,7 @@ def portal_vm_status(name):
                 'profile': vm.get('profile', 'standard'),
             })
             return jsonify(envelope)
-        return jsonify(_vm_status_payload(name))
+        return jsonify(_vm_status_payload_bounded(name))
     except VmHostUnavailable as exc:
         return _vm_host_error_response(exc)
     except Exception as e:
@@ -3789,7 +3799,7 @@ def portal_vm_escalate(name):
         reason = data.get('reason') if isinstance(data, dict) else None
         if not reason:
             reason = 'Portal recovery help requested by user'
-        rec = _recover_vm(name, source='hermes-escalation', aggressive=True)
+        rec = _recover_vm(name, source='hermes-escalation', aggressive=False)
         esc = _escalate_vm_to_hermes(name, reason, {'recovery': rec, 'request': data})
         return jsonify({'ok': True, 'recovery': rec, 'escalation': esc})
     except Exception as e:
