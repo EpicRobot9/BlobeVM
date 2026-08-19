@@ -151,7 +151,7 @@ export default function Portal({ user, onSignout }) {
                   <button className="evm-btn evm-btn-block evm-mp-btn evm-btn-danger" disabled={busy === vm.name + ':stop'} onClick={() => act('stop', vm.name)}>
                     {busy === vm.name + ':stop' ? <Spinner size={16} className="spin" /> : <Stop size={16} />} STOP
                   </button>
-                  <a className="evm-mp-details" href={`/vm/${encodeURIComponent(vm.name)}`} onClick={(e) => { e.preventDefault(); navigate(`/vm/${encodeURIComponent(vm.name)}`) }}>Full details →</a>
+                  <a className="evm-mp-details" href={`/EpicVM/vm/${encodeURIComponent(vm.name)}/`} onClick={(e) => { e.preventDefault(); window.location.assign(`/EpicVM/vm/${encodeURIComponent(vm.name)}/`) }}>Open console →</a>
                 </div>
               </article>
             )

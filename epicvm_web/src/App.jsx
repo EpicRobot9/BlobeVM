@@ -5,7 +5,6 @@ import Signup from './pages/Signup'
 import Signin from './pages/Signin'
 import Pending from './pages/Pending'
 import Portal from './pages/Portal'
-import Machine from './pages/Machine'
 import { me } from './api'
 
 export default function App() {
@@ -49,14 +48,6 @@ export default function App() {
       <Route
         path="/portal"
         element={<PortalGate><Portal user={user} onSignout={() => { setUser(false); window.location.assign('/EpicVM/') }} /></PortalGate>}
-      />
-      <Route
-        path="/vm/:name"
-        element={<PortalGate><Machine user={user} onSignout={() => { setUser(false); window.location.assign('/EpicVM/') }} /></PortalGate>}
-      />
-      <Route
-        path="/portal/:name"
-        element={<Navigate to={(window.location.pathname.replace(/^\/EpicVM\/portal\//, '/EpicVM/vm/') || '/EpicVM/vm/')} replace />}
       />
       <Route
         path="/"
