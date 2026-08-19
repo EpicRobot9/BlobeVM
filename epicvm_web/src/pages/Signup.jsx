@@ -14,8 +14,8 @@ export default function Signup({ setUser }) {
   async function submit(e) {
     e.preventDefault()
     setErr('')
-    if (form.password.length < 12) {
-      setErr('Password must be at least 12 characters.')
+    if (form.password.length < 3) {
+      setErr('Password must be at least 3 characters.')
       return
     }
     setBusy(true)

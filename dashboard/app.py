@@ -2359,8 +2359,8 @@ def _get_user_by_username(username: str):
 def _create_user(username: str, password: str, assigned_vms=None, is_admin: bool=False):
     if not re.fullmatch(r'[A-Za-z0-9_.-]{3,64}', username or ''):
         raise ValueError('Username must be 3-64 chars using letters, numbers, dot, underscore, or dash')
-    if not password or len(password) < 12:
-        raise ValueError('Password must be at least 12 characters')
+    if not password or len(password) < 3:
+        raise ValueError('Password must be at least 3 characters')
     assigned_vms = _normalize_vm_names(assigned_vms)
     _validate_known_vm_names(assigned_vms)
     _init_users_db()
@@ -2384,8 +2384,8 @@ def _update_user(username: str, assigned_vms=None, password=None, disabled=None)
         if not row:
             raise ValueError('User not found')
         if password is not None:
-            if len(password) < 12:
-                raise ValueError('Password must be at least 12 characters')
+            if len(password) < 3:
+                raise ValueError('Password must be at least 3 characters')
             conn.execute('UPDATE users SET password_hash = ? WHERE id = ?', (_hash_user_password(password), row['id']))
         if disabled is not None:
             conn.execute('UPDATE users SET disabled = ? WHERE id = ?', (1 if disabled else 0, row['id']))
@@ -3586,8 +3586,8 @@ def epicvm_signup_api():
     who = str(data.get('who') or '').strip()
     if not re.fullmatch(r'[A-Za-z0-9_.-]{3,64}', username):
         return jsonify({'ok': False, 'error': 'Username must be 3-64 characters (letters, numbers, dot, underscore, dash).'}), 400
-    if not password or len(password) < 12:
-        return jsonify({'ok': False, 'error': 'Password must be at least 12 characters.'}), 400
+    if not password or len(password) < 3:
+        return jsonify({'ok': False, 'error': 'Password must be at least 3 characters.'}), 400
     if email and not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', email):
         return jsonify({'ok': False, 'error': 'Enter a valid email or leave it blank.'}), 400
     _init_users_db()
