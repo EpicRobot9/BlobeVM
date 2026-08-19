@@ -80,20 +80,22 @@ export default function Landing({ authed, onSignout }) {
   const navigate = useNavigate()
   const go = (path) => navigate(path)
   return (
-    <div className="evm-page">
+    <div className="evm-page evm-landing">
       <Nav authed={authed} onSignout={onSignout} />
 
       {/* Hero */}
       <section className="evm-hero">
         <div className="evm-hero-inner">
-          <span className="evm-pill">PRIVATE BETA</span>
-          <h1 className="evm-h1">Your PC. Anywhere.</h1>
-          <p className="evm-lead">
-            EpicVM gives you your own cloud computer that you can access from almost anywhere.
-          </p>
-          <div className="evm-hero-cta">
-            <button className="evm-btn evm-btn-primary evm-btn-lg" onClick={() => go('/signup')}>Request Access</button>
-            <button className="evm-btn evm-btn-ghost evm-btn-lg" onClick={() => go('/signin')}>Sign In</button>
+          <div className="evm-hero-copy">
+            <span className="evm-pill">PRIVATE BETA</span>
+            <h1 className="evm-h1">Your PC.<br />Anywhere.</h1>
+            <p className="evm-lead">
+              EpicVM gives you your own cloud computer that you can access from almost anywhere.
+            </p>
+            <div className="evm-hero-cta">
+              <button className="evm-btn evm-btn-primary evm-btn-lg" onClick={() => go('/signup')}>Request Access</button>
+              <button className="evm-btn evm-btn-ghost evm-btn-lg" onClick={() => go('/signin')}>Sign In</button>
+            </div>
           </div>
           <div className="evm-hero-visual" aria-hidden="true">
             <div className="evm-window">

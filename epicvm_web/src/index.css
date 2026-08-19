@@ -330,3 +330,116 @@ body {
   .evm-steps, .evm-types, .evm-features { grid-template-columns: 1fr; }
   .evm-h1 { font-size: 42px; }
 }
+
+/* ============================================================
+   LANDING — same EpicVM zine identity as the portal
+   ============================================================ */
+.evm-landing {
+  background:
+    radial-gradient(circle at 88% -8%, rgba(255, 122, 26, .20), transparent 46%),
+    radial-gradient(circle at 10% 8%, rgba(2, 189, 243, .16), transparent 44%),
+    radial-gradient(circle at 50% 120%, rgba(255, 210, 63, .08), transparent 52%),
+    var(--portal-bg);
+}
+.evm-landing::before {
+  content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 0; opacity: .05;
+  background-image: radial-gradient(rgba(255,255,255,.9) 1px, transparent 1.5px);
+  background-size: 14px 14px;
+}
+.evm-landing > * { position: relative; z-index: 1; }
+
+/* nav: zine orange underline */
+.evm-landing .evm-nav { border-bottom: 2px solid var(--orange); background: rgba(12,10,18,.72); }
+.evm-landing .evm-brand-mark { box-shadow: 2px 2px 0 #000; }
+
+/* hero: poster split layout */
+.evm-landing .evm-hero { padding: clamp(40px, 7vw, 92px) clamp(16px, 4vw, 40px) clamp(24px, 4vw, 48px); }
+.evm-landing .evm-hero-inner {
+  max-width: var(--maxw); margin: 0 auto; text-align: left;
+  display: flex; flex-wrap: wrap; align-items: center; gap: clamp(24px, 5vw, 64px);
+}
+.evm-landing .evm-hero-copy { flex: 1 1 420px; min-width: 300px; }
+.evm-landing .evm-hero-visual { flex: 0 1 400px; display: flex; justify-content: center; }
+
+/* zine PRIVATE BETA pill */
+.evm-landing .evm-pill {
+  color: var(--ink); background: var(--yellow); border: none; border-radius: 2px;
+  padding: 6px 12px; transform: rotate(-2deg); box-shadow: 2px 2px 0 #000; letter-spacing: .18em;
+}
+
+/* poster hero headline */
+.evm-landing .evm-h1 {
+  font-size: clamp(48px, 9vw, 104px); line-height: .86; letter-spacing: -.04em; color: var(--cream);
+  text-shadow: 4px 4px 0 var(--orange), 8px 8px 0 rgba(2,189,243,.5); transform: skewX(-4deg);
+}
+.evm-landing .evm-lead { color: #cdd6e0; max-width: 460px; margin: 18px 0 28px; }
+
+/* section poster headings */
+.evm-landing .evm-section { max-width: var(--maxw); }
+.evm-landing .evm-h2 {
+  color: var(--cream); letter-spacing: -.02em; position: relative; padding-left: 18px;
+}
+.evm-landing .evm-h2::before {
+  content: ''; position: absolute; left: 0; top: .12em; bottom: .12em; width: 7px;
+  background: var(--orange); border-radius: 2px; box-shadow: 2px 2px 0 #000; transform: skewX(-6deg);
+}
+
+/* zine cards shared */
+.evm-landing .evm-step,
+.evm-landing .evm-type,
+.evm-landing .evm-feature,
+.evm-landing .evm-faq-item {
+  background: var(--ink2); border: 2px solid #fff; border-radius: 14px; color: var(--cream);
+  box-shadow: 5px 5px 0 #000; position: relative;
+}
+.evm-landing .evm-step { transform: rotate(-.6deg); }
+.evm-landing .evm-type { transform: rotate(.5deg); }
+.evm-landing .evm-feature { transform: rotate(-.4deg); }
+.evm-landing .evm-step p, .evm-landing .evm-type p, .evm-landing .evm-feature p { color: #c2cbd6; }
+.evm-landing .evm-step-n { background: var(--orange); color: var(--ink); box-shadow: 2px 2px 0 #000; transform: rotate(-3deg); }
+.evm-landing .evm-feature-ic { background: rgba(255,122,26,.16); color: var(--orange); border: 2px solid rgba(255,122,26,.4); }
+.evm-landing .evm-type h3, .evm-landing .evm-feature h3 { color: var(--cream); }
+
+/* hero mock VM window as a zine machine card */
+.evm-landing .evm-window {
+  width: min(380px, 92vw); border: 3px solid #fff; border-radius: 14px; background: var(--ink2);
+  box-shadow: 7px 7px 0 #000; border-top: 3px solid var(--orange); overflow: hidden;
+}
+.evm-landing .evm-window-bar { background: #100e18; }
+.evm-landing .evm-window-bar i { background: var(--orange); }
+.evm-landing .evm-window-body { background: var(--ink2); }
+.evm-landing .evm-vm-card { background: #16131f; border: 1px solid rgba(255,255,255,.14); color: var(--cream); }
+.evm-landing .evm-vm-os { color: var(--cream); }
+.evm-landing .evm-vm-meta { color: #c2cbd6; }
+
+/* beta / free callouts */
+.evm-landing .evm-beta, .evm-landing .evm-free {
+  background: rgba(255,122,26,.07); border-left: 4px solid var(--orange);
+  box-shadow: 5px 5px 0 #000; border-radius: 0 14px 14px 0; color: var(--cream);
+}
+.evm-landing .evm-beta .evm-h2, .evm-landing .evm-free .evm-h2 { color: var(--cream); }
+.evm-landing .evm-note { color: #c2cbd6; }
+.evm-landing .evm-checklist li { color: var(--cream); }
+
+/* faq */
+.evm-landing .evm-faq-item summary { color: var(--cream); }
+.evm-landing .evm-faq-item summary::after { color: var(--orange); }
+.evm-landing .evm-faq-item p { color: #c2cbd6; }
+
+/* final cta */
+.evm-landing .evm-cta { text-align: center; }
+.evm-landing .evm-cta .evm-h2 { padding-left: 0; }
+.evm-landing .evm-cta .evm-h2::before { display: none; }
+.evm-landing .evm-cta .evm-body { color: #c2cbd6; }
+
+/* footer */
+.evm-landing .evm-footer { border-top: 2px solid var(--orange); color: #c2cbd6; }
+.evm-landing .evm-footer .evm-brand-mark { background: var(--orange); color: var(--ink); }
+
+@media (max-width: 720px) {
+  .evm-landing .evm-hero-inner { flex-direction: column; text-align: center; }
+  .evm-landing .evm-hero-copy { flex: 1 1 auto; text-align: center; }
+  .evm-landing .evm-lead { margin-left: auto; margin-right: auto; }
+  .evm-landing .evm-h1 { font-size: 56px; }
+  .evm-landing .evm-step, .evm-landing .evm-type, .evm-landing .evm-feature { transform: none; }
+}
