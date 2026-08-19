@@ -1315,7 +1315,76 @@ def _ensure_remote_vm_exists(host, name):
 TEMPLATE = r"""
 <!doctype html><html><head><title>{{ title }}</title>
 {% if favicon_url %}<link rel="icon" href="{{ favicon_url }}" />{% endif %}
-<style>body{font-family:system-ui,Arial;margin:1.5rem;background:#111;color:#eee}table{border-collapse:collapse;width:100%;}th,td{padding:.5rem;border-bottom:1px solid #333}a,button{background:#2563eb;color:#fff;border:none;padding:.4rem .8rem;border-radius:4px;text-decoration:none;cursor:pointer}form{display:inline}h1{margin-top:0} .badge{background:#444;padding:.15rem .4rem;border-radius:3px;font-size:.65rem;text-transform:uppercase;margin-left:.3rem} .muted{opacity:.75} .btn-red{background:#dc2626} .btn-gray{background:#374151} .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}.green{background:#10b981}.red{background:#ef4444}.gray{background:#6b7280}.amber{background:#f59e0b}</style>
+<style>
+:root{
+  --bg:#0b0a10; --panel:#100e18; --panel-2:#0e0d16; --line:#26222e; --line-soft:#1b1822;
+  --text:#f4ece2; --muted:#9aa3b2; --orange:#ff7a1a; --orange-2:#ffa63d; --cyan:#02bdf3;
+  --green:#36d399; --red:#ff7a8a; --amber:#ffd23f; --ink:#0b0a10;
+  --shadow:0 18px 50px rgba(0,0,0,.45);
+}
+*{box-sizing:border-box}
+@keyframes dashIn{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:none}}
+@keyframes dashRowIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+@keyframes dashPop{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:none}}
+@keyframes dotPulse{0%,100%{box-shadow:0 0 0 0 rgba(54,211,153,.0)}50%{box-shadow:0 0 0 5px rgba(54,211,153,.18)}}
+@keyframes titleGlow{0%,100%{text-shadow:0 0 0 rgba(255,122,26,0)}50%{text-shadow:0 0 22px rgba(255,122,26,.35)}}
+body{
+  font-family:Inter,system-ui,Arial,sans-serif;margin:0;color:var(--text);
+  background:
+    radial-gradient(900px 500px at 12% -8%, rgba(255,122,26,.16), transparent 60%),
+    radial-gradient(800px 500px at 100% 0%, rgba(2,189,243,.12), transparent 55%),
+    linear-gradient(180deg,#0b0a10 0%,#08070d 100%);
+  background-attachment:fixed;min-height:100vh;
+  max-width:1200px;margin:0 auto;padding:2rem 1.5rem 3rem;line-height:1.5;
+  animation:dashIn .5s ease both;
+}
+h1#dash-title{
+  margin:0 0 1.25rem;font-size:clamp(28px,4vw,40px);letter-spacing:-.02em;font-weight:800;
+  display:inline-block;padding-bottom:.4rem;border-bottom:3px solid var(--orange);
+  border-radius:2px;animation:titleGlow 4s ease-in-out infinite;
+}
+#errbox{display:none;background:#2a0d12;color:#ffd7dd;padding:.6rem .85rem;border-radius:10px;margin:.5rem 0;border:1px solid #5c1a23}
+#v2status{margin:.5rem 0 1.1rem;padding:.7rem .9rem;border:1px solid var(--line);border-top:2px solid var(--cyan);border-radius:12px;background:var(--panel);color:#cfe8ff !important}
+.panel,#v2status{box-shadow:var(--shadow)}
+.badge{background:linear-gradient(180deg,var(--orange),var(--orange-2));color:var(--ink);padding:.2rem .5rem;border-radius:999px;font-size:.62rem;font-weight:800;text-transform:uppercase;margin-left:.3rem;letter-spacing:.04em;vertical-align:middle}
+.muted{opacity:.7;color:var(--muted)}
+table{border-collapse:separate;border-spacing:0;width:100%;margin:1rem 0;background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:var(--shadow);animation:dashPop .5s ease both}
+thead th{text-align:left;font-size:.72rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);background:#15131f;padding:.85rem 1rem;border-bottom:1px solid var(--line)}
+tbody tr{transition:background .18s ease}
+tbody tr:nth-child(even){background:rgba(255,255,255,.02)}
+tbody tr:hover{background:rgba(255,122,26,.08)}
+tbody td{padding:.8rem 1rem;border-bottom:1px solid var(--line-soft);vertical-align:middle}
+tbody tr:last-child td{border-bottom:none}
+tbody tr{animation:dashRowIn .45s ease both}
+tbody tr:nth-child(1){animation-delay:.02s}tbody tr:nth-child(2){animation-delay:.06s}tbody tr:nth-child(3){animation-delay:.10s}tbody tr:nth-child(4){animation-delay:.14s}tbody tr:nth-child(5){animation-delay:.18s}tbody tr:nth-child(n+6){animation-delay:.22s}
+a,button{
+  font:inherit;font-weight:600;background:linear-gradient(180deg,var(--orange),var(--orange-2));color:var(--ink);
+  border:none;padding:.45rem .9rem;border-radius:9px;text-decoration:none;cursor:pointer;
+  transition:transform .14s ease, box-shadow .14s ease, filter .14s ease;box-shadow:0 6px 16px rgba(255,122,26,.22)
+}
+a:hover,button:hover{transform:translateY(-2px);filter:brightness(1.05);box-shadow:0 10px 22px rgba(255,122,26,.35)}
+a:active,button:active{transform:translateY(0)}
+.btn-red{background:linear-gradient(180deg,#ff6a7d,var(--red));box-shadow:0 6px 16px rgba(255,122,138,.22)}
+.btn-red:hover{box-shadow:0 10px 22px rgba(255,122,138,.35)}
+.btn-gray{background:linear-gradient(180deg,#3a3a48,#2a2a36);color:var(--text);box-shadow:0 6px 16px rgba(0,0,0,.3)}
+.btn-gray:hover{box-shadow:0 10px 22px rgba(0,0,0,.45)}
+input,select,textarea{
+  font:inherit;color:var(--text);background:#0c0b12;border:1px solid var(--line);border-radius:9px;
+  padding:.5rem .7rem;margin:.2rem .2rem .2rem 0;transition:border-color .15s ease, box-shadow .15s ease
+}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--orange);box-shadow:0 0 0 3px rgba(255,122,26,.22)}
+input::placeholder{color:#6b7280}
+form{display:inline}
+.dot{display:inline-block;width:11px;height:11px;border-radius:50%;margin-right:7px;vertical-align:middle}
+.green{background:var(--green);animation:dotPulse 2.4s ease-in-out infinite}
+.red{background:var(--red);box-shadow:0 0 0 0 rgba(255,122,138,0)}
+.gray{background:#6b7280}
+.amber{background:var(--amber);box-shadow:0 0 0 0 rgba(255,210,63,0)}
+div[style*="background:#07121a"],div[style*="background:#071229"]{border-color:var(--line) !important;background:var(--panel) !important;border-radius:12px !important;box-shadow:var(--shadow) !important}
+@media (max-width:640px){body{padding:1rem .75rem 2rem}table{display:block;overflow-x:auto;white-space:nowrap}}
+@media (prefers-reduced-motion:reduce){*{animation:none !important;transition:none !important}}
+</style>
+
 </head><body>
 <h1 id="dash-title">{{ title }}</h1>
 <div id=errbox style="display:none;background:#7f1d1d;color:#fff;padding:.5rem .75rem;border-radius:4px;margin:.5rem 0"></div>
