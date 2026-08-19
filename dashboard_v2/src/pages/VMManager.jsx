@@ -895,7 +895,7 @@ export default function VMManager(){
     // A verified remote inventory URL is the Moonlight route. Do not send a
     // ready remote VM through the legacy Guacamole launcher; that was the
     // source of the misleading "console" link after a successful retry.
-    const launcherUrl = `/dashboard/console/${encodeURIComponent(name)}/?launch=${Date.now()}`
+    const launcherUrl = `/EpicVM/Dashboard/console/${encodeURIComponent(name)}/?launch=${Date.now()}`
     setSelectedVmUrl(hostId && hostId !== 'local' ? (nextUrl || launcherUrl) : nextUrl)
     await apiFetch(`/optimizer/activity/${encodeURIComponent(name)}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ source:'details-open' }) }).catch(()=>null)
     await fetchLogs(name, hostId)
@@ -1342,7 +1342,7 @@ export default function VMManager(){
       <Modal open={!!selected} title={`VM: ${selected}`} onClose={()=>{ setSelected(null); setSelectedVmUrl('') }} width={1180}>
         <div style={{display:'flex',gap:12, flexWrap:'wrap'}}>
           <div style={{flex:'1 1 620px'}}>
-            <iframe title={`VM ${selected}`} src={selectedVmUrl || `/dashboard/vm/${encodeURIComponent(selected)}/`} style={{width:'100%',height:360,border:'1px solid rgba(255,255,255,0.04)', background:'#020617'}} />
+            <iframe title={`VM ${selected}`} src={selectedVmUrl || `/EpicVM/vm/${encodeURIComponent(selected)}/`} style={{width:'100%',height:360,border:'1px solid rgba(255,255,255,0.04)', background:'#020617'}} />
             {selectedVmHostId === 'local' ? <div style={{marginTop:12}}>
               <VmExec vmName={selected} />
             </div> : <div className="vm-placement-notice" style={{marginTop:12}}>Remote console is served by the selected host URL.</div>}

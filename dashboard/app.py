@@ -2485,7 +2485,8 @@ def _user_can_access_vm(user, name: str) -> bool:
     return name in set(user.get('assignedVms') or [])
 
 def _portal_login_redirect(next_url: str):
-    return redirect('/portal/login?next=' + urlrequest.quote(_safe_portal_next(next_url), safe='/:?=&%'))
+    prefix = '/EpicVM' if request.path.startswith('/EpicVM/portal') else ''
+    return redirect(prefix + '/portal/login?next=' + urlrequest.quote(_safe_portal_next(next_url), safe='/:?=&%'))
 
 def _safe_portal_next(next_url: str) -> str:
     value = str(next_url or '/portal')
@@ -3708,7 +3709,8 @@ def portal_request_access(name):
 def portal_home():
     user = _current_portal_user()
     if not user:
-        return redirect('/portal/login')
+        prefix = '/EpicVM' if request.path.startswith('/EpicVM/portal') else ''
+        return _portal_login_redirect(prefix + '/portal/')
     page = '''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>VM Portal</title><style>:root{color-scheme:dark}body{margin:0;font-family:Inter,system-ui,Arial;background:radial-gradient(circle at top,#101933 0%,#050816 58%,#03050d 100%);color:#eef4ff;padding:24px;min-height:100vh;box-sizing:border-box}.wrap{max-width:1180px;margin:0 auto}.top{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:18px}.eyebrow{letter-spacing:.18em;text-transform:uppercase;font-size:12px;color:#93c5fd;margin-bottom:8px}.hero{padding:24px;border-radius:24px;border:1px solid rgba(255,255,255,.1);background:linear-gradient(180deg,rgba(255,255,255,.07),rgba(255,255,255,.03));box-shadow:0 30px 80px rgba(0,0,0,.34)}h1{margin:0 0 8px;font-size:clamp(32px,5vw,50px)}.sub{color:#b9c7e5;max-width:780px;line-height:1.6}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:18px;margin-top:24px}.card{background:linear-gradient(180deg,rgba(255,255,255,.06),rgba(255,255,255,.03));border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:20px;box-shadow:0 18px 50px rgba(0,0,0,.24)}.muted{opacity:.78}.status{display:inline-flex;padding:8px 11px;border-radius:999px;font-size:12px;font-weight:700;letter-spacing:.03em;background:rgba(255,255,255,.07);margin-bottom:12px}.status.live{color:#bbf7d0;background:rgba(22,163,74,.18)}.status.down{color:#fde68a;background:rgba(245,158,11,.16)}button,a.btn{display:inline-block;margin:10px 10px 0 0;padding:11px 14px;border-radius:12px;border:none;background:linear-gradient(135deg,#3b82f6,#7c3aed);color:#fff;text-decoration:none;cursor:pointer;font-weight:700}.alt{background:rgba(255,255,255,.08)}.ghost{background:transparent;border:1px solid rgba(255,255,255,.12)}.home-style{color:#e7f0f4}.hero{border-radius:5px;border:1px solid #1a2b33;border-top:2px solid #02bdf3;background:#071117;box-shadow:none;padding:28px}.card{border-radius:5px;background:#071117;border:1px solid #1a2b33;box-shadow:none}.eyebrow{color:#6e8791;letter-spacing:.18em}.sub,.muted{color:#9fb0b8;opacity:1}.status{border-radius:4px;background:#0b1820;border:1px solid #263b44}.status.live{color:#83eb9b;background:#0b1d17}.status.down{color:#f7c948;background:#17170f}button,a.btn{border-radius:4px;background:#02bdf3;color:#00131b;box-shadow:none}button:hover,a.btn:hover{background:#35cdf6}.alt,.ghost{background:#0b1820;color:#dce7ec;border:1px solid #29404a}.top{border-bottom:1px solid #1a2b33;padding-bottom:20px}.grid{gap:16px}.card h3{font-weight:600}.card strong{color:#e7f0f4}input,button{font:inherit}@media (max-width:720px){body{padding:14px}.hero,.card{padding:18px}}</style></head><body><div class=wrap><div class=top><div class=hero style="flex:1 1 740px"><div class=eyebrow>VM Portal</div><h1>Your VMs</h1><div class=sub id=welcome>Loading your VM access…</div></div><div><button class="alt" onclick="logoutUser()">Log out</button></div></div><div id=list class=grid></div></div><script>async function logoutUser(){await fetch('/portal/api/auth/logout',{method:'POST'}).catch(()=>null);location.href='/portal/login'} function esc(s){return String(s??'').replace(/[&<>\"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))} function actionButton(label, cls, act, name){return '<button'+(cls?' class="'+cls+'"':'')+' onclick='+JSON.stringify("vmAction('"+act+"', "+JSON.stringify(String(name))+")")+'>'+label+'</button>'} async function load(){const r=await fetch('/portal/api/vms'); if(r.status===401){location.href='/portal/login'; return} const j=await r.json().catch(()=>({})); const user=(j.user&&j.user.username)||'user'; document.getElementById('welcome').textContent='Signed in as '+user+'. Open, start, or stop any VM your account can access.'; const list=document.getElementById('list'); list.innerHTML=''; const vms=(j.vms||[]); if(!vms.length){list.innerHTML='<div class="card"><h3 style="margin-top:0">No VMs available</h3><div class="muted">You do not currently have any public or assigned VMs available in the portal.</div></div>'; return} vms.forEach(vm=>{const div=document.createElement('div'); div.className='card'; const live=String(vm.status||'').toLowerCase()==='running' || vm.running; const actions=['<a class="btn" href="/vm/'+encodeURIComponent(vm.name)+'/">Open</a>']; if(vm.allowed){actions.push(actionButton('Start','', 'start', vm.name)); actions.push(actionButton('Stop','alt', 'stop', vm.name))} div.innerHTML='<div class="status '+(live?'live':'down')+'">'+(live?'Online':'Offline')+'</div><h3 style="margin:0 0 8px">'+esc(vm.name)+'</h3><div class="muted">Access mode: '+esc(vm.accessMode||'public')+'</div><div class="muted" style="margin-top:6px">Current state: '+esc(vm.status||'Unknown')+'</div><div>'+actions.join('')+'</div>'; list.appendChild(div)})} async function waitForVm(name,maxMs){const deadline=Date.now()+(maxMs||45000); while(Date.now()<deadline){ try{ const r=await fetch('/dashboard/api/vm/'+encodeURIComponent(name)+'/status',{cache:'no-store'}); const j=await r.json().catch(()=>({})); if(j && j.ok && j.running) return true; }catch(_){ } await new Promise(r=>setTimeout(r,1500)); } return false } async function vmAction(act,name){const r=await fetch('/portal/api/'+act+'/'+encodeURIComponent(name),{method:'POST'}); const j=await r.json().catch(()=>({})); if(!j.ok){ alert('Failed: '+(j.error||r.status)); load(); return } if(act==='start'){ const ready=await waitForVm(name,45000); const target=j.wrapperUrl||('/vm/'+encodeURIComponent(name)+'/'); if(!ready){ alert('VM start request sent. Opening the wrapper while it finishes waking up.'); } window.location.href=target; return } alert(act+' request sent'); load()} load()</script></body></html>'''
     return Response(page, mimetype='text/html')
 
@@ -3720,6 +3722,18 @@ def portal_login_page():
     next_js = json.dumps(next_url)
     page = f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>VM Login</title><style>body{{margin:0;font-family:Inter,system-ui,Arial;background:radial-gradient(circle at top,#101933 0%,#050816 58%,#03050d 100%);color:#e7f0f4;display:grid;place-items:center;min-height:100vh;padding:24px}}.card{{max-width:430px;width:100%;box-sizing:border-box;background:#071117;border:1px solid #1a2b33;border-top:2px solid #02bdf3;border-radius:5px;padding:34px;box-shadow:none}}.brand{{display:flex;align-items:center;gap:11px;border-bottom:1px solid #1a2b33;padding-bottom:20px;margin-bottom:26px}}.brand-mark{{display:grid;place-items:center;width:32px;height:32px;border-radius:5px;background:#02bdf3;color:#00131b;font-weight:900}}.brand-name{{font-size:18px;font-weight:700}}h1{{margin:0 0 8px;font-size:26px;font-weight:500;letter-spacing:-.025em}}.muted{{color:#9fb0b8;line-height:1.55}}input,button{{width:100%;box-sizing:border-box;padding:12px 14px;border-radius:4px;border:1px solid #29404a;background:#061016;color:#e7f0f4;margin-top:10px;font:inherit}}input:focus{{outline:2px solid rgba(2,189,243,.25);border-color:#02bdf3}}button{{background:#02bdf3;color:#00131b;border-color:#34cdf8;cursor:pointer;font-weight:700}}button:hover{{background:#35cdf6}}#err{{color:#ff9ab0!important;margin-top:10px}}</style></head><body><div class=card><div class=brand><span class=brand-mark>B</span><span class=brand-name>BlobeVM</span></div><h1>VM Login</h1><div class=muted>Sign in to access restricted BlobeVM instances.</div><form onsubmit="return doLogin(event)"><input id=u placeholder="Username" autocomplete="username" /><input id=p type=password placeholder="Password" autocomplete="current-password" /><button>Sign in</button><div id=err style="color:#fca5a5;margin-top:10px"></div></form></div><script>async function doLogin(e){{e.preventDefault();const r=await fetch('/portal/api/auth/login',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{username:document.getElementById('u').value,password:document.getElementById('p').value}})}});const j=await r.json().catch(()=>({{}}));if(j.ok){{location.href={next_js};return false}}document.getElementById('err').textContent=j.error||'Login failed';return false}}</script></body></html>'''
     return Response(page, mimetype='text/html')
+
+# --- EpicVM namespace aliases for the existing portal (no duplicated logic) ---
+@app.get('/EpicVM/portal')
+@app.get('/EpicVM/portal/')
+def epicvm_portal_home():
+    return portal_home()
+
+
+@app.get('/EpicVM/portal/login')
+def epicvm_portal_login_page():
+    return portal_login_page()
+
 
 @app.get('/dashboard/api/users')
 @v2_auth_required
@@ -3987,6 +4001,48 @@ def serve_dashboard_v2_prefixed_assets_public(path):
     return 'Not found', 404
 
 
+# --- EpicVM namespace: operator console served at /EpicVM/Dashboard ---
+@app.route('/EpicVM/Dashboard')
+@app.route('/EpicVM/Dashboard/', defaults={'path': ''})
+@app.route('/EpicVM/Dashboard/<path:path>')
+def serve_epicvm_dashboard_v2(path=''):
+    base = os.path.join(_state_dir(), 'dashboard_v2')
+    dist = os.path.join(base, 'dist')
+    if path:
+        cand = os.path.join(dist, path)
+        if os.path.isfile(cand):
+            return send_from_directory(dist, path)
+    indexcand = os.path.join(dist, 'index.html')
+    if os.path.isfile(indexcand):
+        return send_from_directory(dist, 'index.html')
+    return 'Dashboard v2 not built', 404
+
+
+@app.route('/EpicVM/Dashboard/assets/<path:path>')
+def serve_epicvm_dashboard_v2_assets(path):
+    base = os.path.join(_state_dir(), 'dashboard_v2')
+    assets_dir = os.path.join(base, 'dist', 'assets')
+    cand = os.path.join(assets_dir, path)
+    if os.path.isfile(cand):
+        return send_from_directory(assets_dir, path)
+    return 'Not found', 404
+
+
+@app.route('/EpicVM/Dashboard/api/<path:subpath>', methods=['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE'])
+def epicvm_dashboard_api(subpath):
+    """Proxy the operator Dashboard API under the /EpicVM namespace."""
+    from werkzeug.exceptions import NotFound
+    adapter = app.url_map.bind_to_environ(request.environ)
+    try:
+        endpoint, values = adapter.match('/dashboard/api/' + subpath, method=request.method)
+    except NotFound:
+        return jsonify({'ok': False, 'error': 'Not found'}), 404
+    view = app.view_functions.get(endpoint)
+    if view is None:
+        return jsonify({'ok': False, 'error': 'Not found'}), 404
+    return view(**values)
+
+
 @app.post('/dashboard/api/set-vm-title/<name>')
 @auth_required
 def api_set_vm_title(name):
@@ -4148,6 +4204,12 @@ def dashboard_vm_favicon(name):
         return _send_icon_file(candidate)
     # fallback to global favicon route
     return '', 302, {'Location': '/dashboard/favicon.ico', 'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0', 'Pragma': 'no-cache', 'Expires': '0'}
+
+
+@app.get('/EpicVM/vm/<name>/')
+def epicvm_vm_wrapper(name):
+    """Alias of the public VM wrapper under the /EpicVM namespace."""
+    return dashboard_vm_wrapper(name)
 
 
 @app.get('/dashboard/vm/<name>/')

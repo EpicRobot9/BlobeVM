@@ -8,7 +8,7 @@ import { ThemeProvider } from './lib/theme.jsx'
 createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <ThemeProvider>
-      <BrowserRouter basename="/Dashboard">
+      <BrowserRouter basename="/EpicVM/Dashboard">
         <App />
       </BrowserRouter>
     </ThemeProvider>

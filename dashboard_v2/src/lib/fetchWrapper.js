@@ -1,5 +1,5 @@
-const API_BASE = '/Dashboard/api'
-const AUTH_BASE = '/Dashboard/api'
+const API_BASE = '/EpicVM/Dashboard/api'
+const AUTH_BASE = '/EpicVM/Dashboard/api'
 let csrfToken = ''
 let csrfRequest = null
 
