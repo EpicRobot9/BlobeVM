@@ -3649,11 +3649,28 @@ def portal_login_api():
     data = request.get_json(silent=True) or {}
     username = str(data.get('username') or '').strip()
     password = str(data.get('password') or '')
+    remote = request.remote_addr or 'unknown'
+    now = time.time()
+    with _LOGIN_LOCK:
+        attempt = _LOGIN_ATTEMPTS.get(remote, {'count': 0, 'until': 0})
+        if attempt['until'] > now:
+            return jsonify({'ok': False, 'error': 'Try again shortly'}), 429
     if not _same_origin_request():
         return jsonify({'ok': False, 'error': 'Cross-origin request rejected'}), 403
     user = _get_user_by_username(username)
     if not user or user.get('disabled') or not _verify_user_password(password, user.get('password_hash') or ''):
+        with _LOGIN_LOCK:
+            count = _LOGIN_ATTEMPTS.get(remote, {}).get('count', 0) + 1
+            _LOGIN_ATTEMPTS[remote] = {'count': count, 'until': now + min(30, 2 ** min(count, 5))}
         return jsonify({'ok': False, 'error': 'invalid'}), 401
+    # Only approved accounts may obtain a session.
+    if str(user.get('account_status') or 'pending') != 'approved':
+        with _LOGIN_LOCK:
+            count = _LOGIN_ATTEMPTS.get(remote, {}).get('count', 0) + 1
+            _LOGIN_ATTEMPTS[remote] = {'count': count, 'until': now + min(30, 2 ** min(count, 5))}
+        return jsonify({'ok': False, 'error': 'Account not approved'}), 403
+    with _LOGIN_LOCK:
+        _LOGIN_ATTEMPTS.pop(remote, None)
     try:
         token = _create_portal_token(user['username'], bool(user.get('isAdmin')))
     except ValueError as exc:
@@ -3863,7 +3880,7 @@ def portal_vm_recover(name):
         return jsonify({'ok': False, 'error': 'Forbidden'}), 403
     try:
         data = request.get_json(silent=True) or {}
-        aggressive = bool(data.get('aggressive', True)) if isinstance(data, dict) else True
+        aggressive = bool(data.get('aggressive', False)) if isinstance(data, dict) else False
         mode = (data.get('mode') if isinstance(data, dict) else None) or 'standard'
         result = _recover_vm(name, source='portal', aggressive=aggressive, mode=mode)
         return jsonify(result), (200 if result.get('ok') else 500)
@@ -4037,7 +4054,7 @@ def dashboard_access_request_action(req_id):
             if not user:
                 return jsonify({'ok': False, 'error': 'User no longer exists'}), 404
             assigned = sorted(set((user.get('assignedVms') or []) + [row['vm_name']]))
-            _update_user(row['username'], assigned_vms=assigned)
+            _update_user(row['username'], assigned_vms=assigned, account_status='approved')
             new_status = 'approved'
         elif action == 'deny':
             new_status = 'denied'
@@ -6127,7 +6144,7 @@ def api_vm_gpu_partition(name):
 def api_vm_recover(name):
     try:
         data = request.get_json(silent=True) or {}
-        aggressive = bool(data.get('aggressive', True)) if isinstance(data, dict) else True
+        aggressive = bool(data.get('aggressive', False)) if isinstance(data, dict) else False
         mode = (data.get('mode') if isinstance(data, dict) else None) or 'standard'
         result = _recover_vm(name, source='dashboard', aggressive=aggressive, mode=mode)
         return jsonify(result), (200 if result.get('ok') else 500)

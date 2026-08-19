@@ -50,9 +50,19 @@ export async function stopVm(name) {
   return apiFetch(`${PORTAL}/api/stop/${encodeURIComponent(name)}`, { method: 'POST' })
 }
 export async function restartVm(name) {
-  // No dedicated backend endpoint; restart = stop, wait, start.
+  // No dedicated backend endpoint; restart = stop, wait for it to actually stop, then start.
   const s = await stopVm(name)
   if (!s.ok) return s
-  await new Promise((r) => setTimeout(r, 2500))
+  // Poll the VM status until it reports stopped/offline (or timeout), so start
+  // doesn't race a still-shutting-down container on slow hosts.
+  const deadline = Date.now() + 30000
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 1500))
+    try {
+      const st = await apiFetch(`${PORTAL}/api/vm/${encodeURIComponent(name)}/status`)
+      const state = (st.body && (st.body.state || st.body.status) || '').toLowerCase()
+      if (state === 'stopped' || state === 'offline' || state === 'exited' || state === 'dead') break
+    } catch { /* ignore, keep waiting */ }
+  }
   return startVm(name)
 }
