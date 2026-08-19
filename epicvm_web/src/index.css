@@ -190,8 +190,8 @@ body {
    PORTAL — stylized UNBEATABLE-inspired control center
    ============================================================ */
 :root {
-  --pink: #ff3d7f;
-  --pink2: #ff79b0;
+  --orange: #ff7a1a;
+  --orange2: #ffa63d;
   --yellow: #ffd23f;
   --cream: #fdf3e7;
   --ink: #0b0a10;
@@ -200,7 +200,7 @@ body {
 }
 .evm-portal {
   background:
-    radial-gradient(circle at 12% -10%, rgba(255, 61, 127, .22), transparent 42%),
+    radial-gradient(circle at 12% -10%, rgba(255, 122, 26, .22), transparent 42%),
     radial-gradient(circle at 92% 8%, rgba(2, 189, 243, .20), transparent 46%),
     radial-gradient(circle at 50% 120%, rgba(255, 210, 63, .10), transparent 50%),
     var(--portal-bg);
@@ -215,7 +215,7 @@ body {
 
 .evm-portal-head {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  padding: 16px clamp(16px, 4vw, 40px); border-bottom: 2px solid var(--pink);
+  padding: 16px clamp(16px, 4vw, 40px); border-bottom: 2px solid var(--orange);
   background: rgba(12, 10, 18, .72); backdrop-filter: blur(10px); position: sticky; top: 0; z-index: 20;
 }
 .evm-ph-left { display: flex; align-items: center; gap: 14px; }
@@ -233,7 +233,7 @@ body {
 }
 .evm-hero2-title {
   font-size: clamp(44px, 9vw, 92px); line-height: .86; margin: 0; font-weight: 900; letter-spacing: -.04em;
-  color: var(--cream); text-shadow: 4px 4px 0 var(--pink), 8px 8px 0 rgba(2,189,243,.55);
+  color: var(--cream); text-shadow: 4px 4px 0 var(--orange), 8px 8px 0 rgba(2,189,243,.55);
   transform: skewX(-4deg);
 }
 .evm-hero2-sub { color: var(--muted); font-size: clamp(15px, 2vw, 18px); margin: 14px 0 0; max-width: 420px; }
@@ -259,14 +259,14 @@ body {
   clip-path: polygon(0 0, 100% 0, 100% 88%, 94% 100%, 0 100%);
 }
 .evm-card:hover { transform: translate(-2px, -3px); box-shadow: 9px 9px 0 #000; }
-.evm-card-cut { position: absolute; top: 0; right: 0; width: 64px; height: 64px; background: var(--pink);
+.evm-card-cut { position: absolute; top: 0; right: 0; width: 64px; height: 64px; background: var(--orange);
   clip-path: polygon(100% 0, 0 0, 100% 100%); opacity: .9; }
 .evm-card.t-windows .evm-card-cut { background: var(--cyan); }
 .evm-card.t-gaming .evm-card-cut { background: var(--yellow); }
 .evm-card-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .evm-type-tag {
   display: inline-flex; align-items: center; gap: 6px; font-size: 10px; font-weight: 900; letter-spacing: .14em;
-  padding: 4px 8px; border-radius: 2px; color: var(--ink); background: var(--pink); transform: rotate(-2deg);
+  padding: 4px 8px; border-radius: 2px; color: var(--ink); background: var(--orange); transform: rotate(-2deg);
 }
 .evm-type-tag.t-windows { background: var(--cyan); }
 .evm-type-tag.t-gaming { background: var(--yellow); }
