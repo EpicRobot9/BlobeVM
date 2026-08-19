@@ -7,6 +7,12 @@ import {
 
 function Nav({ authed, onSignout }) {
   const go = (path) => () => { window.location.assign('/EpicVM' + path) }
+  const jump = (id) => (e) => {
+    e.preventDefault()
+    const el = document.getElementById(id)
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    else window.location.assign('/EpicVM/#' + id)
+  }
   return (
     <header className="evm-nav">
       <a className="evm-brand" href="/EpicVM/" onClick={(e) => { e.preventDefault(); window.location.assign('/EpicVM/') }}>
@@ -14,10 +20,10 @@ function Nav({ authed, onSignout }) {
         <span>EpicVM</span>
       </a>
       <nav className="evm-nav-links">
-        <a href="#features">Features</a>
-        <a href="#how">How It Works</a>
-        <a href="#vm-types">VM Types</a>
-        <a href="#faq">FAQ</a>
+        <a href="#features" onClick={jump('features')}>Features</a>
+        <a href="#how" onClick={jump('how')}>How It Works</a>
+        <a href="#vm-types" onClick={jump('vm-types')}>VM Types</a>
+        <a href="#faq" onClick={jump('faq')}>FAQ</a>
       </nav>
       <div className="evm-nav-actions">
         {authed ? (
