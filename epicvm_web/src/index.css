@@ -165,6 +165,7 @@ body {
 .evm-input input { flex: 1; border: none; background: transparent; color: var(--text); font: inherit; padding: 13px 0; outline: none; }
 .evm-input svg { color: var(--cyan); }
 .evm-error { background: rgba(255, 122, 138, .12); border: 1px solid rgba(255, 122, 138, .4); color: var(--bad); border-radius: 10px; padding: 11px 13px; font-size: 14px; }
+.evm-warn { background: rgba(247, 201, 72, .10); border: 1px solid rgba(247, 201, 72, .35); color: var(--warn); border-radius: 10px; padding: 10px 12px; font-size: 13px; line-height: 1.5; margin-top: 8px; }
 .evm-switch { color: var(--muted); font-size: 14px; margin-top: 18px; text-align: center; }
 .evm-switch a { color: var(--cyan); text-decoration: none; font-weight: 700; }
 

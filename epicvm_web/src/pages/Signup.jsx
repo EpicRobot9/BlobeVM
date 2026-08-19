@@ -7,9 +7,20 @@ export default function Signup({ setUser }) {
   const navigate = useNavigate()
   const [form, setForm] = useState({ username: '', password: '', displayName: '', email: '', who: '' })
   const [err, setErr] = useState('')
+  const [warn, setWarn] = useState('')
   const [busy, setBusy] = useState(false)
 
   const set = (k) => (e) => setForm((s) => ({ ...s, [k]: e.target.value }))
+  const setPassword = (e) => {
+    const v = e.target.value
+    setForm((s) => ({ ...s, password: v }))
+    // Soft warning only — never blocks submission (3 chars is the minimum).
+    if (v.length > 0 && v.length < 12) {
+      setWarn('That password is weak and easy to guess. You can still use it, but pick something longer for a real account.')
+    } else {
+      setWarn('')
+    }
+  }
 
   async function submit(e) {
     e.preventDefault()
@@ -44,7 +55,8 @@ export default function Signup({ setUser }) {
             <span className="evm-input"><User size={18} /><input value={form.username} onChange={set('username')} placeholder="3-64 chars: letters, numbers, . _ -" autoComplete="username" required /></span>
           </label>
           <label>Password
-            <span className="evm-input"><Lock size={18} /><input type="password" value={form.password} onChange={set('password')} placeholder="At least 12 characters" autoComplete="new-password" required /></span>
+            <span className="evm-input"><Lock size={18} /><input type="password" value={form.password} onChange={setPassword} placeholder="At least 3 characters" autoComplete="new-password" required /></span>
+            {warn && <div className="evm-warn" role="alert">{warn}</div>}
           </label>
           <label>Display name <span className="evm-opt">(optional)</span>
             <span className="evm-input"><IdentificationBadge size={18} /><input value={form.displayName} onChange={set('displayName')} placeholder="How you'd like to be addressed" /></span>
