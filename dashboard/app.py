@@ -3624,33 +3624,75 @@ def epicvm_public_me_api():
 def portal_vms_api():
     user = request.portal_user
     assigned = _normalize_vm_names(user.get('assignedVms') or [])
+    assigned_set = set(assigned)
+    # The portal lists only the caller's assigned machines by default.
+    # Public VMs are no longer surfaced here; they remain directly openable
+    # through their /vm/<name>/ wrapper if their access mode allows it.
     all_vms = {item.get('name'): item for item in manager_json_list() if item.get('name')}
-    visible = []
-    for name in all_vms:
-        if _vm_access_mode(name) == 'public' or name in assigned:
-            visible.append(name)
+    visible = [name for name in all_vms if name in assigned_set]
     vms = []
     for name in visible:
         try:
             status = _vm_status_payload_bounded(name, timeout_s=6)
         except Exception:
             status = {'ok': False, 'name': name, 'status': 'unknown', 'state': 'unknown', 'running': False, 'healthy': False, 'crashed': False, 'exists': False}
+        meta = _instance_meta(name) or {}
+        # Classify machine type from profile/platform metadata when present.
+        profile = str((status.get('profile') or meta.get('profile') or 'standard')).strip().lower()
+        os_kind = str((meta.get('os') or meta.get('platform') or '')).strip().lower()
+        if 'windows' in os_kind or profile == 'windows':
+            vm_type = 'windows'
+        elif profile == 'gaming':
+            vm_type = 'gaming'
+        else:
+            vm_type = 'linux'
+        state = str(status.get('state') or status.get('status') or 'unknown').lower()
+        running = bool(status.get('running'))
+        # Readiness: a machine is only "ready" when running AND not mid-transition.
+        provisioning = state in ('creating', 'configuring', 'starting', 'provisioning', 'loading')
+        if state == 'failed' or status.get('crashed'):
+            readiness = 'failed'
+        elif provisioning:
+            readiness = 'provisioning'
+        elif running and not provisioning:
+            readiness = 'ready'
+        elif state in ('stopping',):
+            readiness = 'stopping'
+        elif state in ('stopped', 'exited', 'dead'):
+            readiness = 'stopped'
+        else:
+            readiness = 'ready' if running else 'stopped'
         item = {
             'name': name,
             'url': _build_vm_url(name),
+            'wrapperUrl': f'/vm/{name}/',
             'accessMode': _vm_access_mode(name),
             'allowed': True,
+            'type': vm_type,
+            'os': os_kind or ('Windows' if vm_type == 'windows' else 'Linux'),
+            'profile': profile,
             'status': status.get('status') or status.get('state') or 'Unknown',
-            'state': status.get('state') or 'unknown',
-            'running': bool(status.get('running')),
+            'state': state,
+            'running': running,
             'healthy': bool(status.get('healthy')),
             'crashed': bool(status.get('crashed')),
             'exists': bool(status.get('exists', True)),
             'recoveryState': status.get('recoveryState') or 'healthy',
-            'profile': status.get('profile') or 'desktop',
+            'readiness': readiness,
+            'title': meta.get('title') or '',
+            'cpu': meta.get('cpu') or status.get('cpu') or '',
+            'memory': meta.get('memory') or status.get('memory') or '',
         }
         vms.append(item)
-    return jsonify({'ok': True, 'user': {k:v for k,v in user.items() if k != 'password_hash'}, 'vms': vms})
+    # Provisioning summary for the dashboard header.
+    summary = {
+        'total': len(vms),
+        'ready': sum(1 for v in vms if v['readiness'] == 'ready'),
+        'provisioning': sum(1 for v in vms if v['readiness'] == 'provisioning'),
+        'stopped': sum(1 for v in vms if v['readiness'] == 'stopped'),
+        'failed': sum(1 for v in vms if v['readiness'] == 'failed'),
+    }
+    return jsonify({'ok': True, 'user': {k:v for k,v in user.items() if k != 'password_hash'}, 'vms': vms, 'summary': summary})
 
 @app.post('/portal/api/start/<name>')
 @portal_auth_required
@@ -3727,6 +3769,12 @@ def portal_login_page():
 @app.get('/EpicVM/portal')
 @app.get('/EpicVM/portal/')
 def epicvm_portal_home():
+    # Render the stylized SPA portal; the SPA gates anon/pending/rejected users.
+    base = os.path.join(_state_dir(), 'epicvm_web')
+    dist = os.path.join(base, 'dist')
+    indexcand = os.path.join(dist, 'index.html')
+    if os.path.isfile(indexcand):
+        return send_from_directory(dist, 'index.html')
     return portal_home()
 
 
