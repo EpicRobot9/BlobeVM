@@ -155,8 +155,24 @@ body {
 .evm-footer { margin-top: auto; display: flex; align-items: center; gap: 12px; padding: 22px clamp(16px, 4vw, 40px); color: var(--muted); font-size: 13px; border-top: 1px solid var(--line-soft); }
 
 /* ---- auth ---- */
+/* ---- auth pages: share the portal's orange-accented chrome ---- */
+.evm-auth-page {
+  background:
+    radial-gradient(circle at 12% -10%, rgba(255, 122, 26, .22), transparent 42%),
+    radial-gradient(circle at 92% 8%, rgba(2, 189, 243, .20), transparent 46%),
+    radial-gradient(circle at 50% 120%, rgba(255, 210, 63, .10), transparent 50%),
+    var(--portal-bg);
+  min-height: 100vh;
+}
+.evm-auth-wrap {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  padding: 28px 16px 48px;
+}
 .evm-auth { align-items: center; justify-content: center; padding: 28px 16px; }
-.evm-auth-card { width: min(460px, 100%); border: 1px solid var(--line-soft); border-radius: 18px; padding: 30px; background: var(--card); box-shadow: 0 30px 80px rgba(2, 6, 23, .5); border-top: 2px solid var(--cyan); }
+.evm-auth-card { width: min(460px, 100%); border: 1px solid var(--line-soft); border-radius: 18px; padding: 30px; background: var(--card); box-shadow: 0 30px 80px rgba(2, 6, 23, .5); border-top: 2px solid var(--orange); }
+.evm-brand-btn { background: none; border: none; cursor: pointer; font: inherit; }
+.evm-link-btn { color: var(--cream); text-decoration: none; font-weight: 700; opacity: .85; }
+.evm-link-btn:hover { opacity: 1; color: var(--orange2); }
 .evm-form { display: grid; gap: 14px; margin-top: 18px; }
 .evm-form label { display: grid; gap: 7px; font-size: 13px; color: var(--muted); font-weight: 600; }
 .evm-opt { color: #5f7682; font-weight: 500; }

@@ -2,6 +2,7 @@ import React, { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { User, Lock, Envelope, IdentificationBadge, ArrowRight } from '@phosphor-icons/react'
 import { signup } from '../api'
+import AuthShell from '../components/AuthShell'
 
 export default function Signup({ setUser }) {
   const navigate = useNavigate()
@@ -45,9 +46,8 @@ export default function Signup({ setUser }) {
   }
 
   return (
-    <div className="evm-page evm-auth">
+    <AuthShell title="Request Access">
       <div className="evm-auth-card">
-        <span className="evm-pill">BETA</span>
         <h1 className="evm-h1 sm">Request Access</h1>
         <p className="evm-body">Create an account. We'll review your request and provision your machine after approval.</p>
         <form onSubmit={submit} className="evm-form">
@@ -74,6 +74,6 @@ export default function Signup({ setUser }) {
         </form>
         <p className="evm-switch">Already have an account? <a href="/EpicVM/signin" onClick={(e) => { e.preventDefault(); navigate('/signin') }}>Sign in</a></p>
       </div>
-    </div>
+    </AuthShell>
   )
 }
