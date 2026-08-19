@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Hourglass, CheckCircle, XCircle, Spinner, ArrowRight, Desktop } from '@phosphor-icons/react'
 import { myVms, logout } from '../api'
+import AuthShell from '../components/AuthShell'
 
 export default function Pending({ user, onSignout }) {
   const navigate = useNavigate()
@@ -35,7 +36,7 @@ export default function Pending({ user, onSignout }) {
 
   if (rejected) {
     return (
-      <div className="evm-page evm-auth">
+      <AuthShell title="Request Not Approved" rightLink={null}>
         <div className="evm-auth-card evm-pending evm-rejected">
           <span className="evm-status-badge bad"><XCircle size={20} /> rejected</span>
           <h1 className="evm-h1 sm">Request Not Approved</h1>
@@ -45,7 +46,7 @@ export default function Pending({ user, onSignout }) {
             <button className="evm-link-btn" onClick={signout}>Sign out</button>
           </div>
         </div>
-      </div>
+      </AuthShell>
     )
   }
 
@@ -56,7 +57,7 @@ export default function Pending({ user, onSignout }) {
       ? 'Your EpicVM cloud computer is ready. Open the VM Portal to connect and manage it.'
       : 'EpicVM is creating and configuring your cloud computer. This may take a little time — you can open the portal shortly.'
     return (
-      <div className="evm-page evm-auth">
+      <AuthShell title={title} rightLink={null}>
         <div className="evm-auth-card evm-pending">
           <span className={`evm-status-badge ${readyVm ? 'ok' : 'warn'}`}>{readyVm ? <CheckCircle size={20} /> : <Spinner size={20} className="spin" />} {readyVm ? 'ready' : 'preparing'}</span>
           <h1 className="evm-h1 sm">{title}</h1>
@@ -70,13 +71,13 @@ export default function Pending({ user, onSignout }) {
             <button className="evm-link-btn" onClick={signout}>Sign out</button>
           </div>
         </div>
-      </div>
+      </AuthShell>
     )
   }
 
   // Pending (default).
   return (
-    <div className="evm-page evm-auth">
+    <AuthShell title="Access Request Received" rightLink={null}>
       <div className="evm-auth-card evm-pending">
         <span className="evm-status-badge warn"><Hourglass size={20} /> pending</span>
         <h1 className="evm-h1 sm">Access Request Received</h1>
@@ -86,6 +87,6 @@ export default function Pending({ user, onSignout }) {
           <button className="evm-link-btn" onClick={signout}>Sign out</button>
         </div>
       </div>
-    </div>
+    </AuthShell>
   )
 }

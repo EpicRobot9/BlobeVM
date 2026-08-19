@@ -1,10 +1,18 @@
 import React from 'react'
 import { useNavigate } from 'react-router-dom'
 
-// Shared chrome for the auth pages so Sign In / Request Access feel like part of
-// the same EpicVM portal (orange-bordered header + BETA pill, matching Portal.jsx).
-export default function AuthShell({ children, title }) {
+// Shared chrome for the auth pages so Sign In / Request Access / Pending feel
+// like part of the same EpicVM portal (orange-bordered header + BETA pill).
+// `rightLink` overrides the default contextual link (Sign In <-> Request Access).
+// Pass rightLink={null} to hide it (e.g. on the status/pending screens).
+export default function AuthShell({ children, title, rightLink }) {
   const navigate = useNavigate()
+  let link = rightLink
+  if (link === undefined) {
+    link = title === 'Sign In'
+      ? <a className="evm-link-btn" href="/EpicVM/signup" onClick={(e) => { e.preventDefault(); navigate('/signup') }}>Request Access</a>
+      : <a className="evm-link-btn" href="/EpicVM/signin" onClick={(e) => { e.preventDefault(); navigate('/signin') }}>Sign In</a>
+  }
   return (
     <div className="evm-page evm-auth-page">
       <header className="evm-portal-head">
@@ -15,9 +23,7 @@ export default function AuthShell({ children, title }) {
           <span className="evm-beta-pill">BETA</span>
         </div>
         <div className="evm-ph-right">
-          {title === 'Sign In'
-            ? <a className="evm-link-btn" href="/EpicVM/signup" onClick={(e) => { e.preventDefault(); navigate('/signup') }}>Request Access</a>
-            : <a className="evm-link-btn" href="/EpicVM/signin" onClick={(e) => { e.preventDefault(); navigate('/signin') }}>Sign In</a>}
+          {link}
         </div>
       </header>
       <div className="evm-auth-wrap">

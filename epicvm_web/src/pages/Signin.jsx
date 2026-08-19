@@ -18,8 +18,14 @@ export default function Signin({ setUser }) {
     try {
       const res = await login(username, password)
       if (res.ok && res.body.ok) {
-        setUser(res.body.user)
-        navigate('/pending')
+        const u = res.body.user || {}
+        setUser(u)
+        // Already-approved, returning users go straight to the portal.
+        if ((u.accountStatus || 'pending') === 'approved') {
+          navigate('/portal')
+        } else {
+          navigate('/pending')
+        }
         return
       }
       setErr(res.body.error || 'Invalid credentials.')
