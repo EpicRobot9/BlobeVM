@@ -4254,6 +4254,12 @@ def dashboard_vm_favicon(name):
     return '', 302, {'Location': '/dashboard/favicon.ico', 'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0', 'Pragma': 'no-cache', 'Expires': '0'}
 
 
+@app.get('/EpicVM/vm/<name>/')
+def epicvm_vm_wrapper(name):
+    """Console wrapper served directly under the /EpicVM namespace (the VM detail URL opens the actual console)."""
+    return dashboard_vm_wrapper(name)
+
+
 @app.get('/dashboard/vm/<name>/')
 def dashboard_vm_wrapper(name):
         gate = _enforce_vm_user_access(name)
