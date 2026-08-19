@@ -5755,16 +5755,36 @@ def api_start(name):
                 return jsonify({'ok': False, 'error': 'VM already running'})
         except Exception:
             pass
-        try:
-            opt_status = dash_optimizer.status()
-            stats = opt_status.get('stats') or {}
-            profiles = (stats.get('profiles') or {}) if isinstance(stats, dict) else {}
-            profile = profiles.get(name, 'desktop')
-            start_ok = dash_optimizer._can_start_vm(opt_status.get('cfg') or {}, stats.get('vmStates') or [], stats.get('hostPressure') or {}, profile=profile, force=force)
-            if not start_ok.get('ok'):
-                return jsonify({'ok': False, 'error': start_ok.get('reason') or 'Start blocked by optimizer', 'code': start_ok.get('code'), 'optimizer': start_ok}), 409
-        except Exception:
-            pass
+        # Optimizer admission control (bounded so a slow/hung optimizer can
+        # never block or time out a user-initiated start). Only block when the
+        # optimizer positively returns a denial within the time budget.
+        if not force:
+            try:
+                import threading as _th
+                _opt_res = {}
+                def _opt_check():
+                    try:
+                        st = dash_optimizer.status()
+                        stats = st.get('stats') or {}
+                        profiles = (stats.get('profiles') or {}) if isinstance(stats, dict) else {}
+                        profile = profiles.get(name, 'desktop')
+                        _opt_res['deny'] = dash_optimizer._can_start_vm(
+                            st.get('cfg') or {},
+                            stats.get('vmStates') or [],
+                            stats.get('hostPressure') or {},
+                            profile=profile, force=False,
+                        )
+                    except Exception as _e:
+                        _opt_res['err'] = str(_e)
+                _t = _th.Thread(target=_opt_check, daemon=True)
+                _t.start()
+                _t.join(6)
+                if 'deny' in _opt_res and not _opt_res['deny'].get('ok'):
+                    return jsonify({'ok': False, 'error': _opt_res['deny'].get('reason') or 'Start blocked by optimizer', 'code': _opt_res['deny'].get('code'), 'optimizer': _opt_res['deny']}), 409
+                # If it timed out or errored, fall through and allow the start
+                # (mirrors the portal start path, which does no optimizer gate).
+            except Exception:
+                pass
     try:
         _ensure_remote_vm_exists(host, name)
         result = host.run_manager('start', name, capture_output=True, text=True)
