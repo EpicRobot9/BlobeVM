@@ -16,6 +16,8 @@ COPY options.json /
 COPY /root/ /
 
 RUN \
+  # The upstream base image may retain an EOL NodeSource entry; remove it so apt update remains buildable. \
+  rm -f /etc/apt/sources.list.d/*nodesource* || true && \
   echo "**** install packages ****" && \
   add-apt-repository -y ppa:mozillateam/ppa && \
   apt-get update && \
