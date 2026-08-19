@@ -400,7 +400,7 @@ body {
 .evm-landing .evm-hero-copy { flex: 1 1 420px; min-width: 300px; }
 .evm-landing .evm-hero-visual { flex: 0 1 400px; display: flex; justify-content: center; }
 
-/* zine PRIVATE BETA pill */
+/* zine BETA pill */
 .evm-landing .evm-pill {
   color: var(--ink); background: var(--yellow); border: none; border-radius: 2px;
   padding: 6px 12px; transform: rotate(-2deg); box-shadow: 2px 2px 0 #000; letter-spacing: .18em;

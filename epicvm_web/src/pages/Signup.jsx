@@ -47,7 +47,7 @@ export default function Signup({ setUser }) {
   return (
     <div className="evm-page evm-auth">
       <div className="evm-auth-card">
-        <span className="evm-pill">PRIVATE BETA</span>
+        <span className="evm-pill">BETA</span>
         <h1 className="evm-h1 sm">Request Access</h1>
         <p className="evm-body">Create an account. We'll review your request and provision your machine after approval.</p>
         <form onSubmit={submit} className="evm-form">

@@ -68,12 +68,12 @@ const FEATURES = [
 ]
 
 const FAQ = [
-  { q: 'Is EpicVM free?', a: 'Yes, during the current private beta.' },
+  { q: 'Is EpicVM free?', a: 'Yes, during the current beta.' },
   { q: 'What computer will I get?', a: 'Most approved users currently receive a Linux VM.' },
   { q: 'Can I get Windows?', a: 'Windows VMs are currently limited to selected beta testers.' },
   { q: 'Can I get a Gaming VM?', a: 'Gaming VMs are experimental and currently available only to selected testers.' },
   { q: 'Can I store important files on EpicVM?', a: 'During beta, keep backups of important data elsewhere. Do not treat EpicVM as the only copy of critical files.' },
-  { q: 'Who can join?', a: 'EpicVM is a private beta. Accounts must be approved before gaining access.' },
+  { q: 'Who can join?', a: 'EpicVM is a beta. Accounts must be approved before gaining access.' },
 ]
 
 export default function Landing({ authed, onSignout }) {
@@ -87,7 +87,7 @@ export default function Landing({ authed, onSignout }) {
       <section className="evm-hero">
         <div className="evm-hero-inner">
           <div className="evm-hero-copy">
-            <span className="evm-pill">PRIVATE BETA</span>
+            <span className="evm-pill">BETA</span>
             <h1 className="evm-h1">Your PC.<br />Anywhere.</h1>
             <p className="evm-lead">
               EpicVM gives you your own cloud computer that you can access from almost anywhere.
@@ -169,7 +169,7 @@ export default function Landing({ authed, onSignout }) {
 
       {/* Beta expectations */}
       <section className="evm-section evm-beta">
-        <h2 className="evm-h2">EpicVM is currently in private beta.</h2>
+        <h2 className="evm-h2">EpicVM is currently in beta.</h2>
         <p className="evm-body">
           EpicVM is still being developed and tested. Access is limited while reliability, performance,
           capacity, and provisioning are improved. Signing up does not guarantee approval or access to a
@@ -190,9 +190,9 @@ export default function Landing({ authed, onSignout }) {
 
       {/* Free */}
       <section className="evm-section evm-free">
-        <h2 className="evm-h2">Free during private beta</h2>
+        <h2 className="evm-h2">Free during beta</h2>
         <p className="evm-body">
-          There is currently no charge to use EpicVM during the private beta. Windows and Gaming VM
+          There is currently no charge to use EpicVM during the beta. Windows and Gaming VM
           availability is limited and assigned manually.
         </p>
       </section>
@@ -213,13 +213,13 @@ export default function Landing({ authed, onSignout }) {
       {/* Final CTA */}
       <section className="evm-section evm-cta">
         <h2 className="evm-h2">Ready to try EpicVM?</h2>
-        <p className="evm-body">Request access to the private beta.</p>
+        <p className="evm-body">Request access to the beta.</p>
         <button className="evm-btn evm-btn-primary evm-btn-lg" onClick={() => go('/signup')}>Request Access</button>
       </section>
 
       <footer className="evm-footer">
         <span className="evm-brand-mark sm">EV</span>
-        <span>EpicVM — private beta. Your PC, anywhere.</span>
+        <span>EpicVM — beta. Your PC, anywhere.</span>
       </footer>
     </div>
   )

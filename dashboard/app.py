@@ -3119,26 +3119,30 @@ def _recover_vm(name: str, source: str = 'manual', aggressive: bool = True, mode
             current = _vm_status_payload_bounded(name)
             if current.get('running') and (current.get('healthy') or current.get('state') == 'running'):
                 return {'ok': True, 'recovered': True, 'attempts': attempts, 'status': current, 'message': f'VM recovered via {action}', 'source': source, 'mode': mode}
-    final = _vm_status_payload(name)
+    final = _vm_status_payload_bounded(name)
     return {'ok': False, 'recovered': False, 'attempts': attempts, 'status': final, 'message': 'VM recovery failed', 'source': source, 'mode': mode}
 
 
 def _escalate_vm_to_hermes(name: str, reason: str, extra=None):
     extra = extra or {}
+    ts = int(time.time())
     payload = {
         'vm': name,
         'reason': reason,
-        'status': _vm_status_payload(name),
+        'status': _vm_status_payload_bounded(name),
         'logs': _tail_vm_logs(name, 120),
         'extra': extra,
-        'ts': int(time.time()),
+        'ts': ts,
         'host': socket.gethostname(),
     }
     esc_dir = os.path.join(_state_dir(), 'dashboard', 'escalations')
     os.makedirs(esc_dir, exist_ok=True)
-    esc_path = os.path.join(esc_dir, f"{name}-{payload['ts']}.json")
+    esc_path = os.path.join(esc_dir, f"{name}-{ts}.json")
+    status_path = os.path.join(esc_dir, f"{name}-{ts}.status.json")
     with open(esc_path, 'w') as f:
         json.dump(payload, f, indent=2)
+    # Record an initial 'queued' status so the UI can poll without blocking.
+    _write_escalation_status(status_path, {'state': 'queued', 'startedAt': ts})
     msg = (
         f"{MANAGER_NAME} recovery request from the dashboard. Act as the recovery operator: "
         "inspect the VM and its recent logs, determine why it is down, and recover it "
@@ -3146,21 +3150,41 @@ def _escalate_vm_to_hermes(name: str, reason: str, extra=None):
         f"Host: {payload['host']}. VM: '{name}'. Reason: {reason}. "
         f"Status: {json.dumps(payload['status'])}. Recent logs:\n{payload['logs'][:3000]}"
     )
-    delivered = False
-    cli_error = ''
+    # Run the heavy Hermes recovery agent off the request thread so the HTTP
+    # call returns immediately. The daemon thread updates status_path on exit.
+    def _run_hermes():
+        cli_error = ''
+        delivered = False
+        try:
+            proc = subprocess.run(
+                ['/usr/local/bin/hermes', 'chat', '-q', msg, '--toolsets', 'terminal', '--max-turns', '20', '--source', 'blobevm-dashboard', '--quiet'],
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+            delivered = proc.returncode == 0
+            if not delivered:
+                cli_error = (proc.stderr or proc.stdout or '').strip()[:1200]
+        except Exception as e:
+            cli_error = str(e)
+        _write_escalation_status(status_path, {
+            'state': 'done' if delivered else 'failed',
+            'startedAt': ts,
+            'finishedAt': int(time.time()),
+            'delivered': delivered,
+            'cliError': cli_error,
+        })
+    th = threading.Thread(target=_run_hermes, daemon=True)
+    th.start()
+    return {'ok': True, 'queued': True, 'state': 'queued', 'path': esc_path, 'statusPath': status_path, 'payload': payload}
+
+
+def _write_escalation_status(status_path: str, data: dict):
     try:
-        proc = subprocess.run(
-            ['hermes', 'chat', '-q', msg, '--toolsets', 'terminal', '--max-turns', '20', '--source', 'blobevm-dashboard', '--quiet'],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        delivered = proc.returncode == 0
-        if not delivered:
-            cli_error = (proc.stderr or proc.stdout or '').strip()[:1200]
-    except Exception as e:
-        cli_error = str(e)
-    return {'ok': True, 'queued': delivered, 'path': esc_path, 'cliError': cli_error, 'payload': payload}
+        with open(status_path, 'w') as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
 
 @app.get('/dashboard/api/modeinfo')
 @auth_required
@@ -3801,9 +3825,31 @@ def portal_vm_escalate(name):
             reason = 'Portal recovery help requested by user'
         rec = _recover_vm(name, source='hermes-escalation', aggressive=False)
         esc = _escalate_vm_to_hermes(name, reason, {'recovery': rec, 'request': data})
-        return jsonify({'ok': True, 'recovery': rec, 'escalation': esc})
+        return jsonify({'ok': True, 'queued': True, 'state': esc.get('state', 'queued'), 'recovery': rec, 'escalation': esc})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.get('/portal/api/vm/<name>/escalation-status')
+@portal_auth_required
+def portal_vm_escalation_status(name):
+    """Poll the most recent escalation status for this VM (non-blocking)."""
+    if not _user_can_access_vm(request.portal_user, name):
+        return jsonify({'ok': False, 'error': 'Forbidden'}), 403
+    esc_dir = os.path.join(_state_dir(), 'dashboard', 'escalations')
+    try:
+        matches = [p for p in os.listdir(esc_dir) if p.startswith(f"{name}-") and p.endswith('.status.json')]
+    except Exception:
+        matches = []
+    if not matches:
+        return jsonify({'ok': True, 'state': 'none'})
+    latest = sorted(matches)[-1]
+    try:
+        with open(os.path.join(esc_dir, latest)) as f:
+            st = json.load(f)
+    except Exception:
+        st = {'state': 'unknown'}
+    return jsonify({'ok': True, 'state': st.get('state', 'unknown'), 'detail': st})
 
 
 @app.post('/portal/api/request-access/<name>')

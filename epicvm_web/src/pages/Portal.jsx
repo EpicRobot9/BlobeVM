@@ -69,7 +69,7 @@ export default function Portal({ user, onSignout }) {
           <span className="evm-brand">
             <span className="evm-brand-mark">E</span> EpicVM
           </span>
-          <span className="evm-beta-pill">PRIVATE BETA</span>
+          <span className="evm-beta-pill">BETA</span>
         </div>
         <div className="evm-ph-right">
           <span className="evm-who">@{username}</span>
@@ -167,7 +167,7 @@ export default function Portal({ user, onSignout }) {
       )}
 
       <footer className="evm-portal-foot">
-        <span>Private beta · use at your own risk</span>
+        <span>Beta · use at your own risk</span>
         <a href="https://techexplore.us/EpicVM/" onClick={(e) => { e.preventDefault(); window.location.assign('/EpicVM/') }}>Back to home</a>
       </footer>
     </div>
