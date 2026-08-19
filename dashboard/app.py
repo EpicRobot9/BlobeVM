@@ -3720,6 +3720,82 @@ def portal_stop_vm(name):
     except subprocess.CalledProcessError as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
+
+@app.get('/portal/api/vm/<name>/status')
+@portal_auth_required
+def portal_vm_status(name):
+    """Rich VM state for the portal console wrapper (Portal-Auth cookie)."""
+    if not _user_can_access_vm(request.portal_user, name):
+        return jsonify({'ok': False, 'error': 'Forbidden'}), 403
+    try:
+        host = _vm_host()
+        if getattr(host, 'kind', 'local') == 'remote':
+            envelope = host.status(name)
+            envelope = dict(envelope) if isinstance(envelope, dict) else {}
+            raw_vm = envelope.get('vm') if isinstance(envelope.get('vm'), dict) else envelope
+            vm = normalize_remote_vm_record(raw_vm)
+            envelope.update({
+                'ok': bool(envelope.get('ok', True)),
+                'vm': vm,
+                'placement': 'remote',
+                'host_id': host.host_id,
+                'host_name': host.host_name,
+                'state': vm.get('state', 'Unknown'),
+                'status': vm.get('status', 'Unknown'),
+                'provider_status': vm.get('provider_status', ''),
+                'running': bool(vm.get('running', False)),
+                'vm_id': vm.get('id', vm.get('Id', '')),
+                'profile': vm.get('profile', 'standard'),
+            })
+            return jsonify(envelope)
+        return jsonify(_vm_status_payload(name))
+    except VmHostUnavailable as exc:
+        return _vm_host_error_response(exc)
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.post('/portal/api/vm/<name>/recover')
+@portal_auth_required
+def portal_vm_recover(name):
+    if not _user_can_access_vm(request.portal_user, name):
+        return jsonify({'ok': False, 'error': 'Forbidden'}), 403
+    try:
+        data = request.get_json(silent=True) or {}
+        aggressive = bool(data.get('aggressive', True)) if isinstance(data, dict) else True
+        mode = (data.get('mode') if isinstance(data, dict) else None) or 'standard'
+        result = _recover_vm(name, source='portal', aggressive=aggressive, mode=mode)
+        return jsonify(result), (200 if result.get('ok') else 500)
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.post('/portal/api/vm/<name>/escalate')
+@portal_auth_required
+def portal_vm_escalate(name):
+    if not _user_can_access_vm(request.portal_user, name):
+        return jsonify({'ok': False, 'error': 'Forbidden'}), 403
+    if not re.fullmatch(r'[a-z0-9][a-z0-9._-]{0,62}', name or ''):
+        return jsonify({'ok': False, 'error': 'Invalid VM name'}), 400
+    claim = _claim_hermes_escalation(name)
+    if not claim['allowed']:
+        return jsonify({
+            'ok': False,
+            'error': 'Hermes is already handling this VM',
+            'retryAfter': claim['retry_after'],
+        }), 429
+    try:
+        data = request.get_json(silent=True) or {}
+        reason = data.get('reason') if isinstance(data, dict) else None
+        if not reason:
+            reason = 'Portal recovery help requested by user'
+        rec = _recover_vm(name, source='hermes-escalation', aggressive=True)
+        esc = _escalate_vm_to_hermes(name, reason, {'recovery': rec, 'request': data})
+        return jsonify({'ok': True, 'recovery': rec, 'escalation': esc})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
 @app.post('/portal/api/request-access/<name>')
 @portal_auth_required
 def portal_request_access(name):

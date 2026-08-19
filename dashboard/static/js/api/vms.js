@@ -13,18 +13,18 @@
   }
 
   window.api.startVM = async function(vmname){
-    const res = await fetch(`/dashboard/api/start/${encodeURIComponent(vmname)}${hostQuery()}`, {method:'POST'});
+    const res = await fetch(`/portal/api/start/${encodeURIComponent(vmname)}`, {method:'POST'});
     const body = await readJson(res);
     return { ok: !!(res.ok && body && body.ok), status: res.status, body };
   };
 
   window.api.getVMStatus = async function(vmname){
-    const res = await fetch(`/dashboard/api/vm/${encodeURIComponent(vmname)}/status${hostQuery()}`, { cache:'no-store' });
+    const res = await fetch(`/portal/api/vm/${encodeURIComponent(vmname)}/status`, { cache:'no-store' });
     return await readJson(res);
   };
 
   window.api.recoverVM = async function(vmname, payload){
-    const res = await fetch(`/dashboard/api/vm/${encodeURIComponent(vmname)}/recover${hostQuery()}`, {
+    const res = await fetch(`/portal/api/vm/${encodeURIComponent(vmname)}/recover`, {
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify(payload || {})
@@ -40,7 +40,7 @@
   };
 
   window.api.escalateVM = async function(vmname, payload){
-    const res = await fetch(`/dashboard/api/vm/${encodeURIComponent(vmname)}/escalate`, {
+    const res = await fetch(`/portal/api/vm/${encodeURIComponent(vmname)}/escalate`, {
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify(payload || {})
