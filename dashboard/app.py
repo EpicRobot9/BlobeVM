@@ -4254,12 +4254,6 @@ def dashboard_vm_favicon(name):
     return '', 302, {'Location': '/dashboard/favicon.ico', 'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0', 'Pragma': 'no-cache', 'Expires': '0'}
 
 
-@app.get('/EpicVM/vm/<name>/')
-def epicvm_vm_wrapper(name):
-    """Alias of the public VM wrapper under the /EpicVM namespace."""
-    return dashboard_vm_wrapper(name)
-
-
 @app.get('/dashboard/vm/<name>/')
 def dashboard_vm_wrapper(name):
         gate = _enforce_vm_user_access(name)
@@ -4368,7 +4362,7 @@ def dashboard_vm_wrapper(name):
             <title>__TITLE__</title>
             __FAV__
             <style>
-                :root{color-scheme:dark;--bg:#050816;--bg2:#0b1226;--card:rgba(12,18,38,.72);--line:rgba(255,255,255,.08);--text:#eef4ff;--muted:#9db0d1;--primary:#5ea2ff;--primary2:#7c3aed;--danger:#ff5c7a;--success:#22c55e;--warning:#f59e0b}
+                :root{color-scheme:dark;--bg:#050816;--bg2:#0b1226;--card:rgba(12,18,38,.72);--line:rgba(255,255,255,.08);--text:#eef4ff;--muted:#9db0d1;--primary:#ff7a1a;--primary2:#ffa63d;--danger:#ff5c7a;--success:#22c55e;--warning:#f59e0b}
                 html,body,#root{height:100%;margin:0}
                 body{font-family:Inter,system-ui,Arial,sans-serif;background:radial-gradient(circle at top,#101933 0%,#050816 58%,#03050d 100%);color:var(--text);overflow:hidden}
                 .vm-iframe{position:fixed;top:-2px;left:-2px;width:calc(100vw + 4px);height:calc(100vh + 4px);display:block;border:none;background:#000;overflow:hidden;scrollbar-width:none;-ms-overflow-style:none}
@@ -4384,14 +4378,14 @@ def dashboard_vm_wrapper(name):
                 .vm-toast{margin-top:12px;padding:10px 12px;border-radius:14px;font-size:13px;line-height:1.4;border:1px solid rgba(255,255,255,.08)}
                 .vm-toast.ok{background:rgba(22,101,52,.35);color:#dcfce7}
                 .vm-toast.err{background:rgba(127,29,29,.45);color:#ffe4e6}
-                .fallback{display:flex;align-items:center;justify-content:center;height:100%;padding:28px;background:radial-gradient(circle at 20% 20%,rgba(94,162,255,.12),transparent 35%),radial-gradient(circle at 80% 0%,rgba(124,58,237,.12),transparent 28%),linear-gradient(180deg,var(--bg2),var(--bg));color:var(--text)}
+                .fallback{display:flex;align-items:center;justify-content:center;height:100%;padding:28px;background:radial-gradient(circle at 20% 20%,rgba(255,122,26,.14),transparent 35%),radial-gradient(circle at 80% 0%,rgba(255,166,61,.12),transparent 28%),linear-gradient(180deg,var(--bg2),var(--bg));color:var(--text)}
                 .shell{width:min(100%,1040px);position:relative}
                 .status-pill{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--line);background:rgba(255,255,255,.05);padding:10px 14px;border-radius:999px;font-size:13px;color:#dbeafe;backdrop-filter:blur(16px);margin-bottom:18px;box-shadow:0 12px 30px rgba(0,0,0,.25)}
                 .hero-card{position:relative;overflow:hidden;padding:32px;border-radius:28px;border:1px solid var(--line);background:linear-gradient(180deg,rgba(255,255,255,.08),rgba(255,255,255,.03));backdrop-filter:blur(22px);box-shadow:0 30px 80px rgba(0,0,0,.42)}
                 .hero-content{position:relative;z-index:2}
                 .orb{position:absolute;border-radius:50%;filter:blur(14px);opacity:.6}
-                .orb-a{width:220px;height:220px;right:-50px;top:-40px;background:radial-gradient(circle,#5ea2ff,transparent 65%)}
-                .orb-b{width:260px;height:260px;left:-80px;bottom:-120px;background:radial-gradient(circle,#7c3aed,transparent 65%)}
+                .orb-a{width:220px;height:220px;right:-50px;top:-40px;background:radial-gradient(circle,#ff7a1a,transparent 65%)}
+                .orb-b{width:260px;height:260px;left:-80px;bottom:-120px;background:radial-gradient(circle,#ffa63d,transparent 65%)}
                 .vm-name{font-size:14px;letter-spacing:.24em;text-transform:uppercase;color:#b6c7e6;margin-bottom:10px}
                 .hero-title{font-size:clamp(32px,5vw,56px);line-height:1.02;margin:0 0 14px;font-weight:800}
                 .hero-subtitle{max-width:760px;font-size:17px;line-height:1.6;color:var(--muted);margin:0 0 18px}
@@ -4421,19 +4415,19 @@ def dashboard_vm_wrapper(name):
                 .tone-live .status-pill{border-color:rgba(34,197,94,.25);color:#dcfce7}
                 @keyframes spin{to{transform:rotate(360deg)}}
                 .dashboard-style{--surface:#071117;--line-home:#1a2b33}
-                .fallback{background:radial-gradient(circle at 10% 0%,rgba(2,189,243,.08),transparent 30%),#02080c;padding:30px;color:#e7f0f4}
+                .fallback{background:radial-gradient(circle at 10% 0%,rgba(255,122,26,.10),transparent 30%),#02080c;padding:30px;color:#e7f0f4}
                 .shell{width:min(100%,1180px);padding:0 0 34px}
                 .fallback-topbar{padding:0 0 20px;margin-bottom:24px;border-bottom:1px solid #1a2b33}
-                .brand{color:#e7f0f4;font-size:14px;letter-spacing:.01em}.brand-mark{width:32px;height:32px;border-radius:5px;background:#02bdf3;color:#00131b;box-shadow:none}
+                .brand{color:#e7f0f4;font-size:14px;letter-spacing:.01em}.brand-mark{width:32px;height:32px;border-radius:5px;background:#ff7a1a;color:#00131b;box-shadow:none}
                 .checked-at{color:#788991;font-size:12px}.checked-dot{background:#83eb9b;box-shadow:none}
                 .status-pill{border-radius:4px;background:#0b1820;border-color:#263b44;box-shadow:none;padding:7px 10px;margin-bottom:12px;letter-spacing:.05em}
                 .hero-card{padding:28px;border-radius:5px;border:1px solid #1a2b33;border-top:2px solid var(--primary);background:#071117;backdrop-filter:none;box-shadow:none}
                 .orb{display:none}.vm-name{color:#6e8791;letter-spacing:.18em}.vm-name-value{color:#e7f0f4;font-size:18px}.state-summary{color:#788991}
                 .hero-title{font-size:clamp(30px,5vw,48px);font-weight:500;letter-spacing:-.035em}.hero-subtitle{color:#9fb0b8;font-size:15px;line-height:1.55}
                 .meta-grid{gap:0;margin:18px 0 24px;border:1px solid #1a2b33}.meta-card{border:0;border-right:1px solid #1a2b33;border-radius:0;background:#08141b;padding:14px}.meta-card:last-child{border-right:0}.meta-card span{color:#6e8791}.meta-card strong{color:#e7f0f4}
-                .actions{gap:9px}.btn{border-radius:4px;padding:11px 15px;font-size:14px}.btn-primary{background:#02bdf3;color:#00131b;box-shadow:none}.btn-primary:hover{background:#35cdf6}.btn-secondary{background:#0b1820;color:#dce7ec;border:1px solid #29404a}.btn-ghost{color:#9fb0b8;border:1px solid #29404a}.btn-danger{background:#8d2841;box-shadow:none}
+                .actions{gap:9px}.btn{border-radius:4px;padding:11px 15px;font-size:14px}.btn-primary{background:#ff7a1a;color:#00131b;box-shadow:none}.btn-primary:hover{background:#ffa63d}.btn-secondary{background:#0b1820;color:#dce7ec;border:1px solid #29404a}.btn-ghost{color:#9fb0b8;border:1px solid #29404a}.btn-danger{background:#8d2841;box-shadow:none}
                 .meaning-card{border-radius:4px;border-color:rgba(245,158,11,.3);background:#17170f;padding:14px}.meaning-card p{color:#b9b08c}.meaning-note{color:#8f896d}
-                .loading-wrap{border-top:1px solid #1a2b33;border-bottom:1px solid #1a2b33;padding:18px 0;margin:8px 0}.spinner{border-top-color:#02bdf3}.loading-subtitle{color:#788991}
+                .loading-wrap{border-top:1px solid #1a2b33;border-bottom:1px solid #1a2b33;padding:18px 0;margin:8px 0}.spinner{border-top-color:#ff7a1a}.loading-subtitle{color:#788991}
                 .error-box,.sent-box{border-radius:4px;box-shadow:none}.details-box{border-radius:4px;background:#030a0e;border-color:#1a2b33;color:#b8d2da}
                 @media (max-width: 720px){.fallback{padding:20px 16px}.shell{padding-top:0}.fallback-topbar{margin-bottom:20px}.checked-at{font-size:12px}.hero-card{padding:22px;border-radius:24px}.vm-heading-row{display:block}.state-summary{text-align:left;margin-top:7px}.meta-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.actions{flex-direction:column}.btn{width:100%}.hero-subtitle{font-size:15px}.vm-controls-shell{right:12px;left:12px;bottom:68px}.vm-controls-panel{width:auto}.vm-controls-handle{right:12px;bottom:12px;width:46px;height:46px;border-radius:14px}}
                 @media (max-width: 720px){.fallback{padding:16px}.hero-card{padding:20px;border-radius:22px}.actions{flex-direction:column}.btn{width:100%}.hero-subtitle{font-size:15px}.vm-controls-shell{right:12px;left:12px;bottom:68px}.vm-controls-panel{width:auto}.vm-controls-handle{right:12px;bottom:12px;width:46px;height:46px;border-radius:14px}}
