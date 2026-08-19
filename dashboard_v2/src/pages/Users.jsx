@@ -90,6 +90,30 @@ export default function Users(){
     setBusy('')
   }
 
+  async function approveAccount(user){
+    if(window.prompt(`Approve ${user.username} and auto-provision their Linux VM? Type APPROVE to confirm.`) !== 'APPROVE') return
+    setBusy('approve:'+user.username)
+    try{
+      const r = await apiFetch(`/accounts/${encodeURIComponent(user.username)}/approve`, { method:'POST', headers:{'Content-Type':'application/json'}, body:'{}' })
+      const j = await r.json().catch(()=>({ ok:r.ok }))
+      if(!r.ok || j.ok === false) throw new Error(j.error || 'Failed to approve account')
+      await load()
+    }catch(e){ alert(String(e)) }
+    setBusy('')
+  }
+
+  async function rejectAccount(user){
+    if(window.prompt(`Reject ${user.username}? Type REJECT to confirm.`) !== 'REJECT') return
+    setBusy('reject:'+user.username)
+    try{
+      const r = await apiFetch(`/accounts/${encodeURIComponent(user.username)}/reject`, { method:'POST', headers:{'Content-Type':'application/json'}, body:'{}' })
+      const j = await r.json().catch(()=>({ ok:r.ok }))
+      if(!r.ok || j.ok === false) throw new Error(j.error || 'Failed to reject account')
+      await load()
+    }catch(e){ alert(String(e)) }
+    setBusy('')
+  }
+
   const vmNames = useMemo(()=>vms.map(v=>v.name), [vms])
 
   return (
@@ -122,6 +146,10 @@ export default function Users(){
                   <div>
                     <div style={{fontWeight:700}}>{user.username}</div>
                     <div style={{color:'var(--muted)', fontSize:13}}>{(user.assignedVms || []).length} assigned VM(s)</div>
+                    <div style={{color:'var(--muted)', fontSize:13, marginTop:4}}>
+                      Account: <span style={{fontWeight:700, color:(user.accountStatus==='approved'?'#36d399':user.accountStatus==='rejected'?'#ff7a8a':'#f7c948')}}>{user.accountStatus || 'pending'}</span>
+                      {user.provisioningState ? ` · VM: ${user.provisioningState}` : ''}
+                    </div>
                   </div>
                   <label style={{display:'flex', alignItems:'center', gap:8, color:'var(--muted)'}}>
                     <input type="checkbox" checked={!!user.disabled} onChange={e=>setUsers(items => items.map(it => it.username === user.username ? { ...it, disabled:e.target.checked } : it))} />
@@ -137,6 +165,12 @@ export default function Users(){
                   <Button onClick={()=>saveUser(user)} disabled={busy === 'save:'+user.username}>{busy === 'save:'+user.username ? 'Saving…' : 'Save access'}</Button>
                   <Button onClick={()=>resetPassword(user)} disabled={busy === 'pw:'+user.username}>Reset password</Button>
                   <Button onClick={()=>deleteUser(user)} disabled={busy === 'delete:'+user.username} style={{background:'linear-gradient(135deg,#ef4444,#b91c1c)', color:'#fff'}}>Delete user</Button>
+                  {user.accountStatus !== 'approved' ? (
+                    <Button onClick={()=>approveAccount(user)} disabled={busy === 'approve:'+user.username} style={{background:'linear-gradient(135deg,#10b981,#047857)', color:'#fff'}}>{busy === 'approve:'+user.username ? 'Approving…' : 'Approve + provision VM'}</Button>
+                  ) : null}
+                  {user.accountStatus !== 'rejected' && user.accountStatus !== 'approved' ? (
+                    <Button onClick={()=>rejectAccount(user)} disabled={busy === 'reject:'+user.username} style={{background:'linear-gradient(135deg,#f59e0b,#b45309)', color:'#fff'}}>{busy === 'reject:'+user.username ? 'Rejecting…' : 'Reject'}</Button>
+                  ) : null}
                 </div>
               </div>
             ))}

@@ -2189,6 +2189,29 @@ def _init_users_db():
             error TEXT NOT NULL DEFAULT ''
         );
         ''')
+        # Public-beta signup migration: account status, contact, provisioning.
+        # Idempotent; safe to run on every init. Pre-existing portal users
+        # (who already had VM access before this feature) are approved; new
+        # signups explicitly insert 'pending'.
+        try:
+            cols = {r[1] for r in conn.execute('PRAGMA table_info(users)')}
+            for col, ddl in (
+                ('account_status', 'TEXT'),
+                ('email', "TEXT NOT NULL DEFAULT ''"),
+                ('who', "TEXT NOT NULL DEFAULT ''"),
+                ('vm_name', 'TEXT'),
+                ('provisioning_state', 'TEXT'),
+            ):
+                if col not in cols:
+                    conn.execute(f'ALTER TABLE users ADD COLUMN {col} {ddl}')
+            # Existing rows (created before this column existed) default to NULL
+            # for the nullable account_status column; treat them as approved.
+            conn.execute("UPDATE users SET account_status = 'approved' WHERE account_status IS NULL OR account_status = ''")
+            # Safety net for rows the first migration pinned to 'pending': any
+            # pre-existing user that already had VM access is approved.
+            conn.execute("UPDATE users SET account_status = 'approved' WHERE account_status = 'pending' AND id IN (SELECT DISTINCT user_id FROM user_vm_access)")
+        except Exception:
+            pass
         conn.commit()
     finally:
         conn.close()
@@ -2301,6 +2324,11 @@ def _user_row_to_dict(row, vm_names=None):
         'disabled': bool(row['disabled']),
         'createdAt': int(row['created_at'] or 0),
         'assignedVms': sorted(_normalize_vm_names(vm_names or [])),
+        'accountStatus': str(row['account_status'] or 'pending') if 'account_status' in row.keys() else 'pending',
+        'email': (row['email'] or '') if 'email' in row.keys() else '',
+        'who': (row['who'] or '') if 'who' in row.keys() else '',
+        'vmName': (row['vm_name'] or '') if 'vm_name' in row.keys() else '',
+        'provisioningState': (row['provisioning_state'] or None) if 'provisioning_state' in row.keys() else None,
     }
 
 def _list_users():
@@ -2338,7 +2366,7 @@ def _create_user(username: str, password: str, assigned_vms=None, is_admin: bool
     _init_users_db()
     conn = _users_conn()
     try:
-        cur = conn.execute('INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, ?)', (username, _hash_user_password(password), 1 if is_admin else 0))
+        cur = conn.execute('INSERT INTO users (username, password_hash, is_admin, account_status) VALUES (?, ?, ?, ?)', (username, _hash_user_password(password), 1 if is_admin else 0, 'approved'))
         uid = cur.lastrowid
         conn.executemany('INSERT OR IGNORE INTO user_vm_access (user_id, vm_name) VALUES (?, ?)', [(uid, vm) for vm in assigned_vms])
         conn.commit()
@@ -3005,6 +3033,34 @@ def _vm_status_payload(name: str, *, include_optimizer: bool = True):
     return payload
 
 
+def _vm_status_payload_bounded(name: str, *, timeout_s: float = 6):
+    """Portal-safe status lookup. Skips the heavy optimizer gather (the portal
+    does not need it) and guarantees the call returns within timeout_s by
+    running in a daemon thread with a join guard."""
+    result = {}
+
+    def worker():
+        try:
+            result['payload'] = _vm_status_payload(name, include_optimizer=False)
+        except Exception as exc:
+            result['error'] = exc
+
+    th = threading.Thread(target=worker, daemon=True)
+    th.start()
+    th.join(timeout_s)
+    if 'payload' in result:
+        return result['payload']
+    if 'error' in result:
+        raise result['error']
+    # Timed out: return a best-effort "loading" payload so the list never hangs.
+    return {
+        'ok': False, 'name': name, 'url': _build_vm_url(name) or '',
+        'exists': True, 'running': False, 'healthy': False,
+        'state': 'loading', 'status': 'loading', 'detail': 'status pending',
+        'crashed': False, 'recoveryState': 'healthy', 'profile': 'desktop',
+    }
+
+
 def _tail_vm_logs(name: str, lines: int = 160) -> str:
     cname = f'blobevm_{name}'
     try:
@@ -3517,6 +3573,51 @@ def portal_auth_status_api():
     user = _current_portal_user()
     return jsonify({'ok': bool(user), 'user': ({k:v for k,v in user.items() if k != 'password_hash'} if user else None)})
 
+# --- Public beta signup + account status (EpicVM landing front door) ---
+@app.post('/EpicVM/api/signup')
+def epicvm_signup_api():
+    # Public, unauthenticated. Server-side validation only.
+    data = request.get_json(silent=True) or {}
+    username = str(data.get('username') or '').strip()
+    password = str(data.get('password') or '')
+    display_name = str(data.get('displayName') or data.get('name') or '').strip()
+    email = str(data.get('email') or '').strip().lower()
+    who = str(data.get('who') or '').strip()
+    if not re.fullmatch(r'[A-Za-z0-9_.-]{3,64}', username):
+        return jsonify({'ok': False, 'error': 'Username must be 3-64 characters (letters, numbers, dot, underscore, dash).'}), 400
+    if not password or len(password) < 12:
+        return jsonify({'ok': False, 'error': 'Password must be at least 12 characters.'}), 400
+    if email and not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', email):
+        return jsonify({'ok': False, 'error': 'Enter a valid email or leave it blank.'}), 400
+    _init_users_db()
+    conn = _users_conn()
+    try:
+        existing = conn.execute('SELECT id FROM users WHERE username = ?', (username,)).fetchone()
+        if existing:
+            return jsonify({'ok': False, 'error': 'That username is already taken.'}), 409
+        # account_status starts 'pending'; admin must approve before VM access.
+        conn.execute(
+            'INSERT INTO users (username, password_hash, is_admin, account_status, email, who) VALUES (?, ?, ?, ?, ?, ?)',
+            (username, _hash_user_password(password), 0, 'pending', email, (display_name or who)),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        return jsonify({'ok': False, 'error': 'That username is already taken.'}), 409
+    finally:
+        conn.close()
+    return jsonify({'ok': True, 'status': 'pending', 'message': 'Access request received. Your account is waiting for approval.'})
+
+
+@app.get('/EpicVM/api/me')
+def epicvm_public_me_api():
+    user = _current_portal_user()
+    if not user:
+        return jsonify({'ok': False, 'authenticated': False})
+    payload = {k: v for k, v in user.items() if k != 'password_hash'}
+    payload['authenticated'] = True
+    return jsonify({'ok': True, **payload})
+
+
 @app.get('/portal/api/vms')
 @portal_auth_required
 def portal_vms_api():
@@ -3530,7 +3631,7 @@ def portal_vms_api():
     vms = []
     for name in visible:
         try:
-            status = _vm_status_payload(name)
+            status = _vm_status_payload_bounded(name, timeout_s=6)
         except Exception:
             status = {'ok': False, 'name': name, 'status': 'unknown', 'state': 'unknown', 'running': False, 'healthy': False, 'crashed': False, 'exists': False}
         item = {
@@ -3687,6 +3788,78 @@ def dashboard_access_request_action(req_id):
     finally:
         conn.close()
 
+# --- Public beta account approval (approve / reject) ---
+# Reuses the existing portal user table + (on approve) auto-provisions the
+# user's default Linux VM via the host manager, then grants access.
+def _safe_linux_vm_name(username: str) -> str:
+    base = re.sub(r'[^a-z0-9._-]', '', username.lower()) or 'user'
+    return (base[:32] or 'user').lower()
+
+
+def _provision_user_linux_vm(username: str) -> str:
+    """Best-effort provision a Linux VM for an approved user. Returns a state string."""
+    vm_name = _safe_linux_vm_name(username)
+    try:
+        host = _vm_host('local')
+        ok, out, err, rc = _run_manager('create', vm_name)
+        if not ok and 'already exists' not in (err or '') and 'already exists' not in (out or ''):
+            app.logger.warning('EpicVM auto-provision create failed for %s: %s', username, err or out)
+            return 'creating'
+        _set_instance_meta(vm_name, 'access_mode', 'restricted')
+        conn = _users_conn()
+        try:
+            row = conn.execute('SELECT id FROM users WHERE username = ?', (username,)).fetchone()
+            if row:
+                conn.execute('INSERT OR IGNORE INTO user_vm_access (user_id, vm_name) VALUES (?, ?)', (row['id'], vm_name))
+                conn.commit()
+        finally:
+            conn.close()
+        return 'creating'
+    except Exception as exc:
+        app.logger.warning('EpicVM auto-provision error for %s: %s', username, exc)
+        return 'failed'
+
+
+@app.post('/dashboard/api/accounts/<username>/approve')
+@v2_auth_required
+def dashboard_account_approve(username):
+    _init_users_db()
+    conn = _users_conn()
+    try:
+        row = conn.execute('SELECT id, username, account_status FROM users WHERE username = ?', (username,)).fetchone()
+        if not row:
+            return jsonify({'ok': False, 'error': 'User not found'}), 404
+        provisioning_state = None
+        if str(row['account_status'] or 'pending') != 'approved':
+            provisioning_state = _provision_user_linux_vm(username)
+            conn.execute('UPDATE users SET account_status = ?, provisioning_state = ?, vm_name = ? WHERE id = ?',
+                         ('approved', provisioning_state, _safe_linux_vm_name(username), row['id']))
+        else:
+            conn.execute('UPDATE users SET account_status = ? WHERE id = ?', ('approved', row['id']))
+        conn.commit()
+        user = _get_user_by_username(username)
+    finally:
+        conn.close()
+    return jsonify({'ok': True, 'status': 'approved', 'provisioningState': provisioning_state, 'user': {k:v for k,v in user.items() if k != 'password_hash'}})
+
+
+@app.post('/dashboard/api/accounts/<username>/reject')
+@v2_auth_required
+def dashboard_account_reject(username):
+    _init_users_db()
+    conn = _users_conn()
+    try:
+        row = conn.execute('SELECT id FROM users WHERE username = ?', (username,)).fetchone()
+        if not row:
+            return jsonify({'ok': False, 'error': 'User not found'}), 404
+        conn.execute('UPDATE users SET account_status = ?, provisioning_state = ? WHERE id = ?', ('rejected', None, row['id']))
+        conn.commit()
+        user = _get_user_by_username(username)
+    finally:
+        conn.close()
+    return jsonify({'ok': True, 'status': 'rejected', 'user': {k:v for k,v in user.items() if k != 'password_hash'}})
+
+
 # --- Dashboard v2 auth routes (top-level) ---
 @app.post('/Dashboard/api/auth/login')
 def dashboard_v2_login_public():
@@ -3751,6 +3924,23 @@ def dashboard_v2_logout_public():
     resp = jsonify({'ok': True})
     resp.delete_cookie('Dashboard-Auth', path='/')
     return resp
+
+
+@app.route('/EpicVM')
+@app.route('/EpicVM/', defaults={'path': ''})
+@app.route('/EpicVM/<path:path>')
+def serve_epicvm_public(path=''):
+    """Serve the public EpicVM beta front door (separate Vite build, base /EpicVM/)."""
+    base = os.path.join(_state_dir(), 'epicvm_web')
+    dist = os.path.join(base, 'dist')
+    if path:
+        cand = os.path.join(dist, path)
+        if os.path.isfile(cand):
+            return send_from_directory(dist, path)
+    indexcand = os.path.join(dist, 'index.html')
+    if os.path.isfile(indexcand):
+        return send_from_directory(dist, 'index.html')
+    return 'EpicVM web not built', 404
 
 
 # --- Dashboard v2 static page routes (top-level) ---
@@ -5899,26 +6089,6 @@ def dashboard_v2_login_alias():
 @app.get('/dashboard/api/auth/status')
 def dashboard_v2_status_alias():
     return dashboard_v2_status_public()
-
-
-@app.get('/dashboard/api/doctor')
-@admin_auth_required
-def dashboard_doctor():
-    """Run the manager's read-only installation and runtime diagnostics."""
-    try:
-        result = subprocess.run(
-            [MANAGER, 'doctor'], capture_output=True, text=True, timeout=45,
-        )
-        output = ((result.stdout or '') + (result.stderr or '')).strip()
-        return jsonify({
-            'ok': result.returncode == 0,
-            'exitCode': result.returncode,
-            'output': output[-24000:],
-        })
-    except subprocess.TimeoutExpired:
-        return jsonify({'ok': False, 'error': 'Doctor timed out after 45 seconds'}), 504
-    except Exception as exc:
-        return jsonify({'ok': False, 'error': str(exc)}), 500
 
 
 @app.get('/Dashboard/api/vm/logs/<name>')
