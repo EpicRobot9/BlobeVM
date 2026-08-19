@@ -67,7 +67,6 @@ export default function Machine({ user, onSignout }) {
       </header>
 
       <article className={`evm-machine ${tm.cls}`}>
-        <div className="evm-card-cut" />
         <div className="evm-m-top">
           <span className={`evm-type-tag ${tm.cls}`}><Icon size={14} /> {tm.tag}</span>
           {readinessBadge(vm.readiness)}

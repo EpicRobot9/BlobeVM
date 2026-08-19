@@ -108,8 +108,7 @@ export default function Portal({ user, onSignout }) {
             const open = openName === vm.name
             return (
               <article key={vm.name} className={`evm-card ${tm.cls}`}>
-                <div className="evm-card-cut" />
-                <div className="evm-card-top">
+                <div className="evm-m-top">
                   <span className={`evm-type-tag ${tm.cls}`}><Icon size={14} /> {tm.tag}</span>
                   {readinessBadge(vm.readiness)}
                 </div>
