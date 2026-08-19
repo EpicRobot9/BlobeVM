@@ -3124,6 +3124,13 @@ def _recover_vm(name: str, source: str = 'manual', aggressive: bool = True, mode
 
 
 def _escalate_vm_to_hermes(name: str, reason: str, extra=None):
+    """Queue a Hermes recovery escalation.
+
+    The dashboard container cannot run the host's ``hermes`` CLI directly, so
+    this only writes the ticket + a 'queued' status file. A host-side watcher
+    (epicvm-escalation-watcher) picks up the ticket, runs ``hermes`` on the
+    host where the binary actually lives, and writes the final status.
+    """
     extra = extra or {}
     ts = int(time.time())
     payload = {
@@ -3141,41 +3148,7 @@ def _escalate_vm_to_hermes(name: str, reason: str, extra=None):
     status_path = os.path.join(esc_dir, f"{name}-{ts}.status.json")
     with open(esc_path, 'w') as f:
         json.dump(payload, f, indent=2)
-    # Record an initial 'queued' status so the UI can poll without blocking.
-    _write_escalation_status(status_path, {'state': 'queued', 'startedAt': ts})
-    msg = (
-        f"{MANAGER_NAME} recovery request from the dashboard. Act as the recovery operator: "
-        "inspect the VM and its recent logs, determine why it is down, and recover it "
-        "if safe and possible. Verify the result instead of assuming success. "
-        f"Host: {payload['host']}. VM: '{name}'. Reason: {reason}. "
-        f"Status: {json.dumps(payload['status'])}. Recent logs:\n{payload['logs'][:3000]}"
-    )
-    # Run the heavy Hermes recovery agent off the request thread so the HTTP
-    # call returns immediately. The daemon thread updates status_path on exit.
-    def _run_hermes():
-        cli_error = ''
-        delivered = False
-        try:
-            proc = subprocess.run(
-                ['/usr/local/bin/hermes', 'chat', '-q', msg, '--toolsets', 'terminal', '--max-turns', '20', '--source', 'blobevm-dashboard', '--quiet'],
-                capture_output=True,
-                text=True,
-                timeout=600,
-            )
-            delivered = proc.returncode == 0
-            if not delivered:
-                cli_error = (proc.stderr or proc.stdout or '').strip()[:1200]
-        except Exception as e:
-            cli_error = str(e)
-        _write_escalation_status(status_path, {
-            'state': 'done' if delivered else 'failed',
-            'startedAt': ts,
-            'finishedAt': int(time.time()),
-            'delivered': delivered,
-            'cliError': cli_error,
-        })
-    th = threading.Thread(target=_run_hermes, daemon=True)
-    th.start()
+    _write_escalation_status(status_path, {'state': 'queued', 'startedAt': ts, 'hostHandoff': True})
     return {'ok': True, 'queued': True, 'state': 'queued', 'path': esc_path, 'statusPath': status_path, 'payload': payload}
 
 
