@@ -13,3 +13,6 @@ __pycache__/
 /tmp/
 /opt/blobe-vm/remote-hosts.json
 /opt/blobe-vm/remote-hosts.json.inventory.json
+
+# build/deps
+node_modules/
