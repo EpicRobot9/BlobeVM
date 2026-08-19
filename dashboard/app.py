@@ -3714,6 +3714,26 @@ def dashboard_v2_status_alias():
     return dashboard_v2_status_public()
 
 
+@app.get('/dashboard/api/doctor')
+@admin_auth_required
+def dashboard_doctor():
+    """Run the manager's read-only installation and runtime diagnostics."""
+    try:
+        result = subprocess.run(
+            [MANAGER, 'doctor'], capture_output=True, text=True, timeout=45,
+        )
+        output = ((result.stdout or '') + (result.stderr or '')).strip()
+        return jsonify({
+            'ok': result.returncode == 0,
+            'exitCode': result.returncode,
+            'output': output[-24000:],
+        })
+    except subprocess.TimeoutExpired:
+        return jsonify({'ok': False, 'error': 'Doctor timed out after 45 seconds'}), 504
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 500
+
+
 @app.get('/Dashboard/api/vm/logs/<name>')
 @v2_auth_required
 def dashboard_v2_vm_logs(name):
