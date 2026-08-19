@@ -93,10 +93,7 @@ export default function Landing({ authed, onSignout }) {
     }
     const io = new IntersectionObserver((entries) => {
       entries.forEach((en) => {
-        if (en.isIntersecting) {
-          en.target.classList.add('evm-reveal-in')
-          io.unobserve(en.target)
-        }
+        en.target.classList.toggle('evm-reveal-in', en.isIntersecting)
       })
     }, { threshold: 0.12, rootMargin: '0px 0px -8% 0px' })
     els.forEach((el) => io.observe(el))
