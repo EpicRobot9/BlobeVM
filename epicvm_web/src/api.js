@@ -42,3 +42,17 @@ export async function me() {
 export async function myVms() {
   return apiFetch(`${PORTAL}/api/vms`)
 }
+
+export async function startVm(name) {
+  return apiFetch(`${PORTAL}/api/start/${encodeURIComponent(name)}`, { method: 'POST' })
+}
+export async function stopVm(name) {
+  return apiFetch(`${PORTAL}/api/stop/${encodeURIComponent(name)}`, { method: 'POST' })
+}
+export async function restartVm(name) {
+  // No dedicated backend endpoint; restart = stop, wait, start.
+  const s = await stopVm(name)
+  if (!s.ok) return s
+  await new Promise((r) => setTimeout(r, 2500))
+  return startVm(name)
+}

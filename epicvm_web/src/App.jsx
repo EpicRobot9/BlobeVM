@@ -4,6 +4,8 @@ import Landing from './pages/Landing'
 import Signup from './pages/Signup'
 import Signin from './pages/Signin'
 import Pending from './pages/Pending'
+import Portal from './pages/Portal'
+import Machine from './pages/Machine'
 import { me } from './api'
 
 export default function App() {
@@ -30,6 +32,15 @@ export default function App() {
     return <div className="evm-loading" role="status">Loading…</div>
   }
 
+  // Status gating for /portal/*: pending/rejected users get the status view, not the console.
+  const status = user ? (user.accountStatus || 'approved') : 'anon'
+
+  const PortalGate = ({ children }) => {
+    if (!user) return <Navigate to="/signin" replace />
+    if (status === 'pending' || status === 'rejected') return <Navigate to="/pending" replace />
+    return children
+  }
+
   return (
     <Routes>
       <Route path="/signup" element={<Signup setUser={setUser} />} />
@@ -37,9 +48,11 @@ export default function App() {
       <Route path="/pending" element={<Pending user={user} />} />
       <Route
         path="/portal"
-        element={
-          user ? (() => { window.location.assign('/portal/'); return null })() : <Navigate to="/signin" replace />
-        }
+        element={<PortalGate><Portal user={user} onSignout={() => { setUser(false); window.location.assign('/EpicVM/') }} /></PortalGate>}
+      />
+      <Route
+        path="/portal/:name"
+        element={<PortalGate><Machine user={user} onSignout={() => { setUser(false); window.location.assign('/EpicVM/') }} /></PortalGate>}
       />
       <Route
         path="/"

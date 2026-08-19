@@ -185,6 +185,144 @@ body {
 .evm-pending-foot a { color: var(--muted); text-decoration: none; }
 .evm-pending-foot a:hover { color: var(--text); }
 
+/* ============================================================
+   PORTAL — stylized UNBEATABLE-inspired control center
+   ============================================================ */
+:root {
+  --pink: #ff3d7f;
+  --pink2: #ff79b0;
+  --yellow: #ffd23f;
+  --cream: #fdf3e7;
+  --ink: #0b0a10;
+  --ink2: #14121c;
+  --portal-bg: #0c0a12;
+}
+.evm-portal {
+  background:
+    radial-gradient(circle at 12% -10%, rgba(255, 61, 127, .22), transparent 42%),
+    radial-gradient(circle at 92% 8%, rgba(2, 189, 243, .20), transparent 46%),
+    radial-gradient(circle at 50% 120%, rgba(255, 210, 63, .10), transparent 50%),
+    var(--portal-bg);
+}
+/* halftone texture, subtle */
+.evm-portal::before {
+  content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 0; opacity: .05;
+  background-image: radial-gradient(rgba(255,255,255,.9) 1px, transparent 1.5px);
+  background-size: 14px 14px;
+}
+.evm-portal > * { position: relative; z-index: 1; }
+
+.evm-portal-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 16px clamp(16px, 4vw, 40px); border-bottom: 2px solid var(--pink);
+  background: rgba(12, 10, 18, .72); backdrop-filter: blur(10px); position: sticky; top: 0; z-index: 20;
+}
+.evm-ph-left { display: flex; align-items: center; gap: 14px; }
+.evm-ph-right { display: flex; align-items: center; gap: 12px; }
+.evm-who { color: var(--cream); font-weight: 800; letter-spacing: .02em; }
+.evm-beta-pill {
+  font-size: 11px; font-weight: 900; letter-spacing: .18em; color: var(--ink);
+  background: var(--yellow); padding: 5px 10px; border-radius: 2px; transform: rotate(-2deg);
+  box-shadow: 2px 2px 0 #000;
+}
+
+.evm-hero2 {
+  display: flex; flex-wrap: wrap; gap: 24px; align-items: center; justify-content: space-between;
+  padding: clamp(28px, 5vw, 56px) clamp(16px, 4vw, 40px) 8px; max-width: var(--maxw); margin: 0 auto; width: 100%;
+}
+.evm-hero2-title {
+  font-size: clamp(44px, 9vw, 92px); line-height: .86; margin: 0; font-weight: 900; letter-spacing: -.04em;
+  color: var(--cream); text-shadow: 4px 4px 0 var(--pink), 8px 8px 0 rgba(2,189,243,.55);
+  transform: skewX(-4deg);
+}
+.evm-hero2-sub { color: var(--muted); font-size: clamp(15px, 2vw, 18px); margin: 14px 0 0; max-width: 420px; }
+.evm-summary { display: flex; gap: 12px; flex-wrap: wrap; }
+.evm-stat {
+  background: var(--ink2); border: 2px solid #fff; border-radius: 10px; padding: 14px 18px; min-width: 84px; text-align: center;
+  box-shadow: 4px 4px 0 #000; transform: rotate(1.5deg);
+}
+.evm-stat b { display: block; font-size: 30px; color: var(--cream); font-weight: 900; }
+.evm-stat span { font-size: 11px; letter-spacing: .12em; color: var(--muted); }
+.evm-stat.s-ready { border-color: var(--ok); } .evm-stat.s-ready b { color: var(--ok); }
+.evm-stat.s-work { border-color: var(--yellow); } .evm-stat.s-work b { color: var(--yellow); }
+.evm-stat.s-off { border-color: #6b7280; }
+
+.evm-portal-loading { padding: 60px 20px; text-align: center; color: var(--muted); display: flex; gap: 12px; justify-content: center; align-items: center; }
+.evm-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 20px;
+  padding: 24px clamp(16px, 4vw, 40px) 40px; max-width: var(--maxw); margin: 0 auto; width: 100%;
+}
+.evm-card {
+  position: relative; overflow: hidden; background: var(--ink2); border: 3px solid #fff; border-radius: 14px;
+  padding: 20px; box-shadow: 6px 6px 0 #000; transition: transform .14s ease, box-shadow .14s ease;
+  clip-path: polygon(0 0, 100% 0, 100% 88%, 94% 100%, 0 100%);
+}
+.evm-card:hover { transform: translate(-2px, -3px); box-shadow: 9px 9px 0 #000; }
+.evm-card-cut { position: absolute; top: 0; right: 0; width: 64px; height: 64px; background: var(--pink);
+  clip-path: polygon(100% 0, 0 0, 100% 100%); opacity: .9; }
+.evm-card.t-windows .evm-card-cut { background: var(--cyan); }
+.evm-card.t-gaming .evm-card-cut { background: var(--yellow); }
+.evm-card-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.evm-type-tag {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 10px; font-weight: 900; letter-spacing: .14em;
+  padding: 4px 8px; border-radius: 2px; color: var(--ink); background: var(--pink); transform: rotate(-2deg);
+}
+.evm-type-tag.t-windows { background: var(--cyan); }
+.evm-type-tag.t-gaming { background: var(--yellow); }
+.evm-card-name { font-size: 26px; font-weight: 900; margin: 14px 0 4px; color: var(--cream); letter-spacing: -.02em; }
+.evm-card-os { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 14px; font-weight: 700; }
+.evm-card-desc { color: var(--muted); font-size: 14px; line-height: 1.55; margin: 12px 0; min-height: 60px; }
+.evm-card-meta { display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--cream); margin-bottom: 16px; }
+.evm-card-meta span { background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.14); padding: 5px 9px; border-radius: 6px; }
+.evm-card-actions { display: grid; gap: 10px; }
+.evm-btn-block { width: 100%; justify-content: center; }
+.evm-empty {
+  grid-column: 1 / -1; text-align: center; color: var(--muted); padding: 50px 20px; border: 2px dashed rgba(255,255,255,.15);
+  border-radius: 16px; display: grid; gap: 10px; place-items: center;
+}
+.evm-empty h3 { color: var(--cream); margin: 0; }
+
+.evm-rbadge { font-size: 11px; font-weight: 900; letter-spacing: .1em; padding: 5px 9px; border-radius: 2px; border: 2px solid #000; }
+.rb-ready { background: var(--ok); color: #04210f; }
+.rb-work { background: var(--yellow); color: #2a1f00; }
+.rb-off { background: #2a2733; color: var(--cream); border-color: #555; }
+.rb-bad { background: var(--bad); color: #2a0008; }
+
+.evm-portal-foot { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;
+  padding: 18px clamp(16px, 4vw, 40px) 30px; color: var(--muted); font-size: 13px; border-top: 1px solid rgba(255,255,255,.08); }
+.evm-portal-foot a { color: var(--muted); text-decoration: none; }
+.evm-portal-foot a:hover { color: var(--cream); }
+
+/* machine detail */
+.evm-machine { max-width: 760px; margin: clamp(20px, 4vw, 40px) auto; width: calc(100% - 32px);
+  background: var(--ink2); border: 3px solid #fff; border-radius: 16px; padding: 26px; box-shadow: 8px 8px 0 #000;
+  position: relative; overflow: hidden; clip-path: polygon(0 0, 100% 0, 100% 92%, 90% 100%, 0 100%); }
+.evm-machine.t-windows .evm-card-cut { background: var(--cyan); }
+.evm-machine.t-gaming .evm-card-cut { background: var(--yellow); }
+.evm-m-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.evm-m-name { font-size: clamp(34px, 6vw, 52px); font-weight: 900; margin: 14px 0 6px; color: var(--cream); letter-spacing: -.03em; }
+.evm-m-os { display: flex; align-items: center; gap: 8px; color: var(--muted); font-weight: 700; }
+.evm-m-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 20px 0; }
+.evm-m-cell { background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.12); border-radius: 10px; padding: 14px; }
+.evm-m-cell span { display: block; font-size: 11px; letter-spacing: .12em; color: var(--muted); margin-bottom: 6px; }
+.evm-m-cell b { font-size: 16px; color: var(--cream); text-transform: capitalize; }
+.evm-m-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; align-items: stretch; }
+.evm-m-actions .evm-btn-primary { grid-column: 1 / -1; }
+.evm-m-note { color: var(--muted); font-size: 13px; margin-top: 16px; border-left: 3px solid var(--yellow); padding-left: 12px; }
+.evm-btn-danger { background: var(--bad); color: #2a0008; border-color: #000; }
+
+.spin { animation: evm-spin 1s linear infinite; }
+@keyframes evm-spin { to { transform: rotate(360deg); } }
+
+/* responsive portal */
+@media (max-width: 720px) {
+  .evm-hero2-title { font-size: 52px; }
+  .evm-summary { width: 100%; }
+  .evm-stat { transform: none; min-width: 72px; flex: 1; }
+  .evm-grid { grid-template-columns: 1fr; }
+  .evm-portal-head { flex-wrap: wrap; }
+}
+
 /* responsive */
 @media (max-width: 720px) {
   .evm-nav-links { display: none; }
