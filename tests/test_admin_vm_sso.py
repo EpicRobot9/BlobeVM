@@ -78,8 +78,8 @@ def test_forward_auth_preflights_scoped_moonlight_host_request(monkeypatch, tmp_
     monkeypatch.setattr(module, "_console_route_host_id", lambda name, forwarded_uri: "epic-pc")
     calls = []
 
-    def reconcile(name, host_id, *, wait=False, wait_timeout=90.0):
-        calls.append((name, host_id, wait, wait_timeout))
+    def reconcile(name, host_id, *, wait=False, wait_timeout=90.0, allow_pending_visual=False):
+        calls.append((name, host_id, wait, wait_timeout, allow_pending_visual))
         return {"ok": True, "healthy": True}
 
     monkeypatch.setattr(module, "_reconcile_remote_console", reconcile)
@@ -93,7 +93,61 @@ def test_forward_auth_preflights_scoped_moonlight_host_request(monkeypatch, tmp_
     )
 
     assert response.status_code == 200
-    assert calls == [("gaming-gpup-pilot-03", "epic-pc", True, 150.0)]
+    assert calls == [("gaming-gpup-pilot-03", "epic-pc", True, 150.0, True)]
+
+
+def test_gaming_route_can_reach_paired_moonlight_while_visual_validation_is_pending(monkeypatch):
+    module = load_app(monkeypatch)
+
+    class Orchestrator:
+        backend = "moonlight"
+
+        def verify_staged(self, name, *, guest_ip, route_name):
+            assert name == "gaming-gpup-pilot-03"
+            assert guest_ip == "100.111.87.90"
+            assert route_name == "gaming-gpup-pilot-03--epic-pc"
+            return {
+                "routePrefix": "/vm/gaming-gpup-pilot-03--epic-pc/",
+                "guestTcpVerified": True,
+                "hostApiVerified": True,
+            }
+
+    class Host:
+        kind = "remote"
+
+    monkeypatch.setattr(module, "_console_orchestrator", lambda: Orchestrator())
+    monkeypatch.setattr(module, "_vm_host", lambda host_id: Host())
+    monkeypatch.setattr(
+        module,
+        "_remote_console_job",
+        lambda host, name: {
+            "job_id": "job-gaming-pending-visual",
+            "guest_ip": "100.111.87.90",
+            "job": {
+                "name": name,
+                "profile": "gaming",
+                "state": "setup_failed:streaming",
+                "gamingCaptureConfigured": False,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "_queue_remote_console_repair",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("agent repair must not block browser evidence")),
+    )
+
+    result = module._reconcile_remote_console(
+        "gaming-gpup-pilot-03",
+        "epic-pc",
+        allow_pending_visual=True,
+    )
+
+    assert result["routeReady"] is True
+    assert result["visualValidationRequired"] is True
+    assert result["gamingCaptureConfigured"] is False
+    assert result["healthy"] is False
+    assert result["pending"] is True
 
 
 def test_remote_console_entry_renders_retry_page_before_moonlight_is_ready(monkeypatch, tmp_path):

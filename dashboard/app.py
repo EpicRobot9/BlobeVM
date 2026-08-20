@@ -1127,12 +1127,20 @@ def _queue_remote_guest_network_recovery(*, host, host_id: str, job_id: str,
 
 
 def _reconcile_remote_console(name: str, host_id: str, *, wait: bool = False,
-                              wait_timeout: float = 150.0) -> dict:
+                              wait_timeout: float = 150.0,
+                              allow_pending_visual: bool = False) -> dict:
     """Verify a remote Moonlight host, repairing stale client state once.
 
     ``wait=True`` is used by the forward-auth boundary so Moonlight never sees
     the stale certificate's 500 response.  The wait is bounded and returns a
     retryable error instead of hanging a proxy worker indefinitely.
+
+    ``allow_pending_visual`` is restricted to the forward-auth boundary.  A
+    Gaming job whose agent-side capture marker is still absent may still have
+    a valid, application-level Moonlight host after a bounded repair or manual
+    recovery.  Let the browser reach that host so it can provide the required
+    visual/input evidence, but keep the result explicitly pending and never
+    persist ``ready`` from this path.
     """
     orchestrator = _console_orchestrator()
     if not _moonlight_console(orchestrator):
@@ -1151,6 +1159,30 @@ def _reconcile_remote_console(name: str, host_id: str, *, wait: bool = False,
     job_profile = str(details['job'].get('profile') or 'standard').strip().lower()
     needs_gaming_capture = job_profile == 'gaming' and not bool(details['job'].get('gamingCaptureConfigured'))
     if needs_gaming_capture:
+        if allow_pending_visual:
+            try:
+                verified = orchestrator.verify_staged(
+                    safe_name,
+                    guest_ip=guest_ip,
+                    route_name=route_name,
+                )
+                return {
+                    'ok': True,
+                    'healthy': False,
+                    'pending': True,
+                    'repaired': False,
+                    'routeReady': True,
+                    'visualValidationRequired': True,
+                    'gamingCaptureConfigured': False,
+                    'host_id': str(host_id),
+                    'name': safe_name,
+                    **verified,
+                }
+            except ConsoleOrchestrationError:
+                # A stale/invalid pairing still uses the normal bounded repair
+                # path below.  Do not weaken the fail-closed behavior when the
+                # application-level host check itself fails.
+                pass
         # Hyper-V can show the guest framebuffer while Sunshine still has no
         # usable Gaming capture target. Never trust an already-paired
         # Moonlight bundle in that state: force the retained, stage-limited
@@ -3663,7 +3695,13 @@ def dashboard_vm_forward_auth(name):
             host_id = _console_route_host_id(name, forwarded_uri)
             if host_id:
                 try:
-                    _reconcile_remote_console(name, host_id, wait=True, wait_timeout=150.0)
+                    _reconcile_remote_console(
+                        name,
+                        host_id,
+                        wait=True,
+                        wait_timeout=150.0,
+                        allow_pending_visual=True,
+                    )
                 except (ConsoleOrchestrationError, VmHostUnavailable) as exc:
                     response = Response('Remote console is recovering; retry shortly.', status=503)
                     response.headers['Retry-After'] = '3'

@@ -144,13 +144,39 @@ Scope: retained Hyper-V GPU-P Gaming VM, production dashboard/KVM2, LocalSystem 
   - Dashboard Python compilation and `git diff --check`: passed.
 - No live VM, agent service, dashboard container, or production route has been mutated by this implementation slice yet.
 
+## Source synchronization and agent rollback capture
+
+- Recovery commit: `4e3762157a361b680be01d89b32c89ae933136c0` (`Require visual and input proof before Gaming console readiness`).
+- The commit was pushed to `origin/production`; KVM2 `/opt/blobe-vm/repo` was fast-forwarded from `2d30cd3` to the same commit on branch `production`. KVM2's pre-existing untracked `.hermes/` remains untouched.
+- Installed-agent rollback snapshot captured before the supported installer: `C:\Users\Epic\Documents\EpicVM-Recovery-Backups\agent-before-visual-gate-20260820-082530`.
+- The protected agent token file was not copied, read, or recorded. Rollback is limited to restoring the captured scripts/configuration, then restarting `EpicVMRemoteAgent` and verifying its health; the existing token remains at its original protected path.
+- The supported installer invocation was blocked by the execution approval layer before it returned: `BLOCKED: Command timed out without user response. The user has NOT consented to this action.` It was not retried or bypassed. A read-only post-check confirmed the service remains `Running`, `Automatic`, and `LocalSystem`; installed agent hashes remain the pre-change values and the safe config still has `GamingVMNames=testre`, `EnableGamingProvisioning=true`, `BindAddress=100.72.220.117`, `Port=8765`, `Provider=HyperV`.
+- Full Python suite through the pinned development requirements: `204 passed, 19 failed, 1 skipped`. The 19 failures are unrelated Windows-environment/baseline areas (POSIX mode assertions, executable subprocess launch, nested-docker launcher execution, and legacy public-brand assertions); the focused recovery/console suite is green and is the authoritative result for this change.
+
 ## Current observed state after implementation slice
 
 - Retained VM remains unchanged and stopped; no replacement VM was created.
-- Installed Windows agent remains the pre-change installation until the supported installer is run after final source/test review.
+- Installed Windows agent remains the pre-change installation until the supported installer is run after final source/test review; rollback is now captured.
 - Production dashboard remains on the baseline image until the dashboard source is committed, synchronized to KVM2, built with a unique tag, and live-verified with rollback available.
 - The persisted Gaming record remains non-ready; this is intentional until the real browser frame and both input channels are proven.
 
-## Next intended action
+## Supported remote-agent and Moonlight repair evidence
 
-Run the full relevant Pester 5 suite and source checks, inspect the supported installer/configuration path, then update the retained LocalSystem agent from the production checkout while preserving its existing safe configuration and adding only the retained Gaming VM to the explicit Gaming name allowlist if evidence requires it. After that, start the retained VM through the supported path and gather live AMD/display/Sunshine/WinRM evidence without PowerShell Direct.
+- The registered remote host is `epic-pc`; its dashboard health and capabilities endpoints return `ok=true`, provider `HyperV`, and the inventory lists `gaming-gpup-pilot-03` as `Running` with the original VM ID `c7fd609d-5850-4f03-9a58-b425d8696711` and original configuration path. No replacement VM was created.
+- The one bounded dashboard-side `console_credentials` call used the protected defaults without printing them. It timed out in the dashboard's configured 120-second remote-agent write timeout and did not return a completion result. This is authoritative evidence that the stale installed agent cannot complete the current console-management operation through the required LocalSystem/Tailscale/WinRM path; it was not retried blindly.
+- Read-only follow-up confirmed the remote agent still reports healthy/capable, but the retained job remains `setup_failed:streaming` with `errorCode=management_transport_failed`, `failureDetailCode=SUNSHINE_MANAGEMENT_READINESS`, `gamingCaptureConfigured=false`, and all final frame/keyboard/mouse evidence fields unset. `streamValidationVerified=true` is not treated as visual success.
+- The supported Windows installer remains blocked by the execution approval layer and was not retried or bypassed. The installed script hashes therefore still differ from the synchronized source; service remains Running/Automatic/LocalSystem and the safe Gaming allowlist remains unchanged (`testre`).
+
+## Moonlight backend repair and browser-route evidence
+
+- The retained Moonlight instance was repaired through the repository's bounded `repair_staged` path using protected dashboard defaults. The old stale host certificate was quarantined; a fresh bundle was staged and paired without changing the VM, VHDX, or GPU-P state.
+- Post-repair application-level evidence is real: the new Moonlight host ID is `944609277`; `/api/host` reports `Paired`, `server_state=Free`, guest address `100.111.87.90`, and Sunshine version `7.1.431.-1`; `/api/apps` enumerates `Desktop` and `Steam Big Picture`. The retained container is healthy and its digest is unchanged. This is not being represented as video-frame or input success.
+- The existing authenticated Chrome route renders the Moonlight shell but initially shows an empty host grid. DevTools records `GET /api/hosts` failing, and Traefik access logs show the public request timing out at the Moonlight backend (`500` after 30 seconds) or being rejected by ForwardAuth (`503` after approximately 10 seconds). The dashboard ForwardAuth handler was found to force a full agent-side Gaming repair whenever `gamingCaptureConfigured=false`; the stale agent timeout therefore prevented the browser from reaching the already-paired host.
+- The production source now permits only the ForwardAuth browser boundary to pass an application-level `verify_staged` result as `routeReady=true`, `pending=true`, and `visualValidationRequired=true` when the Gaming capture marker is absent. It does not set `gamingCaptureConfigured`, does not persist `ready`, and leaves the normal admin repair path fail-closed. A regression test covers this exact behavior.
+- Direct KVM2-to-container verification of `/vm/gaming-gpup-pilot-03--epic-pc/api/hosts` with the scoped route identity returns HTTP 200 and the paired host; the public authenticated route still needs the new dashboard source deployed and then must be rechecked in Chrome. No final visual/input claim has been made.
+
+## Source synchronization after browser-route fix
+
+- New focused source/test changes are currently uncommitted and limited to `dashboard/app.py` and `tests/test_admin_vm_sso.py`; they are intended for the `production` branch only.
+- Corrected focused test command (`PYTHONPATH='.;dashboard' uv run --with-requirements requirements-dev.txt pytest -q tests/test_admin_vm_sso.py tests/test_provisioning_api.py tests/test_moonlight_orchestrator.py`) passed `48` tests.
+- The next safe action is to commit/push this focused dashboard fix, fast-forward `/opt/blobe-vm/repo`, capture deployment rollback state, build a unique dashboard image, and deploy only after local image validation. Then re-open the existing authenticated browser route and verify real frames/input; final readiness remains blocked until those checks and the updated Windows agent are both valid.
