@@ -1439,7 +1439,23 @@ window.addEventListener('DOMContentLoaded', pollV2Status);
     <h2 style="margin:0;font-size:1.25rem;letter-spacing:-.01em">Accounts &amp; Access Requests</h2>
     <button onclick="loadAccounts()">Refresh</button>
   </div>
-  <h3 style="margin:.5rem 0 .25rem;font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)">Users</h3>
+  <form id="create-user-form" style="display:flex;flex-wrap:wrap;gap:.6rem;align-items:flex-end;margin:.4rem 0 .9rem">
+  <div style="display:flex;flex-direction:column;gap:.2rem">
+    <label style="font-size:.72rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)">Username</label>
+    <input id="cu-username" placeholder="newuser" style="width:180px" />
+  </div>
+  <div style="display:flex;flex-direction:column;gap:.2rem">
+    <label style="font-size:.72rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)">Password</label>
+    <input id="cu-password" type="password" placeholder="min 3 chars" style="width:200px" />
+  </div>
+  <div style="display:flex;flex-direction:column;gap:.2rem">
+    <label style="font-size:.72rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)">Assign VMs (comma-sep)</label>
+    <input id="cu-vms" placeholder="epic, jason" style="width:220px" />
+  </div>
+  <button type="button" onclick="createUser()">Create User</button>
+  <span id="cu-msg" class="muted" style="margin-left:.2rem"></span>
+</form>
+<h3 style="margin:.5rem 0 .25rem;font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)">Users</h3>
   <table><thead><tr><th>Username</th><th>Status</th><th>Admin</th><th>VMs</th><th>Actions</th></tr></thead><tbody id="accounts-tbody"><tr><td colspan=5 class=muted>Loading…</td></tr></tbody></table>
   <h3 style="margin:1rem 0 .25rem;font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)">Access Requests</h3>
   <table><thead><tr><th>User</th><th>VM</th><th>Note</th><th>Status</th><th>Actions</th></tr></thead><tbody id="requests-tbody"><tr><td colspan=5 class=muted>Loading…</td></tr></tbody></table>
@@ -2030,6 +2046,24 @@ async function loadAccounts(){
     }
   }catch(e){ console.error('loadAccounts', e); }
 }
+
+async function createUser(){
+  const u = document.getElementById('cu-username').value.trim();
+  const p = document.getElementById('cu-password').value;
+  const v = document.getElementById('cu-vms').value.trim();
+  const msg = document.getElementById('cu-msg');
+  msg.textContent = '';
+  if(!u){ msg.textContent = 'Username required'; return; }
+  if(p.length < 3){ msg.textContent = 'Password must be at least 3 chars'; return; }
+  await getCsrf();
+  const body = { username: u, password: p };
+  if(v) body.assignedVms = v.split(',').map(x => x.trim()).filter(Boolean);
+  const r = await fetch('/dashboard/api/users', {method:'post', headers:{'Content-Type':'application/json','X-CSRF-Token':_csrfToken}, body: JSON.stringify(body)});
+  const j = await r.json().catch(()=>({}));
+  if(j && j.ok){ msg.textContent = 'Created '+u; document.getElementById('cu-username').value=''; document.getElementById('cu-password').value=''; document.getElementById('cu-vms').value=''; loadAccounts(); }
+  else { msg.textContent = (j && j.error) || 'Create failed'; }
+}
+
 async function approveUser(u){
   await getCsrf();
   await fetch(`/dashboard/api/accounts/${encodeURIComponent(u)}/approve`, {method:'post', headers:{'X-CSRF-Token':_csrfToken}});
