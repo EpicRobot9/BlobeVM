@@ -58,7 +58,9 @@ def test_plan_is_digest_pinned_path_correct_and_does_not_contain_credentials(tmp
     assert "middlewares.epicvm-alpha-portal-user.forwardauth" not in plan.compose
     assert "epicvm-portal-auth@file" not in plan.compose
     assert "url_path_prefix\":\"/vm/alpha\"" in plan.config
-    assert "ports:" not in plan.compose
+    assert 'ports:\n      - "41000-41010:41000-41010/udp"' in plan.compose
+    assert 'WEBRTC_PORT_RANGE: "41000:41010"' in plan.compose
+    assert "WEBRTC_NAT_1TO1_HOST" not in plan.compose
     assert "healthcheck:" in plan.compose
     assert 'test: ["CMD-SHELL", "kill -0 1"]' in plan.compose
     assert "curl -fsS" not in plan.compose
@@ -66,6 +68,21 @@ def test_plan_is_digest_pinned_path_correct_and_does_not_contain_credentials(tmp
     assert "sunshine" not in plan.compose.lower()
     assert "operator" not in plan.compose
     assert "transient-password" not in plan.compose + plan.config + plan.data
+
+
+def test_plan_advertises_configured_nat_host_and_udp_range(tmp_path):
+    orch = make_orchestrator(tmp_path, webrtc_nat_host="100.89.87.98")
+    plan = orch.build_plan(name="alpha", guest_ip="100.111.82.1")
+    config = json.loads(plan.config)
+    assert config["webrtc"]["nat_1to1"] == {"ice_candidate_type": "host", "ips": ["100.89.87.98"]}
+    assert 'WEBRTC_NAT_1TO1_HOST: "100.89.87.98"' in plan.compose
+    assert '41000-41010:41000-41010/udp' in plan.compose
+
+
+def test_rejects_nat_host_outside_tailnet(tmp_path):
+    with pytest.raises(ConsoleOrchestrationError) as failure:
+        make_orchestrator(tmp_path, webrtc_nat_host="72.60.29.204")
+    assert failure.value.code == "invalid_moonlight_nat_host"
 
 
 def test_remote_plan_can_use_host_scoped_route_without_changing_vm_name(tmp_path):

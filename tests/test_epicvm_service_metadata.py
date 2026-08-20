@@ -58,3 +58,12 @@ def test_dashboard_image_pin_is_loaded_before_selection():
     load_marker = "done < \"$ENV_FILE\""
     image_marker = 'IMAGE_NAME="${EPICVM_BLOBEDASH_IMAGE:-blobedash:local}"'
     assert ensure.index(load_marker) < ensure.index(image_marker)
+
+
+def test_dashboard_passes_optional_moonlight_nat_host_to_runtime():
+    ensure = _text("server/blobedash-ensure.sh")
+    installer = _text("server/install.sh")
+    runtime_arg = '-e EPICVM_MOONLIGHT_NAT_HOST="${EPICVM_MOONLIGHT_NAT_HOST:-}" \\'
+    assert runtime_arg in ensure
+    assert runtime_arg in installer
+    assert 'echo "EPICVM_MOONLIGHT_NAT_HOST=$(sh_q "${EPICVM_MOONLIGHT_NAT_HOST:-}")";' in installer

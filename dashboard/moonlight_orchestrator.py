@@ -33,6 +33,8 @@ VM_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
 TAILSCALE_IP_RE = re.compile(r"^100\.(?:6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.\d{1,3}\.\d{1,3}$")
 SHA256_IMAGE_RE = re.compile(r"^[^@]+@sha256:[0-9a-f]{64}$")
 DEFAULT_MOONLIGHT_IMAGE = "mrcreativ3001/moonlight-web-stream@sha256:82cf429ffea07bdb30d3f8bf14e9e97a0a7186b0864ec4250b680b3c0c302d2b"
+WEBRTC_PORT_MIN = 41000
+WEBRTC_PORT_MAX = 41010
 
 
 def validate_vm_name(name: str) -> str:
@@ -64,6 +66,27 @@ def _strip_shell_quotes(value: Any) -> str:
     return text
 
 
+def validate_webrtc_nat_host(address: Any) -> str:
+    value = _strip_shell_quotes(address)
+    if not value:
+        return ""
+    if not TAILSCALE_IP_RE.fullmatch(value):
+        raise ConsoleOrchestrationError(
+            "The Moonlight WebRTC NAT host must be a Tailscale IPv4 address.",
+            status=503,
+            code="invalid_moonlight_nat_host",
+        )
+    try:
+        socket.inet_aton(value)
+    except OSError as exc:
+        raise ConsoleOrchestrationError(
+            "The Moonlight WebRTC NAT host is invalid.",
+            status=503,
+            code="invalid_moonlight_nat_host",
+        ) from exc
+    return value
+
+
 @dataclass(frozen=True)
 class MoonlightPlan:
     name: str
@@ -88,6 +111,7 @@ class MoonlightOrchestrator:
         tls_resolver: str | None = None,
         auth_middleware: str | None = None,
         router_priority: int | str | None = None,
+        webrtc_nat_host: str | None = None,
         digests: Mapping[str, str] | None = None,
         tcp_probe: Callable[[str, int, float], bool] | None = None,
         disk_probe: Callable[[], bool] | None = None,
@@ -103,6 +127,8 @@ class MoonlightOrchestrator:
         self.tls_resolver = str(tls_resolver or os.environ.get("EPICVM_TRAEFIK_CERTRESOLVER", "")).strip()
         self.auth_middleware = str(auth_middleware or os.environ.get("EPICVM_TRAEFIK_AUTH_MIDDLEWARE", "")).strip()
         self.router_priority = str(router_priority or os.environ.get("EPICVM_TRAEFIK_ROUTER_PRIORITY", "")).strip()
+        nat_value = webrtc_nat_host if webrtc_nat_host is not None else os.environ.get("EPICVM_MOONLIGHT_NAT_HOST", "")
+        self.webrtc_nat_host = validate_webrtc_nat_host(nat_value)
         self.digests = dict(digests or {})
         self.tcp_probe = tcp_probe or self._tcp_probe
         self.disk_probe = disk_probe or self._disk_ready
@@ -221,9 +247,10 @@ class MoonlightOrchestrator:
     def build_config(self, *, name: str, route_name: str | None = None) -> str:
         safe = validate_vm_name(name)
         route = validate_vm_name(route_name or name)
+        nat_1to1 = {"ice_candidate_type": "host", "ips": [self.webrtc_nat_host]} if self.webrtc_nat_host else None
         value = {
             "data_storage": {"type": "json", "path": "server/data.json", "session_expiration_check_interval": {"secs": 300, "nanos": 0}},
-            "webrtc": {"ice_servers": [{"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:3478"], "username": "", "credential": ""}], "ice_server_script": None, "port_range": {"min": 41000, "max": 41010}, "nat_1to1": None, "network_types": ["udp4"], "include_loopback_candidates": False},
+            "webrtc": {"ice_servers": [{"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:3478"], "username": "", "credential": ""}], "ice_server_script": None, "port_range": {"min": WEBRTC_PORT_MIN, "max": WEBRTC_PORT_MAX}, "nat_1to1": nat_1to1, "network_types": ["udp4"], "include_loopback_candidates": False},
             "web_server": {"bind_address": "0.0.0.0:8080", "url_path_prefix": f"/vm/{route}", "session_cookie_secure": True, "session_cookie_expiration": {"secs": 86400, "nanos": 0}, "first_login_create_admin": True, "first_login_assign_global_hosts": True, "default_user_id": None, "default_role_id": None, "forwarded_header": {"username_header": "X-EpicVM-User", "auto_create_missing_user": True, "ignore_case": True}},
             "moonlight": {"default_http_port": 47989, "pair_device_name": "EpicVM Web"},
             "streamer_path": "./streamer",
@@ -262,6 +289,11 @@ class MoonlightOrchestrator:
             f"traefik.http.services.epicvm-{route}.loadbalancer.server.port": "8080",
         }
         lines = "\n".join(f"      {key}: {_yaml_quote(value)}" for key, value in labels.items())
+        nat_environment = (
+            f"      WEBRTC_NAT_1TO1_HOST: {_yaml_quote(self.webrtc_nat_host)}\n"
+            if self.webrtc_nat_host
+            else ""
+        )
         return f'''services:
   moonlight-web:
     image: {_yaml_quote(image)}
@@ -269,7 +301,9 @@ class MoonlightOrchestrator:
     environment:
       BIND_ADDRESS: "0.0.0.0:8080"
       PATH_PREFIX: "/vm/{route}"
-      WEBRTC_PORT_RANGE: "41000:41010"
+      WEBRTC_PORT_RANGE: "{WEBRTC_PORT_MIN}:{WEBRTC_PORT_MAX}"
+{nat_environment}    ports:
+      - "{WEBRTC_PORT_MIN}-{WEBRTC_PORT_MAX}:{WEBRTC_PORT_MIN}-{WEBRTC_PORT_MAX}/udp"
     volumes:
       - ./server:/moonlight-web/server
     networks:

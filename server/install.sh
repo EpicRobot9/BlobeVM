@@ -1400,6 +1400,7 @@ deploy_dashboard_direct() {
     -e EPICVM_GUACD_IMAGE="${EPICVM_GUACD_IMAGE:-}" \
     -e EPICVM_POSTGRES_IMAGE="${EPICVM_POSTGRES_IMAGE:-}" \
     -e EPICVM_MOONLIGHT_IMAGE="${EPICVM_MOONLIGHT_IMAGE:-}" \
+    -e EPICVM_MOONLIGHT_NAT_HOST="${EPICVM_MOONLIGHT_NAT_HOST:-}" \
   python:3.11-slim \
   bash -c "apt-get update && apt-get install -y curl jq && pip install --no-cache-dir flask && python /app/app.py" \
     >/dev/null
@@ -1543,6 +1544,7 @@ install_manager() {
     echo "EPICVM_GUACD_IMAGE=$(sh_q "${EPICVM_GUACD_IMAGE:-}")";
     echo "EPICVM_POSTGRES_IMAGE=$(sh_q "${EPICVM_POSTGRES_IMAGE:-}")";
     echo "EPICVM_MOONLIGHT_IMAGE=$(sh_q "${EPICVM_MOONLIGHT_IMAGE:-}")";
+    echo "EPICVM_MOONLIGHT_NAT_HOST=$(sh_q "${EPICVM_MOONLIGHT_NAT_HOST:-}")";
     echo "EPICVM_BLOBEDASH_IMAGE=$(sh_q "${EPICVM_BLOBEDASH_IMAGE:-}")";
   } > /opt/blobe-vm/.env
 }

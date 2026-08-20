@@ -224,6 +224,7 @@ docker run -d --name "$NAME" --restart unless-stopped \
   -e EPICVM_GUACD_IMAGE="${EPICVM_GUACD_IMAGE:-}" \
   -e EPICVM_POSTGRES_IMAGE="${EPICVM_POSTGRES_IMAGE:-}" \
   -e EPICVM_MOONLIGHT_IMAGE="${EPICVM_MOONLIGHT_IMAGE:-}" \
+  -e EPICVM_MOONLIGHT_NAT_HOST="${EPICVM_MOONLIGHT_NAT_HOST:-}" \
   "$IMAGE_NAME" \
   >/dev/null
 
