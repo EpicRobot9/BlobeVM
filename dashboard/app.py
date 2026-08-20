@@ -1452,6 +1452,7 @@ window.addEventListener('DOMContentLoaded', pollV2Status);
     <label style="font-size:.72rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)">Assign VMs (comma-sep)</label>
     <input id="cu-vms" placeholder="epic, jason" style="width:220px" />
   </div>
+  <label style="display:flex;align-items:center;gap:.35rem;font-size:.85rem;color:var(--muted);margin-bottom:.4rem;cursor:pointer"><input id="cu-admin" type="checkbox" style="width:auto;margin:0" /> Admin</label>
   <button type="button" onclick="createUser()">Create User</button>
   <span id="cu-msg" class="muted" style="margin-left:.2rem"></span>
 </form>
@@ -2051,16 +2052,17 @@ async function createUser(){
   const u = document.getElementById('cu-username').value.trim();
   const p = document.getElementById('cu-password').value;
   const v = document.getElementById('cu-vms').value.trim();
+  const isAdmin = document.getElementById('cu-admin').checked;
   const msg = document.getElementById('cu-msg');
   msg.textContent = '';
   if(!u){ msg.textContent = 'Username required'; return; }
   if(p.length < 3){ msg.textContent = 'Password must be at least 3 chars'; return; }
   await getCsrf();
-  const body = { username: u, password: p };
+  const body = { username: u, password: p, isAdmin: isAdmin };
   if(v) body.assignedVms = v.split(',').map(x => x.trim()).filter(Boolean);
   const r = await fetch('/dashboard/api/users', {method:'post', headers:{'Content-Type':'application/json','X-CSRF-Token':_csrfToken}, body: JSON.stringify(body)});
   const j = await r.json().catch(()=>({}));
-  if(j && j.ok){ msg.textContent = 'Created '+u; document.getElementById('cu-username').value=''; document.getElementById('cu-password').value=''; document.getElementById('cu-vms').value=''; loadAccounts(); }
+  if(j && j.ok){ msg.textContent = 'Created '+u; document.getElementById('cu-username').value=''; document.getElementById('cu-password').value=''; document.getElementById('cu-vms').value=''; document.getElementById('cu-admin').checked=false; loadAccounts(); }
   else { msg.textContent = (j && j.error) || 'Create failed'; }
 }
 
@@ -4136,7 +4138,8 @@ def dashboard_users_list():
 def dashboard_users_create():
     data = request.get_json(silent=True) or {}
     try:
-        user = _create_user(str(data.get('username') or '').strip(), str(data.get('password') or ''), data.get('assignedVms') or [])
+        is_admin = bool(data.get('isAdmin')) if isinstance(data.get('isAdmin'), bool) else str(data.get('isAdmin') or '').strip().lower() in ('1', 'true', 'yes', 'on')
+        user = _create_user(str(data.get('username') or '').strip(), str(data.get('password') or ''), data.get('assignedVms') or [], is_admin=is_admin)
         return jsonify({'ok': True, 'user': {k:v for k,v in user.items() if k != 'password_hash'}})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 400
