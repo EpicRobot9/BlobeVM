@@ -432,8 +432,19 @@ networks:
             labels = (((record or {}).get("Config") or {}).get("Labels") or {})
             if str(labels.get("com.docker.compose.service") or "") != "moonlight-web":
                 return False
-            if (((record or {}).get("HostConfig") or {}).get("PortBindings") or {}):
+            ports = (((record or {}).get("HostConfig") or {}).get("PortBindings") or {})
+            expected_ports = {f"{port}/udp" for port in range(WEBRTC_PORT_MIN, WEBRTC_PORT_MAX + 1)}
+            if set(str(key) for key in ports) != expected_ports:
                 return False
+            for container_port, mappings in ports.items():
+                if not isinstance(mappings, list) or len(mappings) != 1:
+                    return False
+                binding = mappings[0] if isinstance(mappings[0], dict) else {}
+                expected_host_port = str(container_port).split("/", 1)[0]
+                if str(binding.get("HostPort") or "") != expected_host_port:
+                    return False
+                if str(binding.get("HostIp") or "") not in ("", "0.0.0.0"):
+                    return False
             networks = set((((record or {}).get("NetworkSettings") or {}).get("Networks") or {}).keys())
             egress = any(str(value) == "egress" or str(value).endswith("_egress") for value in networks)
             return self.proxy_network in networks and egress

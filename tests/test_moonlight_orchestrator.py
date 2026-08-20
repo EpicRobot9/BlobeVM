@@ -117,6 +117,42 @@ def test_stage_plan_chowns_paths_after_atomic_rename(tmp_path, monkeypatch):
     assert not any(path.name.startswith(".alpha-") for path in calls)
 
 
+def test_runtime_isolation_accepts_only_expected_udp_bindings(tmp_path):
+    expected_bindings = {
+        f"{port}/udp": [{"HostIp": "", "HostPort": str(port)}]
+        for port in range(41000, 41011)
+    }
+
+    def inspect(args, **_kwargs):
+        if args[1:3] == ["ps", "--filter"]:
+            return SimpleNamespace(stdout="container-id")
+        return SimpleNamespace(stdout=json.dumps([{
+            "Config": {"Labels": {"com.docker.compose.service": "moonlight-web"}},
+            "HostConfig": {"PortBindings": expected_bindings},
+            "NetworkSettings": {"Networks": {"proxy": {}, "gaming_egress": {}}},
+        }]))
+
+    orch = make_orchestrator(tmp_path, command_runner=inspect)
+    assert orch._runtime_isolated("alpha") is True
+
+    expected_bindings["8080/tcp"] = [{"HostIp": "", "HostPort": "8080"}]
+    assert orch._runtime_isolated("alpha") is False
+
+
+def test_runtime_isolation_rejects_missing_udp_bindings(tmp_path):
+    def inspect(args, **_kwargs):
+        if args[1:3] == ["ps", "--filter"]:
+            return SimpleNamespace(stdout="container-id")
+        return SimpleNamespace(stdout=json.dumps([{
+            "Config": {"Labels": {"com.docker.compose.service": "moonlight-web"}},
+            "HostConfig": {"PortBindings": {}},
+            "NetworkSettings": {"Networks": {"proxy": {}, "gaming_egress": {}}},
+        }]))
+
+    orch = make_orchestrator(tmp_path, command_runner=inspect)
+    assert orch._runtime_isolated("alpha") is False
+
+
 def test_internal_api_url_includes_configured_vm_prefix(tmp_path):
     orch = make_orchestrator(tmp_path)
 
