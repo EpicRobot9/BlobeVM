@@ -1434,6 +1434,16 @@ window.addEventListener('DOMContentLoaded', pollV2Status);
 <button class="btn-gray" onclick="disableSinglePort()">Disable single-port (direct mode)</button>
 </div>
 <table><thead><tr><th>Name</th><th>Status</th><th>Port/Path</th><th>URL</th><th>Actions</th></tr></thead><tbody id=tbody></tbody></table>
+<section class="panel" style="margin-top:2rem;padding:1.25rem 1.4rem;border-top:2px solid var(--orange)">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.5rem">
+    <h2 style="margin:0;font-size:1.25rem;letter-spacing:-.01em">Accounts &amp; Access Requests</h2>
+    <button onclick="loadAccounts()">Refresh</button>
+  </div>
+  <h3 style="margin:.5rem 0 .25rem;font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)">Users</h3>
+  <table><thead><tr><th>Username</th><th>Status</th><th>Admin</th><th>VMs</th><th>Actions</th></tr></thead><tbody id="accounts-tbody"><tr><td colspan=5 class=muted>Loading…</td></tr></tbody></table>
+  <h3 style="margin:1rem 0 .25rem;font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)">Access Requests</h3>
+  <table><thead><tr><th>User</th><th>VM</th><th>Note</th><th>Status</th><th>Actions</th></tr></thead><tbody id="requests-tbody"><tr><td colspan=5 class=muted>Loading…</td></tr></tbody></table>
+</section>
 <div style="margin:1rem 0 2rem 0">
         <button onclick="bulkRecreate()">Recreate ALL VMs</button>
         <button onclick="bulkRebuildAll()">Rebuild ALL VMs</button>
@@ -1967,7 +1977,84 @@ async function checkVM(ev,name){
     }
     load();
 }
+
+let _csrfToken = '';
+async function getCsrf(){
+  try{ const r = await fetch('/dashboard/api/auth/csrf'); const j = await r.json(); _csrfToken = j.csrfToken || ''; }catch(e){}
+}
+function evmEscapeHtml(v){ return String(v==null?'':v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+async function loadAccounts(){
+  try{
+    await getCsrf();
+    const r = await fetch('/dashboard/api/users');
+    if(!r.ok) return;
+    const j = await r.json();
+    const at = document.getElementById('accounts-tbody');
+    const rt = document.getElementById('requests-tbody');
+    if(at){
+      at.innerHTML = '';
+      const users = j.users || [];
+      if(!users.length){ at.innerHTML = '<tr><td colspan=5 class=muted>No users.</td></tr>'; }
+      users.forEach(u=>{
+        const st = (u.accountStatus || 'pending');
+        const stColor = st==='approved' ? 'var(--green)' : (st==='rejected' ? 'var(--red)' : 'var(--amber)');
+        const vmz = (u.assignedVms || []).join(', ');
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td><strong>${evmEscapeHtml(u.username)}</strong></td>`+
+          `<td><span class=dot style="background:${stColor}"></span>${st}</td>`+
+          `<td>${u.isAdmin ? 'yes' : 'no'}</td>`+
+          `<td class=muted>${vmz || '—'}</td>`+
+          `<td>`+
+          (st!=='approved' ? `<button onclick="approveUser('${evmEscapeHtml(u.username)}')">Approve</button>` : '')+
+          (st!=='rejected' ? `<button class="btn-red" onclick="rejectUser('${evmEscapeHtml(u.username)}')">Reject</button>` : '')+
+          `<button class="btn-gray" onclick="deleteUser('${evmEscapeHtml(u.username)}')">Delete</button>`+
+          `</td>`;
+        at.appendChild(tr);
+      });
+    }
+    if(rt){
+      rt.innerHTML = '';
+      const reqs = j.requests || [];
+      if(!reqs.length){ rt.innerHTML = '<tr><td colspan=5 class=muted>No access requests.</td></tr>'; }
+      reqs.forEach(req=>{
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td><strong>${evmEscapeHtml(req.username)}</strong></td>`+
+          `<td>${evmEscapeHtml(req.vm_name || '')}</td>`+
+          `<td class=muted>${evmEscapeHtml((req.note||'').slice(0,140))}</td>`+
+          `<td>${evmEscapeHtml(req.status)}</td>`+
+          `<td>`+
+          (req.status==='pending' ? `<button onclick="actionRequest(${req.id},'approve')">Approve</button><button class="btn-gray" onclick="actionRequest(${req.id},'deny')">Deny</button><button class="btn-gray" onclick="actionRequest(${req.id},'dismiss')">Dismiss</button>` : '')+
+          `</td>`;
+        rt.appendChild(tr);
+      });
+    }
+  }catch(e){ console.error('loadAccounts', e); }
+}
+async function approveUser(u){
+  await getCsrf();
+  await fetch(`/dashboard/api/accounts/${encodeURIComponent(u)}/approve`, {method:'post', headers:{'X-CSRF-Token':_csrfToken}});
+  loadAccounts();
+}
+async function rejectUser(u){
+  if(!confirm('Reject account '+u+'?')) return;
+  await getCsrf();
+  await fetch(`/dashboard/api/accounts/${encodeURIComponent(u)}/reject`, {method:'post', headers:{'X-CSRF-Token':_csrfToken}});
+  loadAccounts();
+}
+async function deleteUser(u){
+  if(!confirm('Delete user '+u+'? This cannot be undone.')) return;
+  await getCsrf();
+  await fetch(`/dashboard/api/users/${encodeURIComponent(u)}/delete`, {method:'post', headers:{'X-CSRF-Token':_csrfToken}});
+  loadAccounts();
+}
+async function actionRequest(id, action){
+  await getCsrf();
+  await fetch(`/dashboard/api/access-requests/${id}/action`, {method:'post', headers:{'Content-Type':'application/json','X-CSRF-Token':_csrfToken}, body: JSON.stringify({action})});
+  loadAccounts();
+}
+
     load();setInterval(load,8000);
+    loadAccounts();
 
     async function loadSettings(){
         try{
