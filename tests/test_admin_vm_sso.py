@@ -96,6 +96,65 @@ def test_forward_auth_preflights_scoped_moonlight_host_request(monkeypatch, tmp_
     assert calls == [("gaming-gpup-pilot-03", "epic-pc", True, 150.0, True)]
 
 
+def test_forward_auth_verification_cache_reuses_application_level_success(monkeypatch):
+    module = load_app(monkeypatch)
+    calls = []
+
+    def reconcile(name, host_id, *, wait=False, wait_timeout=90.0, allow_pending_visual=False):
+        calls.append((name, host_id, wait, wait_timeout, allow_pending_visual))
+        return {
+            "ok": True,
+            "healthy": False,
+            "pending": True,
+            "routeReady": True,
+            "visualValidationRequired": True,
+        }
+
+    monkeypatch.setattr(module, "_reconcile_remote_console", reconcile)
+    first = module._remote_console_forward_auth_verify("gaming-gpup-pilot-03", "epic-pc")
+    second = module._remote_console_forward_auth_verify("gaming-gpup-pilot-03", "epic-pc")
+
+    assert first["routeReady"] is True
+    assert second["visualValidationRequired"] is True
+    assert calls == [("gaming-gpup-pilot-03", "epic-pc", True, 150.0, True)]
+
+
+def test_forward_auth_verification_cache_coalesces_inflight_requests(monkeypatch):
+    module = load_app(monkeypatch)
+    import threading
+    import time
+
+    calls = []
+    started = threading.Event()
+    release = threading.Event()
+
+    def reconcile(name, host_id, *, wait=False, wait_timeout=90.0, allow_pending_visual=False):
+        calls.append((name, host_id))
+        started.set()
+        assert release.wait(2.0)
+        return {"ok": True, "healthy": True}
+
+    monkeypatch.setattr(module, "_reconcile_remote_console", reconcile)
+    results = []
+
+    def invoke():
+        results.append(module._remote_console_forward_auth_verify("gaming-gpup-pilot-03", "epic-pc"))
+
+    first = threading.Thread(target=invoke)
+    second = threading.Thread(target=invoke)
+    first.start()
+    assert started.wait(1.0)
+    second.start()
+    time.sleep(0.05)
+    release.set()
+    first.join(2.0)
+    second.join(2.0)
+
+    assert len(results) == 2
+    assert all(result["healthy"] is True for result in results)
+    assert calls == [("gaming-gpup-pilot-03", "epic-pc")]
+
+
 def test_gaming_route_can_reach_paired_moonlight_while_visual_validation_is_pending(monkeypatch):
     module = load_app(monkeypatch)
 

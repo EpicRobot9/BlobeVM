@@ -381,6 +381,14 @@ _LEGACY_GUACAMOLE_ORCHESTRATOR = None
 _CONSOLE_RETRY_TASKS = {}
 _CONSOLE_RETRY_LOCK = threading.Lock()
 _CONSOLE_RETRY_TASK_TTL_SECONDS = 900
+# ForwardAuth is called concurrently for Moonlight's host discovery requests.
+# Coalesce those calls and cache only a successful application-level staged
+# verification briefly. This never marks a Gaming job visually ready or
+# persists keyboard/mouse evidence.
+_CONSOLE_AUTH_VERIFY_CACHE = {}
+_CONSOLE_AUTH_VERIFY_LOCK = threading.Lock()
+_CONSOLE_AUTH_VERIFY_TTL_SECONDS = 20.0
+_CONSOLE_AUTH_VERIFY_WAIT_SECONDS = 11.0
 
 
 def _safe_console_retry_code(value, default='console_failed'):
@@ -929,6 +937,102 @@ def _is_moonlight_host_api_request(forwarded_uri: str = '') -> bool:
     """Limit the auth preflight to Moonlight's host discovery endpoints."""
     path = str(urlparse(str(forwarded_uri or '')).path or '').rstrip('/').lower()
     return path.endswith('/api/hosts') or path.endswith('/api/host')
+
+
+def _remote_console_forward_auth_verify(name: str, host_id: str) -> dict:
+    """Coalesce Moonlight ForwardAuth verification for one remote console.
+
+    Moonlight opens multiple protected API requests at once. Re-running staged
+    verification for every request creates a race with the client's 12-second
+    API timeout. Only successful route/application verification is cached, and
+    this cache never marks a Gaming job visually ready or persists input proof.
+    """
+    key = (str(name or '').strip().lower(), str(host_id or '').strip())
+    now = time.monotonic()
+    owner = False
+    event = None
+    with _CONSOLE_AUTH_VERIFY_LOCK:
+        stale = []
+        for cache_key, cache_entry in _CONSOLE_AUTH_VERIFY_CACHE.items():
+            if not isinstance(cache_entry, dict):
+                stale.append(cache_key)
+                continue
+            verified_at = cache_entry.get('verifiedAt')
+            if cache_entry.get('state') == 'verified' and verified_at is not None and now - float(verified_at) >= _CONSOLE_AUTH_VERIFY_TTL_SECONDS:
+                stale.append(cache_key)
+        for stale_key in stale:
+            _CONSOLE_AUTH_VERIFY_CACHE.pop(stale_key, None)
+
+        entry = _CONSOLE_AUTH_VERIFY_CACHE.get(key)
+        if isinstance(entry, dict) and entry.get('state') == 'verified':
+            verified_at = entry.get('verifiedAt')
+            if verified_at is not None and now - float(verified_at) < _CONSOLE_AUTH_VERIFY_TTL_SECONDS:
+                return dict(entry.get('result') or {})
+        if isinstance(entry, dict) and entry.get('state') == 'pending':
+            event = entry.get('event')
+        else:
+            event = threading.Event()
+            _CONSOLE_AUTH_VERIFY_CACHE[key] = {'state': 'pending', 'event': event, 'startedAt': now}
+            owner = True
+
+    if not owner:
+        if not isinstance(event, threading.Event) or not event.wait(_CONSOLE_AUTH_VERIFY_WAIT_SECONDS):
+            raise ConsoleOrchestrationError(
+                'Remote console verification is still in progress; retry shortly.',
+                status=503,
+                code='console_reconcile_pending',
+            )
+        with _CONSOLE_AUTH_VERIFY_LOCK:
+            entry = _CONSOLE_AUTH_VERIFY_CACHE.get(key) or {}
+            if entry.get('state') == 'verified':
+                verified_at = entry.get('verifiedAt')
+                if verified_at is not None and time.monotonic() - float(verified_at) < _CONSOLE_AUTH_VERIFY_TTL_SECONDS:
+                    return dict(entry.get('result') or {})
+            failure_code = _safe_console_retry_code(entry.get('failureCode'), 'console_reconcile_failed')
+        raise ConsoleOrchestrationError(
+            'Remote console verification failed safely; retry shortly.',
+            status=503,
+            code=failure_code,
+        )
+
+    try:
+        result = _reconcile_remote_console(
+            name,
+            host_id,
+            wait=True,
+            wait_timeout=150.0,
+            allow_pending_visual=True,
+        )
+        route_ready = bool(isinstance(result, dict) and result.get('routeReady'))
+        healthy = bool(isinstance(result, dict) and result.get('healthy'))
+        if not isinstance(result, dict) or not result.get('ok') or not (healthy or route_ready):
+            raise ConsoleOrchestrationError(
+                'Remote console verification did not reach an application-level route.',
+                status=503,
+                code='console_reconcile_failed',
+            )
+    except (ConsoleOrchestrationError, VmHostUnavailable) as exc:
+        failure_code = _safe_console_retry_code(getattr(exc, 'code', 'console_reconcile_failed'), 'console_reconcile_failed')
+        with _CONSOLE_AUTH_VERIFY_LOCK:
+            entry = _CONSOLE_AUTH_VERIFY_CACHE.get(key)
+            if isinstance(entry, dict) and entry.get('event') is event:
+                entry.update({'state': 'failed', 'failureCode': failure_code, 'finishedAt': time.monotonic()})
+                event.set()
+        raise
+    except Exception:
+        with _CONSOLE_AUTH_VERIFY_LOCK:
+            entry = _CONSOLE_AUTH_VERIFY_CACHE.get(key)
+            if isinstance(entry, dict) and entry.get('event') is event:
+                entry.update({'state': 'failed', 'failureCode': 'console_reconcile_failed', 'finishedAt': time.monotonic()})
+                event.set()
+        raise
+
+    with _CONSOLE_AUTH_VERIFY_LOCK:
+        entry = _CONSOLE_AUTH_VERIFY_CACHE.get(key)
+        if isinstance(entry, dict) and entry.get('event') is event:
+            entry.update({'state': 'verified', 'verifiedAt': time.monotonic(), 'result': dict(result)})
+            event.set()
+    return result
 
 
 def _remote_console_job(host, name: str) -> dict:
@@ -3715,13 +3819,7 @@ def dashboard_vm_forward_auth(name):
             host_id = _console_route_host_id(name, forwarded_uri)
             if host_id:
                 try:
-                    _reconcile_remote_console(
-                        name,
-                        host_id,
-                        wait=True,
-                        wait_timeout=150.0,
-                        allow_pending_visual=True,
-                    )
+                    _remote_console_forward_auth_verify(name, host_id)
                 except (ConsoleOrchestrationError, VmHostUnavailable) as exc:
                     response = Response('Remote console is recovering; retry shortly.', status=503)
                     response.headers['Retry-After'] = '3'
