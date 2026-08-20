@@ -309,3 +309,13 @@ Scope: retained Hyper-V GPU-P Gaming VM, production dashboard/KVM2, LocalSystem 
 - Route smoke: retained Gaming route HTTP `302`; normal routes `/vm/epicvm-pilot-14--epic-pc/` and `/vm/testprovvm-autonomous--epic-pc/` HTTP `200`. Normal Moonlight containers observed healthy. `/dashboard/` returned `404` and was not treated as a dashboard success endpoint.
 - Final retained route labels are correct: `Host(techexplore.us) && PathPrefix(/vm/gaming-gpup-pilot-03--epic-pc/)`, ForwardAuth to `http://blobedash:5000/dashboard/auth/vm/gaming-gpup-pilot-03`, scoped `X-EpicVM-User=gaming-gpup-pilot-03`, TLS resolver, and load-balancer port `8080`; no unrelated Basic Auth middleware is attached.
 - Final non-visual Moonlight probes through the scoped route identity return HTTP `200` for the paired host and application list. This proves application-level reachability only; it does not prove a visible Windows frame or input.
+
+## Post-reboot code-only live revalidation
+
+- After the user-reported KVM2 reboot, a host-key-pinned SSH probe re-established access without desktop automation.
+- `blobedash.service=active`; `traefik-traefik-1=running`; ports `80`, `443`, and dashboard direct port `20000` are listening.
+- The active dashboard remains `blobedash:webrtc-udp-0f31510-r2|running` with image ID `sha256:387155aecef1f9ecfcdda7564de96f352748e0556001e342a442a5103df6101e`.
+- The retained Moonlight container remains `running|healthy` with the scoped WebRTC UDP/NAT configuration already recorded.
+- Production route smoke remains `302` for `/vm/gaming-gpup-pilot-03--epic-pc/`; normal route smoke remains `200` for `/vm/epicvm-pilot-14--epic-pc/`.
+- No VM, VHDX, GPU-P adapter, guest, unrelated container, or host service was mutated by this revalidation.
+- Acceptance remains blocked exactly as recorded above: no authenticated browser automation is permitted under the user’s no-`computer_use` direction, the fresh Browser Use profile reaches the login wall, the retained guest has no interactive user desktop, the installed agent is stale because the supported updater was approval-blocked, and the controlled retained-VM restart has not been attempted without a working desktop baseline.
