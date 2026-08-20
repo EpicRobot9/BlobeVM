@@ -350,12 +350,34 @@ networks:
                 )
             time.sleep(min(1.0, remaining))
 
-    def build_plan(self, *, name: str, guest_ip: str, route_name: str | None = None) -> MoonlightPlan:
+    def build_plan(
+        self,
+        *,
+        name: str,
+        guest_ip: str,
+        route_name: str | None = None,
+        allow_existing_owned_route: bool = False,
+    ) -> MoonlightPlan:
         safe = validate_vm_name(name)
         route = validate_vm_name(route_name or name)
         address = validate_guest_ip(guest_ip)
         self._wait_for_sunshine(address)
-        return MoonlightPlan(safe, address, f"/vm/{route}/", self.build_compose(name=safe, route_name=route), self.build_config(name=safe, route_name=route), '{"version":"3","users":{},"hosts":{},"roles":{}}\n')
+        route_prefix = f"/vm/{route}/"
+        if not self.route_owner_probe(route_prefix):
+            existing_owned_bundle = False
+            if allow_existing_owned_route:
+                try:
+                    # The route probe sees the currently active bundle as an
+                    # owner during in-place repair.  _read_plan is the stronger
+                    # check here: it proves that this named bundle is owned by
+                    # EpicVM before quarantine makes the requested route free.
+                    self._read_plan(safe)
+                    existing_owned_bundle = True
+                except ConsoleOrchestrationError:
+                    existing_owned_bundle = False
+            if not existing_owned_bundle:
+                raise ConsoleOrchestrationError("The requested console route is already owned.", status=409, code="route_collision")
+        return MoonlightPlan(safe, address, route_prefix, self.build_compose(name=safe, route_name=route), self.build_config(name=safe, route_name=route), '{"version":"3","users":{},"hosts":{},"roles":{}}\n')
 
     def stage_plan(self, plan: MoonlightPlan) -> Path:
         target = self._instance_root(plan.name)
@@ -823,7 +845,7 @@ networks:
         # Build first: this verifies the authoritative guest TCP path before
         # the existing bundle is stopped or moved. A transient guest outage
         # must not destroy the last known-good console bundle.
-        plan = self.build_plan(name=safe, guest_ip=guest, route_name=route)
+        plan = self.build_plan(name=safe, guest_ip=guest, route_name=route, allow_existing_owned_route=True)
         quarantine = self.quarantine_staged(safe)
         try:
             self.stage_plan(plan)

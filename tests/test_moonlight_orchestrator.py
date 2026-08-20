@@ -284,7 +284,11 @@ def test_repair_rebuilds_bundle_and_requires_authenticated_host_query(tmp_path):
             return Response(payload=b'{"status":true}')
         raise AssertionError(url)
 
-    orch = make_orchestrator(tmp_path, http_request=http)
+    orch = make_orchestrator(
+        tmp_path,
+        http_request=http,
+        route_owner_probe=lambda _route: not (tmp_path / "alpha").exists(),
+    )
     orch.stage_plan(orch.build_plan(name="alpha", guest_ip="100.111.82.1"))
     orch._container_url = lambda _name, _route_prefix=None: "http://172.20.0.2:8080/vm/alpha"
     orch.start_staged = lambda _name: {"ok": True, "routePrefix": "/vm/alpha--epic-pc/", "guestTcpVerified": True}
