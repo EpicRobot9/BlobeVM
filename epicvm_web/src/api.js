@@ -66,3 +66,26 @@ export async function restartVm(name) {
   }
   return startVm(name)
 }
+
+// --- Cloud PC (bring-your-own Sunshine over Tailscale) ---
+export async function addCloudPc({ displayName, tailnetIp, sunshineUsername, sunshinePassword }) {
+  return apiFetch(`${PORTAL}/api/cloudpc`, {
+    method: 'POST',
+    body: JSON.stringify({
+      displayName,
+      tailnetIp,
+      sunshineUsername: sunshineUsername || '',
+      sunshinePassword: sunshinePassword || '',
+    }),
+  })
+}
+
+export async function pairCloudPc(name, { sunshineUsername, sunshinePassword }) {
+  return apiFetch(`${PORTAL}/api/cloudpc/${encodeURIComponent(name)}/pair`, {
+    method: 'POST',
+    body: JSON.stringify({
+      sunshineUsername: sunshineUsername || '',
+      sunshinePassword: sunshinePassword || '',
+    }),
+  })
+}

@@ -1,18 +1,20 @@
 import React, { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Desktop, WindowsLogo, GameController, Power, Plug, ArrowClockwise, Stop, Spinner, Plus, CaretDown } from '@phosphor-icons/react'
-import { myVms, logout, startVm, stopVm, restartVm } from '../api'
+import { Desktop, WindowsLogo, GameController, Power, Plug, ArrowClockwise, Stop, Spinner, Plus, CaretDown, Laptop } from '@phosphor-icons/react'
+import { myVms, logout, startVm, stopVm, restartVm, addCloudPc, pairCloudPc } from '../api'
 
 const TYPE_META = {
   linux: { label: 'Linux VM', icon: Desktop, cls: 't-linux', tag: 'BETA DEFAULT' },
   windows: { label: 'Windows VM', icon: WindowsLogo, cls: 't-windows', tag: 'LIMITED' },
   gaming: { label: 'Gaming VM', icon: GameController, cls: 't-gaming', tag: 'EXPERIMENTAL' },
+  cloudpc: { label: 'Cloud PC', icon: Laptop, cls: 't-cloudpc', tag: 'YOUR PC' },
 }
 
 function readinessBadge(r) {
   const map = {
     ready: ['READY', 'rb-ready'],
     provisioning: ['PREPARING', 'rb-work'],
+    offline: ['PC OFFLINE', 'rb-off'],
     stopped: ['OFFLINE', 'rb-off'],
     stopping: ['SHUTTING DOWN', 'rb-work'],
     failed: ['FAILED', 'rb-bad'],
@@ -27,6 +29,11 @@ export default function Portal({ user, onSignout }) {
   const [summary, setSummary] = useState(null)
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState('')
+
+  const [showAddPc, setShowAddPc] = useState(false)
+  const [addPc, setAddPc] = useState({ displayName: '', tailnetIp: '', sunshineUsername: '', sunshinePassword: '' })
+  const [addPcBusy, setAddPcBusy] = useState(false)
+  const [addPcErr, setAddPcErr] = useState('')
 
   const load = () => {
     setLoading(true)
@@ -47,6 +54,7 @@ export default function Portal({ user, onSignout }) {
 
   const [openName, setOpenName] = useState(null)
   const [busy, setBusy] = useState('')
+  const [pairBusy, setPairBusy] = useState('')
 
   const toggleManage = (n) => setOpenName((o) => (o === n ? null : n))
 
@@ -58,6 +66,37 @@ export default function Portal({ user, onSignout }) {
     else if (kind === 'restart') res = await restartVm(vmName)
     setBusy('')
     if (res && res.ok) { load() } else if (res) alert(res.body.error || 'Action failed')
+  }
+
+  async function submitAddPc(e) {
+    e.preventDefault()
+    setAddPcBusy(true)
+    setAddPcErr('')
+    const res = await addCloudPc({
+      displayName: addPc.displayName.trim(),
+      tailnetIp: addPc.tailnetIp.trim(),
+      sunshineUsername: addPc.sunshineUsername.trim(),
+      sunshinePassword: addPc.sunshinePassword,
+    })
+    setAddPcBusy(false)
+    if (res.ok) {
+      setShowAddPc(false)
+      setAddPc({ displayName: '', tailnetIp: '', sunshineUsername: '', sunshinePassword: '' })
+      load()
+    } else {
+      setAddPcErr(res.body.error || 'Could not add your PC')
+    }
+  }
+
+  async function pairPc(vm) {
+    setPairBusy(vm.name)
+    const su = window.prompt('Sunshine username on your PC (used once to pair):')
+    if (su === null) { setPairBusy(''); return }
+    const sp = window.prompt('Sunshine password on your PC (used once to pair):')
+    if (sp === null) { setPairBusy(''); return }
+    const res = await pairCloudPc(vm.name, { sunshineUsername: su, sunshinePassword: sp })
+    setPairBusy('')
+    if (res.ok) { load() } else { alert(res.body.error || 'Pairing failed') }
   }
 
   const username = user?.username || 'user'
@@ -106,6 +145,7 @@ export default function Portal({ user, onSignout }) {
             const ready = vm.readiness === 'ready'
             const provisioning = vm.readiness === 'provisioning'
             const open = openName === vm.name
+            const isCloudPc = vm.type === 'cloudpc'
             return (
               <article key={vm.name} className={`evm-card ${tm.cls}`}>
                 <div className="evm-m-top">
@@ -118,6 +158,7 @@ export default function Portal({ user, onSignout }) {
                   {vm.type === 'linux' && 'Your personal Linux environment for coding, hosting, automation, and dev work.'}
                   {vm.type === 'windows' && 'A full Windows desktop for apps and workflows that need Windows.'}
                   {vm.type === 'gaming' && 'GPU-accelerated Windows built for remote gaming and GPU workloads.'}
+                  {vm.type === 'cloudpc' && 'Your own PC, streamed over the web. No agent required — powered by Sunshine + Moonlight.'}
                 </p>
                 <div className="evm-card-meta">
                   {vm.cpu ? <span>CPU {vm.cpu}</span> : null}
@@ -142,6 +183,11 @@ export default function Portal({ user, onSignout }) {
                   </button>
                 </div>
                 <div className={`evm-card-manage-panel ${open ? 'open' : ''}`}>
+                  {isCloudPc && !vm.paired && (
+                    <button className="evm-btn evm-btn-block evm-mp-btn evm-btn-warn" disabled={pairBusy === vm.name} onClick={() => pairPc(vm)}>
+                      {pairBusy === vm.name ? <Spinner size={16} className="spin" /> : null} PAIR
+                    </button>
+                  )}
                   <button className="evm-btn evm-btn-block evm-mp-btn" disabled={busy === vm.name + ':start' || provisioning} onClick={() => act('start', vm.name)}>
                     {busy === vm.name + ':start' ? <Spinner size={16} className="spin" /> : <Power size={16} />} START
                   </button>
@@ -156,6 +202,12 @@ export default function Portal({ user, onSignout }) {
               </article>
             )
           })}
+          {/* Connect your PC CTA */}
+          <button className="evm-card evm-add-card" onClick={() => setShowAddPc(true)}>
+            <Plus size={32} />
+            <h3>Connect your PC</h3>
+            <p>Stream your own Sunshine-enabled PC. No agent to install.</p>
+          </button>
           {!loading && vms && vms.length === 0 && (
             <div className="evm-empty">
               <Plus size={32} />
@@ -164,6 +216,32 @@ export default function Portal({ user, onSignout }) {
             </div>
           )}
         </section>
+      )}
+
+      {showAddPc && (
+        <div className="evm-modal-backdrop" onClick={() => setShowAddPc(false)}>
+          <div className="evm-modal" onClick={(e) => e.stopPropagation()}>
+            <h2>Connect your PC</h2>
+            <p className="evm-modal-sub">Your PC must already run <b>Sunshine</b> and be on the same Tailscale network as EpicVM.</p>
+            <form onSubmit={submitAddPc}>
+              <label>Display name</label>
+              <input value={addPc.displayName} onChange={(e) => setAddPc({ ...addPc, displayName: e.target.value })} placeholder="My Rig" required />
+              <label>Tailscale IP of your PC</label>
+              <input value={addPc.tailnetIp} onChange={(e) => setAddPc({ ...addPc, tailnetIp: e.target.value })} placeholder="100.x.x.x" required />
+              <label>Sunshine username (optional — to auto-pair now)</label>
+              <input value={addPc.sunshineUsername} onChange={(e) => setAddPc({ ...addPc, sunshineUsername: e.target.value })} placeholder="sunshine" autoComplete="username" />
+              <label>Sunshine password (optional)</label>
+              <input type="password" value={addPc.sunshinePassword} onChange={(e) => setAddPc({ ...addPc, sunshinePassword: e.target.value })} placeholder="••••" autoComplete="current-password" />
+              {addPcErr && <div className="evm-error">{addPcErr}</div>}
+              <div className="evm-modal-actions">
+                <button type="button" className="evm-btn evm-btn-ghost" onClick={() => setShowAddPc(false)}>Cancel</button>
+                <button type="submit" className="evm-btn evm-btn-primary" disabled={addPcBusy}>
+                  {addPcBusy ? <Spinner size={16} className="spin" /> : null} Add PC
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
       )}
 
       <footer className="evm-portal-foot">

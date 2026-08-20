@@ -18,12 +18,38 @@ try:
     from .remote_agent_client import normalize_remote_vm_record
     from .guacamole_orchestrator import GuacamoleOrchestrator, ConsoleOrchestrationError
     from .moonlight_orchestrator import MoonlightOrchestrator
+    from .cloud_pc import (  # bring-your-own Sunshine PC (no agent)
+        is_cloudpc as _is_cloudpc,
+        load_cloud_pc as _load_cloud_pc,
+        load_cloud_pcs as _load_cloud_pcs,
+        create_cloudpc as _cp_create,
+        pair_cloudpc as _cp_pair,
+        start_cloudpc as _cp_start,
+        stop_cloudpc as _cp_stop,
+        delete_cloud_pc as _cp_delete,
+        cloudpc_status as _cp_status,
+        cloudpc_proxy_up as _cp_moonlight_proxy_up,
+        CloudPcConfigError as _CloudPcConfigError,
+    )
 except ImportError:
     from vm_hosts import LocalDockerHost, VmHostRegistry, VmHostUnavailable
     from remote_hosts import ConfiguredVmHostRegistry, RemoteHostConfigError, redact_host_record, upsert_remote_host_config
     from remote_agent_client import normalize_remote_vm_record
     from guacamole_orchestrator import GuacamoleOrchestrator, ConsoleOrchestrationError
     from moonlight_orchestrator import MoonlightOrchestrator
+    from cloud_pc import (
+        is_cloudpc as _is_cloudpc,
+        load_cloud_pc as _load_cloud_pc,
+        load_cloud_pcs as _load_cloud_pcs,
+        create_cloudpc as _cp_create,
+        pair_cloudpc as _cp_pair,
+        start_cloudpc as _cp_start,
+        stop_cloudpc as _cp_stop,
+        delete_cloud_pc as _cp_delete,
+        cloudpc_status as _cp_status,
+        cloudpc_proxy_up as _cp_moonlight_proxy_up,
+        CloudPcConfigError as _CloudPcConfigError,
+    )
 try:
     import psutil
 except Exception:
@@ -3583,11 +3609,38 @@ def dashboard_vm_forward_auth(name):
             login_url = f'{ext_base}{login_path}' if ext_base else login_path
             return Response('', 302, {'Location': login_url})
         if not _user_can_access_vm(user, name):
-            denied_path = '/dashboard/vm/' + urlrequest.quote(name, safe='') + '/'
-            denied_url = f'{ext_base}{denied_path}' if ext_base else denied_path
-            return Response('', 302, {'Location': denied_url})
-        authenticated = True
+            # Cloud PCs are owner-scoped (not in assignedVms); allow the owner.
+            if _is_cloudpc(name):
+                pc = _load_cloud_pc(name)
+                if pc and pc['owner'] == user['username']:
+                    authenticated = True
+                else:
+                    denied_path = '/dashboard/vm/' + urlrequest.quote(name, safe='') + '/'
+                    denied_url = f'{ext_base}{denied_path}' if ext_base else denied_path
+                    return Response('', 302, {'Location': denied_url})
+            else:
+                denied_path = '/dashboard/vm/' + urlrequest.quote(name, safe='') + '/'
+                denied_url = f'{ext_base}{denied_path}' if ext_base else denied_path
+                return Response('', 302, {'Location': denied_url})
+        else:
+            authenticated = True
     if authenticated:
+        # Cloud PC stream gate: ensure the owner's proxy is up and paired.
+        if _is_cloudpc(name):
+            pc = _load_cloud_pc(name)
+            if not pc or not pc.get('paired'):
+                response = Response('Cloud PC is not paired yet.', status=503)
+                response.headers['Retry-After'] = '5'
+                response.headers['Cache-Control'] = 'no-store'
+                response.headers['X-EpicVM-Console-Code'] = 'console_not_paired'
+                return response
+            # Best-effort: ensure proxy container is running before granting.
+            try:
+                if not _cp_moonlight_proxy_up(name):
+                    _cp_start(name)
+            except Exception:
+                pass
+            return Response('OK', 200)
         forwarded_uri = request.headers.get('X-Forwarded-Uri', '')
         if _is_moonlight_host_api_request(forwarded_uri):
             host_id = _console_route_host_id(name, forwarded_uri)
@@ -3925,6 +3978,34 @@ def portal_vms_api():
             'memory': meta.get('memory') or status.get('memory') or '',
         }
         vms.append(item)
+    # Cloud PCs the caller owns are surfaced as first-class machines.
+    for pc in _load_cloud_pcs():
+        if pc['owner'] != (user.get('username') or ''):
+            continue
+        st = _cp_status(pc['id'], tailnet_ip=pc['tailnet_ip'])
+        vms.append({
+            'name': pc['id'],
+            'url': _build_vm_url(pc['id']),
+            'wrapperUrl': f'/vm/{pc["id"]}/',
+            'accessMode': 'restricted',
+            'allowed': True,
+            'type': 'cloudpc',
+            'os': 'Your PC',
+            'profile': 'cloudpc',
+            'status': st['readiness'],
+            'state': st['readiness'],
+            'running': st['running'],
+            'healthy': st['healthy'],
+            'crashed': False,
+            'exists': True,
+            'recoveryState': 'healthy',
+            'readiness': st['readiness'],
+            'title': pc.get('display_name') or pc['id'],
+            'cpu': '',
+            'memory': '',
+            'owner': pc['owner'],
+            'paired': pc.get('paired', False),
+        })
     # Provisioning summary for the dashboard header.
     summary = {
         'total': len(vms),
@@ -3939,6 +4020,15 @@ def portal_vms_api():
 @portal_auth_required
 def portal_start_vm(name):
     if not _user_can_access_vm(request.portal_user, name):
+        # Cloud PCs are owner-scoped, not via assignedVms.
+        if _is_cloudpc(name):
+            pc = _load_cloud_pc(name)
+            if pc and (pc['owner'] == request.portal_user['username'] or _admin_vm_sso_authenticated()):
+                try:
+                    _cp_start(name)
+                except _CloudPcConfigError as exc:
+                    return jsonify({'ok': False, 'error': str(exc)}), 400
+                return jsonify({'ok': True, 'wrapperUrl': f'/vm/{name}/', 'openUrl': _build_vm_url(name)})
         return jsonify({'ok': False, 'error': 'Forbidden'}), 403
     try:
         _vm_host().check_call('start', name)
@@ -3954,12 +4044,123 @@ def portal_start_vm(name):
 @portal_auth_required
 def portal_stop_vm(name):
     if not _user_can_access_vm(request.portal_user, name):
+        if _is_cloudpc(name):
+            pc = _load_cloud_pc(name)
+            if pc and (pc['owner'] == request.portal_user['username'] or _admin_vm_sso_authenticated()):
+                try:
+                    _cp_stop(name)
+                except _CloudPcConfigError as exc:
+                    return jsonify({'ok': False, 'error': str(exc)}), 400
+                return jsonify({'ok': True})
         return jsonify({'ok': False, 'error': 'Forbidden'}), 403
     try:
         _vm_host().check_call('stop', name)
         return jsonify({'ok': True})
     except subprocess.CalledProcessError as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+# --- Cloud PC (bring-your-own Sunshine over Tailscale) -------------------------------
+# A Cloud PC is an owner-scoped record; the dashboard stands up a per-PC Moonlight
+# Web proxy and pairs it to the user's Sunshine.  No EpicVM agent is installed.
+
+def _cloudpc_owner_ok(name):
+    """Return the record if the caller owns it (or is an admin via SSO), else None."""
+    pc = _load_cloud_pc(name)
+    if not pc:
+        return None
+    if pc['owner'] == request.portal_user['username'] or _admin_vm_sso_authenticated():
+        return pc
+    return False  # owned by someone else
+
+
+@app.post('/portal/api/cloudpc')
+@portal_auth_required
+def portal_cloudpc_create():
+    data = request.get_json(silent=True) or {}
+    display_name = str(data.get('displayName') or '').strip()
+    tailnet_ip = str(data.get('tailnet_ip') or data.get('tailnetIp') or '').strip()
+    if not display_name:
+        return jsonify({'ok': False, 'error': 'displayName is required'}), 400
+    if not tailnet_ip:
+        return jsonify({'ok': False, 'error': 'tailnet_ip is required'}), 400
+    su = str(data.get('sunshineUsername') or data.get('sunshine_username') or '')
+    sp = str(data.get('sunshinePassword') or data.get('sunshine_password') or '')
+    try:
+        rec = _cp_create(
+            owner=request.portal_user['username'],
+            display_name=display_name,
+            tailnet_ip=tailnet_ip,
+            sunshine_username=su,
+            sunshine_password=sp,
+        )
+    except _CloudPcConfigError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 400
+    return jsonify({'ok': True, 'cloudpc': rec})
+
+
+@app.post('/portal/api/cloudpc/<name>/pair')
+@portal_auth_required
+def portal_cloudpc_pair(name):
+    owned = _cloudpc_owner_ok(name)
+    if owned is None:
+        return jsonify({'ok': False, 'error': 'Cloud PC not found'}), 404
+    if owned is False:
+        return jsonify({'ok': False, 'error': 'Forbidden'}), 403
+    data = request.get_json(silent=True) or {}
+    su = str(data.get('sunshineUsername') or data.get('sunshine_username') or '')
+    sp = str(data.get('sunshinePassword') or data.get('sunshine_password') or '')
+    try:
+        rec = _cp_pair(name, sunshine_username=su, sunshine_password=sp)
+    except _CloudPcConfigError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 400
+    return jsonify({'ok': True, 'cloudpc': rec})
+
+
+@app.post('/portal/api/cloudpc/<name>/start')
+@portal_auth_required
+def portal_cloudpc_start(name):
+    owned = _cloudpc_owner_ok(name)
+    if owned is None:
+        return jsonify({'ok': False, 'error': 'Cloud PC not found'}), 404
+    if owned is False:
+        return jsonify({'ok': False, 'error': 'Forbidden'}), 403
+    try:
+        _cp_start(name)
+    except _CloudPcConfigError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 400
+    return jsonify({'ok': True, 'wrapperUrl': f'/vm/{name}/'})
+
+
+@app.post('/portal/api/cloudpc/<name>/stop')
+@portal_auth_required
+def portal_cloudpc_stop(name):
+    owned = _cloudpc_owner_ok(name)
+    if owned is None:
+        return jsonify({'ok': False, 'error': 'Cloud PC not found'}), 404
+    if owned is False:
+        return jsonify({'ok': False, 'error': 'Forbidden'}), 403
+    try:
+        _cp_stop(name)
+    except _CloudPcConfigError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 400
+    return jsonify({'ok': True})
+
+
+@app.delete('/portal/api/cloudpc/<name>')
+@portal_auth_required
+def portal_cloudpc_delete(name):
+    owned = _cloudpc_owner_ok(name)
+    if owned is None:
+        return jsonify({'ok': False, 'error': 'Cloud PC not found'}), 404
+    if owned is False:
+        return jsonify({'ok': False, 'error': 'Forbidden'}), 403
+    try:
+        _cp_stop(name)
+    except Exception:
+        pass
+    removed = _cp_delete(name)
+    return jsonify({'ok': bool(removed)})
 
 
 @app.get('/portal/api/vm/<name>/status')

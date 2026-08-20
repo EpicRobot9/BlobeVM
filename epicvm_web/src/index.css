@@ -529,3 +529,46 @@ body {
   .evm-landing .evm-h1 { font-size: 56px; }
   .evm-landing .evm-step, .evm-landing .evm-type, .evm-landing .evm-feature { transform: none; }
 }
+
+/* --- Cloud PC (bring-your-own Sunshine) --- */
+.evm-type-tag.t-cloudpc { background: var(--warn); color: #1a1303; }
+.evm-card.t-cloudpc { border-color: rgba(247, 201, 72, .4); }
+.evm-card.t-cloudpc:hover { box-shadow: 9px 9px 0 rgba(247, 201, 72, .25); }
+
+/* Connect-your-PC CTA card */
+.evm-add-card {
+  display: grid; place-items: center; gap: 8px; text-align: center; cursor: pointer;
+  background: var(--card2); border: 2px dashed rgba(2, 189, 243, .4); border-radius: 16px;
+  color: var(--text); font: inherit; padding: 28px 22px; transition: transform .12s ease, border-color .12s ease, box-shadow .12s ease;
+}
+.evm-add-card:hover { transform: translate(-2px, -3px); border-color: var(--cyan); box-shadow: 9px 9px 0 rgba(2, 189, 243, .18); }
+.evm-add-card h3 { margin: 4px 0 0; font-size: 19px; font-weight: 900; }
+.evm-add-card p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; max-width: 22ch; }
+.evm-add-card svg { color: var(--cyan); }
+
+/* warn button (used for the PAIR action) */
+.evm-btn-warn { background: var(--warn); color: #1a1303; border-color: #ffe49a; }
+.evm-btn-warn:hover:not(:disabled) { background: #ffe49a; }
+.evm-btn-warn:disabled { opacity: .55; cursor: not-allowed; }
+
+/* modal */
+.evm-modal-backdrop {
+  position: fixed; inset: 0; background: rgba(3, 6, 13, .72); backdrop-filter: blur(4px);
+  display: grid; place-items: center; z-index: 100; padding: 20px;
+}
+.evm-modal {
+  width: min(460px, 100%); background: var(--card); border: 1px solid var(--line);
+  border-top: 3px solid var(--cyan); border-radius: 14px; padding: 26px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, .5);
+}
+.evm-modal h2 { margin: 0 0 6px; font-size: 22px; font-weight: 900; }
+.evm-modal-sub { margin: 0 0 18px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.evm-modal label { display: block; font-size: 12px; font-weight: 700; color: var(--muted); margin: 12px 0 5px; letter-spacing: .03em; }
+.evm-modal input {
+  width: 100%; box-sizing: border-box; padding: 11px 12px; border-radius: 8px;
+  border: 1px solid var(--line); background: #071109; color: var(--text); font: inherit;
+}
+.evm-modal input:focus { outline: 2px solid rgba(2, 189, 243, .3); border-color: var(--cyan); }
+.evm-modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px; }
+.evm-modal-actions .evm-btn { width: auto; padding-left: 18px; padding-right: 18px; }
+
