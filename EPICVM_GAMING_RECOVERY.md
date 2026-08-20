@@ -180,3 +180,11 @@ Scope: retained Hyper-V GPU-P Gaming VM, production dashboard/KVM2, LocalSystem 
 - New focused source/test changes are currently uncommitted and limited to `dashboard/app.py` and `tests/test_admin_vm_sso.py`; they are intended for the `production` branch only.
 - Corrected focused test command (`PYTHONPATH='.;dashboard' uv run --with-requirements requirements-dev.txt pytest -q tests/test_admin_vm_sso.py tests/test_provisioning_api.py tests/test_moonlight_orchestrator.py`) passed `48` tests.
 - The next safe action is to commit/push this focused dashboard fix, fast-forward `/opt/blobe-vm/repo`, capture deployment rollback state, build a unique dashboard image, and deploy only after local image validation. Then re-open the existing authenticated browser route and verify real frames/input; final readiness remains blocked until those checks and the updated Windows agent are both valid.
+
+## Pending-visual deployment preparation
+
+- KVM2 `/opt/blobe-vm/repo` is on `production` at `1d640688fb653a8147c4cb7e7ab0645f57732944`; the focused source patch was checked with `git apply --check` against the live dashboard before mutation.
+- The live dashboard checkout contained unrelated local differences from the repository. I preserved those differences and applied only the focused production patch to `/opt/blobe-vm/dashboard/app.py`; `/opt/blobe-vm/dashboard/remote_agent_client.py` was backed up but unchanged by this commit.
+- Redacted rollback snapshot and pre-change source files: `/opt/blobe-vm/recovery-backups/gaming-visual-route-1d64068-20260820T131739Z`. It contains the focused patch, `app.py.before`, `remote_agent_client.py.before`, and a container configuration snapshot with environment values omitted.
+- After the patch, live hashes are: `dashboard/app.py` `6559d0b712c94c73b0f4e2b31751c6c0d46d30434935fcf5ab9ea0920d0f4c4a`; `dashboard/remote_agent_client.py` `cd7842fa4d5c237380cba58af64f44df676b80b01517de1e7537f19ff997fe0f`. The live app now contains the pending-visual browser boundary; final readiness remains fail-closed.
+- Baseline rollback remains image `blobedash:moonlight-canary-08e36b8` / image ID `sha256:de0cb17f7b4c0030d2674ca1e9c300f7ad35dd98ff20e569bb4a278923a4740a` plus restoring the two backed-up live source files and restarting `blobedash.service`. No deployment restart has occurred yet.
