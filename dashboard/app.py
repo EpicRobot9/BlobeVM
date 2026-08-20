@@ -3664,7 +3664,7 @@ def portal_login_api():
             _LOGIN_ATTEMPTS[remote] = {'count': count, 'until': now + min(30, 2 ** min(count, 5))}
         return jsonify({'ok': False, 'error': 'invalid'}), 401
     # Only approved accounts may obtain a session.
-    if str(user.get('account_status') or 'pending') != 'approved':
+    if str(user.get('accountStatus') or user.get('account_status') or 'pending') != 'approved':
         with _LOGIN_LOCK:
             count = _LOGIN_ATTEMPTS.get(remote, {}).get('count', 0) + 1
             _LOGIN_ATTEMPTS[remote] = {'count': count, 'until': now + min(30, 2 ** min(count, 5))}
