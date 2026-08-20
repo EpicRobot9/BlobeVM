@@ -396,6 +396,7 @@ function New-EpicVMProvisioningStore {
         Deprovisioning = @{}
         Claims = @{}
         SyncRoot = [object]::new()
+        NeedsSave = $false
     }
     if (-not (Test-Path -LiteralPath $store.Path -PathType Leaf)) { return $store }
 
@@ -423,8 +424,10 @@ function New-EpicVMProvisioningStore {
             )) {
                 $job.$name = Get-EpicVMProperty -Object $record -Name $name -Default $job.$name
             }
+            $rawState = [string](Get-EpicVMProperty -Object $record -Name 'state' -Default 'failed')
             $canonical = ConvertTo-EpicVMCanonicalProvisioningState -Record $record
             $job.state = $canonical
+            if ($canonical -ne $rawState) { $store.NeedsSave = $true }
             if ($canonical -eq 'setup_failed:legacy_state_uncertain') {
                 $job.errorCode = 'legacy_state_uncertain'
                 $job.errorMessage = 'Persisted provisioning checkpoints were insufficient or contradictory.'
@@ -641,7 +644,7 @@ function Invoke-EpicVMProvisioningFailedCleanup {
 
 function Invoke-EpicVMProvisioningRecovery {
     param([Parameter(Mandatory)] [object] $State)
-    $changed = $false
+    $changed = [bool](Get-EpicVMProperty -Object $State.Provisioning -Name 'NeedsSave' -Default $false)
     foreach ($job in @($State.Provisioning.Jobs.Values)) {
         $canonical = ConvertTo-EpicVMCanonicalProvisioningState -Record $job
         if ($canonical -ne [string]$job.state) {
@@ -749,7 +752,10 @@ function Invoke-EpicVMProvisioningRecovery {
             $changed = $true
         }
     }
-    if ($changed) { Save-EpicVMProvisioningStore -Store $State.Provisioning }
+    if ($changed) {
+        Save-EpicVMProvisioningStore -Store $State.Provisioning
+        if ($State.Provisioning.PSObject.Properties.Name -contains 'NeedsSave') { $State.Provisioning.NeedsSave = $false }
+    }
 }
 
 function Test-EpicVMProvisioningJobRetryable {
@@ -1521,8 +1527,21 @@ function Set-EpicVMProvisioningConsoleCredentials {
             $Job | Add-Member -MemberType NoteProperty -Name $propertyName -Value $null
         }
     }
-    $readyReconcile = $reconcileOnly -and $reconcileState -in @('ready', 'setup_failed:streaming', 'setup_failed:agent_restart') -and
+    $reconcileEvidenceComplete =
+        (Test-EpicVMProvisioningEvidence -Record $Job -Stage 'stream_validation') -and
         (@(Get-EpicVMProvisioningCompletedStages -Value $Job.completedStages) -contains 'management_handoff')
+    if ($reconcileState -eq 'ready' -and -not $reconcileEvidenceComplete) {
+        $Job.state = 'setup_failed:legacy_state_uncertain'
+        $Job.failureStage = 'legacy_state_uncertain'
+        $Job.failureDetailCode = $null
+        $Job.errorCode = 'legacy_state_uncertain'
+        $Job.errorMessage = 'Persisted readiness lacked rendered-frame and input evidence; visual verification is required.'
+        $Job.lastAttemptCode = 'legacy_ready_rejected'
+        $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
+        Save-EpicVMProvisioningStore -Store $State.Provisioning
+        throw (New-EpicVMProvisioningError -Code 'legacy_state_uncertain' -Message 'Persisted readiness lacked rendered-frame and input evidence.' -Status 422)
+    }
+    $readyReconcile = $reconcileOnly -and $reconcileState -eq 'ready' -and $reconcileEvidenceComplete
     if ($Job.state -notin @('streaming_setup', 'setup_failed:streaming', 'setup_failed:agent_restart') -and -not $readyReconcile) {
         throw (New-EpicVMProvisioningError -Code 'console_credentials_not_allowed' -Message 'The job is not awaiting console configuration.' -Status 409)
     }

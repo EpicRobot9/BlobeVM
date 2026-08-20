@@ -371,6 +371,76 @@ Describe 'EpicVM provisioning safety' {
         $job.consoleRoutePrefix | Should -Be '/vm/alpha--epic-pc/'
     }
 
+    It 'persists a canonical rejection of legacy ready records during recovery' {
+        $config=Get-EpicVMDefaultConfig
+        $config.ProvisioningStatePath=Join-Path $TestDrive 'legacy-ready-recovery.json'
+        @([ordered]@{
+            id='legacy-ready-job'
+            name='legacy-ready'
+            profile='standard'
+            state='ready'
+            completedStages=@('claim','guest_setup','network_setup','management_handoff','streaming_setup','stream_validation')
+            claimConsumed=$true
+            claimUsed=$true
+            streamValidationVerified=$true
+            consoleVerifiedAt='2026-08-20T00:00:00Z'
+            consoleRoutePrefix='/vm/legacy-ready--epic-pc/'
+            tailnetIp='100.111.82.1'
+        } | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $config.ProvisioningStatePath -Encoding UTF8
+
+        $state=New-EpicVMAgentState -Config $config -Token 'agent-token' -Provider (New-ProvisioningTestProvider)
+        $job=$state.Provisioning.Jobs['legacy-ready-job']
+        $persisted=@(Get-Content -LiteralPath $config.ProvisioningStatePath -Raw | ConvertFrom-Json | Select-Object -First 1)
+
+        $job.state | Should -Be 'setup_failed:legacy_state_uncertain'
+        $persisted.state | Should -Be 'setup_failed:legacy_state_uncertain'
+        $persisted.errorCode | Should -Be 'legacy_state_uncertain'
+        $persisted.consoleFrameVerified | Should -BeFalse
+        $persisted.keyboardInputVerified | Should -BeFalse
+        $persisted.mouseInputVerified | Should -BeFalse
+    }
+
+    It 'does not let reconcile-only Sunshine setup promote a failed job to ready' {
+        $config=Get-EpicVMDefaultConfig
+        $config.ProvisioningStatePath=Join-Path $TestDrive 'failed-reconcile.json'
+        $provider=New-ProvisioningTestProvider
+        $provider | Add-Member NoteProperty ConfigureSunshine { param($name,$guestUsername,$guestPassword,$sunshineUsername,$sunshinePassword,$guestAddress,$managementCheckpoint,$managementAlreadyVerified,$isGaming)
+            @{ok=$true;managementReady=$true;managementTransport='tailscale_winrm';gamingCaptureConfigured=$true}
+        }
+        $state=New-EpicVMAgentState -Config $config -Token 'agent-token' -Provider $provider
+        $job=New-EpicVMProvisioningJobObject -Id 'job-failed-reconcile' -Name 'failed-reconcile' -Profile 'gaming' -State 'setup_failed:streaming'
+        $job.completedStages=@('claim','guest_setup','network_setup','management_handoff')
+        $job.claimConsumed=$true; $job.claimUsed=$true
+        $state.Provisioning.Jobs[$job.id]=$job
+
+        Set-EpicVMProvisioningConsoleCredentials -State $state -Job $job -Request @{
+            reconcileOnly=$true; username='operator'; password='guest-pass'; sunshineUsername='sun-user'; sunshinePassword='sun-pass'
+        }
+
+        $job.state | Should -Be 'setup_failed:streaming'
+        $job.gamingCaptureConfigured | Should -BeTrue
+        $job.consoleRepairOutcome | Should -BeNullOrEmpty
+    }
+
+    It 'rejects reconcile-only setup for a legacy ready record without visual input evidence' {
+        $config=Get-EpicVMDefaultConfig
+        $config.ProvisioningStatePath=Join-Path $TestDrive 'legacy-ready-reconcile.json'
+        $provider=New-ProvisioningTestProvider
+        $provider | Add-Member NoteProperty ConfigureSunshine { throw 'ConfigureSunshine must not run for legacy ready state' }
+        $state=New-EpicVMAgentState -Config $config -Token 'agent-token' -Provider $provider
+        $job=New-EpicVMProvisioningJobObject -Id 'job-legacy-ready' -Name 'legacy-ready-2' -Profile 'gaming' -State 'ready'
+        $job.completedStages=@('claim','guest_setup','network_setup','management_handoff','streaming_setup','stream_validation')
+        $job.claimConsumed=$true; $job.claimUsed=$true; $job.streamValidationVerified=$true
+        $state.Provisioning.Jobs[$job.id]=$job
+
+        { Set-EpicVMProvisioningConsoleCredentials -State $state -Job $job -Request @{
+            reconcileOnly=$true; username='operator'; password='guest-pass'; sunshineUsername='sun-user'; sunshinePassword='sun-pass'
+        } } | Should -Throw
+
+        $job.state | Should -Be 'setup_failed:legacy_state_uncertain'
+        $job.errorCode | Should -Be 'legacy_state_uncertain'
+    }
+
     It 'accepts request-only Sunshine credentials only at the console gate' {
         $config=Get-EpicVMDefaultConfig
         $config.ProvisioningStatePath=Join-Path $TestDrive 'sunshine-jobs.json'
