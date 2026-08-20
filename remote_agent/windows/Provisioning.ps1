@@ -1541,6 +1541,29 @@ function Set-EpicVMProvisioningConsoleCredentials {
         Save-EpicVMProvisioningStore -Store $State.Provisioning
         throw (New-EpicVMProvisioningError -Code 'legacy_state_uncertain' -Message 'Persisted readiness lacked rendered-frame and input evidence.' -Status 422)
     }
+    $completedStages = @(Get-EpicVMProvisioningCompletedStages -Value $Job.completedStages)
+    $legacyVmValid = $false
+    try { [void][guid]::Parse([string](Get-EpicVMProperty -Object $Job -Name 'vmId' -Default '')); $legacyVmValid = $true } catch { }
+    $legacyTailnetIp = [string](Get-EpicVMProperty -Object $Job -Name 'tailnetIp' -Default '')
+    $legacyTailnetValid = $legacyTailnetIp -match '^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.\d{1,3}\.\d{1,3}$'
+    $legacyReconcileAllowed = $reconcileOnly -and
+        $reconcileState -eq 'setup_failed:legacy_state_uncertain' -and
+        [bool]$Job.claimConsumed -and [bool]$Job.claimUsed -and
+        $legacyVmValid -and $legacyTailnetValid -and
+        @(@('claim', 'guest_setup', 'network_setup', 'management_handoff') | Where-Object { $completedStages -notcontains $_ }).Count -eq 0
+    if ($legacyReconcileAllowed) {
+        # A legacy-ready record may re-enter only the stage-limited streaming
+        # setup path after its identity, claim, network, and management
+        # checkpoints are still authoritative. It must never become ready here.
+        $Job.state = 'streaming_setup'
+        $Job.failureStage = $null
+        $Job.failureDetailCode = $null
+        $Job.errorCode = $null
+        $Job.errorMessage = $null
+        $Job.lastAttemptCode = 'legacy_ready_reconciliation'
+        $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
+        Save-EpicVMProvisioningStore -Store $State.Provisioning
+    }
     $readyReconcile = $reconcileOnly -and $reconcileState -eq 'ready' -and $reconcileEvidenceComplete
     if ($Job.state -notin @('streaming_setup', 'setup_failed:streaming', 'setup_failed:agent_restart') -and -not $readyReconcile) {
         throw (New-EpicVMProvisioningError -Code 'console_credentials_not_allowed' -Message 'The job is not awaiting console configuration.' -Status 409)

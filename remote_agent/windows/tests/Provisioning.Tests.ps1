@@ -441,6 +441,36 @@ Describe 'EpicVM provisioning safety' {
         $job.errorCode | Should -Be 'legacy_state_uncertain'
     }
 
+    It 'allows only an evidenced legacy record to re-enter stage-limited streaming setup' {
+        $config=Get-EpicVMDefaultConfig
+        $config.ProvisioningStatePath=Join-Path $TestDrive 'legacy-streaming-reconcile.json'
+        $provider=New-ProvisioningTestProvider
+        $provider | Add-Member NoteProperty ConfigureSunshine { param($name,$guestUsername,$guestPassword,$sunshineUsername,$sunshinePassword,$guestAddress,$managementCheckpoint,$managementAlreadyVerified,$isGaming)
+            $isGaming | Should -BeTrue
+            @{ok=$true;managementReady=$true;managementTransport='tailscale_winrm';gamingCaptureConfigured=$true;gamingCaptureAt='2026-08-20T00:00:00Z'}
+        }
+        $state=New-EpicVMAgentState -Config $config -Token 'agent-token' -Provider $provider
+        $job=New-EpicVMProvisioningJobObject -Id 'job-legacy-streaming' -Name 'legacy-streaming' -Profile 'gaming' -State 'setup_failed:legacy_state_uncertain'
+        $job.vmId='c7fd609d-5850-4f03-9a58-b425d8696711'
+        $job.tailnetIp='100.111.82.1'
+        $job.tailnetDeviceId='device-legacy'
+        $job.managementTransport='tailscale_winrm'
+        $job.managementReadyAt=[DateTime]::UtcNow.AddMinutes(-1).ToString('o')
+        $job.claimConsumed=$true; $job.claimUsed=$true
+        $job.streamValidationVerified=$true
+        $job.completedStages=@('claim','guest_setup','network_setup','management_handoff','streaming_setup','stream_validation')
+        $state.Provisioning.Jobs[$job.id]=$job
+
+        Set-EpicVMProvisioningConsoleCredentials -State $state -Job $job -Request @{
+            reconcileOnly=$true; username='operator'; password='guest-pass'; sunshineUsername='sun-user'; sunshinePassword='sun-pass'
+        }
+
+        $job.state | Should -Be 'streaming_setup'
+        $job.gamingCaptureConfigured | Should -BeTrue
+        $job.streamValidationVerified | Should -BeTrue
+        $job.consoleVerifiedAt | Should -BeNullOrEmpty
+    }
+
     It 'accepts request-only Sunshine credentials only at the console gate' {
         $config=Get-EpicVMDefaultConfig
         $config.ProvisioningStatePath=Join-Path $TestDrive 'sunshine-jobs.json'
