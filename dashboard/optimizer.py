@@ -835,7 +835,11 @@ def _run_swap_guard(cfg, vm_state_map=None, host_pressure=None):
         total = int(swap.get('total') or 0)
         used = int(swap.get('used') or 0)
         perc = int(round(used / total * 100)) if total else 0
-        threshold = cfg.get('swapThreshold', 10)
+        threshold = cfg.get('swapThreshold', cfg.get('maxSwapPercent', 10))
+        try:
+            threshold = max(1, int(threshold))
+        except (TypeError, ValueError):
+            threshold = 10
         if total or used:
             if perc >= threshold:
                 relief = _stop_idle_pressure_vm(cfg, list(vm_state_map.values()), {'level': 'critical' if perc >= max(threshold, int(cfg.get('maxSwapPercent', 10))) else 'pressured'})
