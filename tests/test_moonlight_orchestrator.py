@@ -50,6 +50,7 @@ def test_shell_quoted_environment_image_is_accepted(tmp_path, monkeypatch):
 def test_plan_is_digest_pinned_path_correct_and_does_not_contain_credentials(tmp_path):
     orch = make_orchestrator(tmp_path)
     plan = orch.build_plan(name="alpha", guest_ip="100.111.82.1")
+    config = json.loads(plan.config)
     assert IMAGE in plan.compose
     assert "Host(`techexplore.us`) && PathPrefix(`/vm/alpha/`)" in plan.compose
     assert "middlewares: \"epicvm-alpha-portal-auth,epicvm-alpha-portal-user\"" in plan.compose
@@ -58,6 +59,7 @@ def test_plan_is_digest_pinned_path_correct_and_does_not_contain_credentials(tmp
     assert "middlewares.epicvm-alpha-portal-user.forwardauth" not in plan.compose
     assert "epicvm-portal-auth@file" not in plan.compose
     assert "url_path_prefix\":\"/vm/alpha\"" in plan.config
+    assert config["moonlight"]["pair_device_name"] == "EpicVMWeb"
     assert 'ports:\n      - "41000-41010:41000-41010/udp"' in plan.compose
     assert 'WEBRTC_PORT_RANGE: "41000:41010"' in plan.compose
     assert "WEBRTC_NAT_1TO1_HOST" not in plan.compose
@@ -211,6 +213,7 @@ def test_pairing_keeps_sunshine_secret_out_of_bundle(tmp_path):
     sunshine = next(call for call in calls if call[1].endswith("/api/pin"))
     assert "secret-value" not in sunshine[3].decode()
     assert sunshine[2]["Authorization"].startswith("Basic ")
+    assert json.loads(sunshine[3].decode())["name"] == "EpicVMWeb"
     assert json.loads((tmp_path / "alpha" / "plan.json").read_text())["paired"] is True
 
 

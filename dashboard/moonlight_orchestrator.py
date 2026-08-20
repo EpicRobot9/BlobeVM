@@ -33,6 +33,7 @@ VM_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
 TAILSCALE_IP_RE = re.compile(r"^100\.(?:6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.\d{1,3}\.\d{1,3}$")
 SHA256_IMAGE_RE = re.compile(r"^[^@]+@sha256:[0-9a-f]{64}$")
 DEFAULT_MOONLIGHT_IMAGE = "mrcreativ3001/moonlight-web-stream@sha256:82cf429ffea07bdb30d3f8bf14e9e97a0a7186b0864ec4250b680b3c0c302d2b"
+MOONLIGHT_PAIR_DEVICE_NAME = "EpicVMWeb"
 WEBRTC_PORT_MIN = 41000
 WEBRTC_PORT_MAX = 41010
 
@@ -252,7 +253,7 @@ class MoonlightOrchestrator:
             "data_storage": {"type": "json", "path": "server/data.json", "session_expiration_check_interval": {"secs": 300, "nanos": 0}},
             "webrtc": {"ice_servers": [{"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:3478"], "username": "", "credential": ""}], "ice_server_script": None, "port_range": {"min": WEBRTC_PORT_MIN, "max": WEBRTC_PORT_MAX}, "nat_1to1": nat_1to1, "network_types": ["udp4"], "include_loopback_candidates": False},
             "web_server": {"bind_address": "0.0.0.0:8080", "url_path_prefix": f"/vm/{route}", "session_cookie_secure": True, "session_cookie_expiration": {"secs": 86400, "nanos": 0}, "first_login_create_admin": True, "first_login_assign_global_hosts": True, "default_user_id": None, "default_role_id": None, "forwarded_header": {"username_header": "X-EpicVM-User", "auto_create_missing_user": True, "ignore_case": True}},
-            "moonlight": {"default_http_port": 47989, "pair_device_name": "EpicVM Web"},
+            "moonlight": {"default_http_port": 47989, "pair_device_name": MOONLIGHT_PAIR_DEVICE_NAME},
             "streamer_path": "./streamer",
             "log": {"level_filter": "INFO", "file_path": None, "dev_venator": False},
             "default_settings": None,
@@ -660,7 +661,8 @@ networks:
             raise ConsoleOrchestrationError("Sunshine credentials are required for pairing.", status=400, code="sunshine_credentials_required")
         raw = f"{username}:{password}".encode("utf-8")
         auth = base64.b64encode(raw).decode("ascii")
-        body = json.dumps({"pin": pin, "name": f"EpicVM {validate_vm_name(vm_name)}"}, separators=(",", ":")).encode("utf-8")
+        validate_vm_name(vm_name)
+        body = json.dumps({"pin": pin, "name": MOONLIGHT_PAIR_DEVICE_NAME}, separators=(",", ":")).encode("utf-8")
         deadline = time.monotonic() + 20.0
         while True:
             remaining = deadline - time.monotonic()
