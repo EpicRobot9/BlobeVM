@@ -98,6 +98,42 @@ def test_dashboard_local_inventory_uses_registered_provider(monkeypatch, tmp_pat
     ]
 
 
+def test_portal_assignment_inventory_includes_remote_provider(monkeypatch, tmp_path):
+    import importlib.util
+
+    dashboard_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "dashboard"))
+    if dashboard_dir not in sys.path:
+        sys.path.insert(0, dashboard_dir)
+    monkeypatch.setenv("BLOBEDASH_STATE", str(tmp_path))
+    monkeypatch.setenv("BLOBEVM_ALLOW_INSECURE_DASHBOARD", "1")
+    spec = importlib.util.spec_from_file_location(
+        "remote_assignment_inventory_test_app", os.path.join(dashboard_dir, "app.py")
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    class RemoteProvider:
+        kind = "remote"
+
+    class Registry:
+        providers = {"local": object(), "epic-pc": RemoteProvider()}
+
+    monkeypatch.setattr(module, "VM_HOST_REGISTRY", Registry())
+    monkeypatch.setattr(
+        module,
+        "manager_json_list",
+        lambda host_id=None: (
+            [{"name": "local-vm"}]
+            if host_id == "local"
+            else [{"name": "gaming-gpup-pilot-03"}]
+        ),
+    )
+
+    assert module._known_vm_names() == {"local-vm", "gaming-gpup-pilot-03"}
+
+
 def test_dashboard_bulk_recreate_uses_registered_provider(monkeypatch, tmp_path):
     import importlib.util
 

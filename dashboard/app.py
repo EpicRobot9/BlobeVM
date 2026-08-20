@@ -2536,10 +2536,30 @@ def _normalize_vm_names(vms):
     return out
 
 def _known_vm_names():
+    """Return VM names from every configured provider.
+
+    Portal account assignment used to query only the local provider.  That
+    made every remote-managed VM appear unknown even though the remote host
+    registry had a live inventory, blocking authenticated portal access tests
+    and real users from being assigned those VMs.  Inventory remains
+    best-effort: a dead remote host must not prevent assignments to known
+    local/other-host VMs.
+    """
+    names = set()
     try:
-        return {str(item.get('name')) for item in manager_json_list() if item.get('name')}
+        providers = getattr(VM_HOST_REGISTRY, 'providers', {}) or {}
+        for host_id in providers:
+            try:
+                inventory = manager_json_list(host_id)
+            except Exception:
+                continue
+            names.update(str(item.get('name')) for item in inventory if item.get('name'))
+        if not providers:
+            inventory = manager_json_list()
+            names.update(str(item.get('name')) for item in inventory if item.get('name'))
     except Exception:
-        return set()
+        return names
+    return names
 
 def _validate_known_vm_names(names):
     names = _normalize_vm_names(names)
