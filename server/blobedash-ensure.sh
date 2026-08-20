@@ -150,8 +150,10 @@ fi
 ensure_blobedash_image
 install -d -m 700 /opt/epicvm /opt/epicvm/instances /opt/epicvm/moonlight-instances
 
-# Recreate container to ensure correct port mapping
-if docker ps -a --format '{{.Names}}' | grep -qx "$NAME"; then
+# Recreate container to ensure correct port mapping.  Use a targeted inspect
+# instead of listing every historical container: Docker's list endpoint may
+# block on unrelated health checks and must not wedge this service reload.
+if docker inspect "$NAME" >/dev/null 2>&1; then
   docker rm -f "$NAME" >/dev/null 2>&1 || true
 fi
 
