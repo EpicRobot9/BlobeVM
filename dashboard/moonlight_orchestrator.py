@@ -32,7 +32,7 @@ except ImportError:  # pragma: no cover - direct source execution
 VM_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
 TAILSCALE_IP_RE = re.compile(r"^100\.(?:6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.\d{1,3}\.\d{1,3}$")
 SHA256_IMAGE_RE = re.compile(r"^[^@]+@sha256:[0-9a-f]{64}$")
-DEFAULT_MOONLIGHT_IMAGE = "mrcreativ3001/moonlight-web-stream@sha256:694ca7e33266a56bf4c8bb29cb916b0927f126578dae4cf0710a881efce6564b"
+DEFAULT_MOONLIGHT_IMAGE = "mrcreativ3001/moonlight-web-stream@sha256:82cf429ffea07bdb30d3f8bf14e9e97a0a7186b0864ec4250b680b3c0c302d2b"
 
 
 def validate_vm_name(name: str) -> str:

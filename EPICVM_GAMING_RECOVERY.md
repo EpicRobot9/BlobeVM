@@ -188,3 +188,29 @@ Scope: retained Hyper-V GPU-P Gaming VM, production dashboard/KVM2, LocalSystem 
 - Redacted rollback snapshot and pre-change source files: `/opt/blobe-vm/recovery-backups/gaming-visual-route-1d64068-20260820T131739Z`. It contains the focused patch, `app.py.before`, `remote_agent_client.py.before`, and a container configuration snapshot with environment values omitted.
 - After the patch, live hashes are: `dashboard/app.py` `6559d0b712c94c73b0f4e2b31751c6c0d46d30434935fcf5ab9ea0920d0f4c4a`; `dashboard/remote_agent_client.py` `cd7842fa4d5c237380cba58af64f44df676b80b01517de1e7537f19ff997fe0f`. The live app now contains the pending-visual browser boundary; final readiness remains fail-closed.
 - Baseline rollback remains image `blobedash:moonlight-canary-08e36b8` / image ID `sha256:de0cb17f7b4c0030d2674ca1e9c300f7ad35dd98ff20e569bb4a278923a4740a` plus restoring the two backed-up live source files and restarting `blobedash.service`. No deployment restart has occurred yet.
+
+## Pending-visual deployment result
+
+- The unique image was built from KVM2 `/opt/blobe-vm/repo` at production source `1d640688fb653a8147c4cb7e7ab0645f57732944`; the read-only, network-disabled AST preflight passed for `app.py` and `remote_agent_client.py`.
+- The dashboard was deployed conservatively through the supported `blobedash.service` ensure wrapper after changing only `EPICVM_BLOBEDASH_IMAGE` in `/opt/blobe-vm/.env`. The image selector is now the intended persistent value `blobedash:visual-route-1d64068`.
+- Active deployment: tag `blobedash:visual-route-1d64068`; image ID/digest `sha256:f273200e8d38994e888576d7263b7603dcccbe295dc98e369132f72821c8f77c`; container started `2026-08-20T13:21:27.325991811Z`; state `running`; local protected dashboard API probe returned expected `401`.
+- The bounded deploy script would have restored the backed-up source and prior image selector automatically if the new container failed its running/image/API checks; it did not need to roll back. The rollback snapshot also contains the old image-selector line in root-protected `env-image-setting.before`.
+- No unrelated containers, routes, VMs, GPU assignments, or host services were changed by this deployment. Browser-frame and input acceptance are still unproven.
+
+## Browser KVM/Moonlight validation after deployment
+
+- The existing authenticated Chrome production route `https://techexplore.us/vm/gaming-gpup-pilot-03--epic-pc/` was reloaded in place; no login credentials were entered and no new browser profile was used.
+- The route now renders the paired host card `DESKTOP-FI0I3JK`, then enumerates both intended applications `DESKTOP` and `STEAM`. This confirms the deployed ForwardAuth pending-visual boundary reaches the application-level Moonlight host/app path.
+- Launching `DESKTOP` opened the stream page and reported `Web Socket Open`.
+- The browser stream statistics reported `H264, 2560x1440, 60 fps`; `video pipeline: videotrack (transport) -> video_element (renderer)`; `webrtcPacketsReceived=67`; `webrtcPacketsLost=0`; `webrtcFramesDropped=0`; `webrtcKeyFramesDecoded=1`; and `webrtcNetworkCount=0` during the captured observation.
+- Despite transport and decoder activity, the visible video canvas remained uniformly black after the initial connection and an additional ten-second observation. No real Windows desktop frame was accepted as evidence. Keyboard and mouse input have not been claimed or persisted.
+
+## Moonlight runtime hypothesis and pinned image update
+
+- The black-frame observation is now tied to a concrete retained-runtime failure: the pinned v2.10.0 client negotiated H.264 and received packets/keyframe metadata, then its control stream disconnected after approximately 22 seconds (`Control stream received unexpected disconnect event`; loss transaction failed). This is below public routing and above browser input acceptance; it is not treated as a successful stream.
+- Static inspection of the retained image found the legacy frontend probes `../../libopenh264/decoder.js`, which is intentionally absent from the published image. The WebRTC track path was selected, but the bundle is stale relative to current upstream runtime behavior.
+- Upstream Docker Hub evidence identified `v3.0.0-prerelease.4` (published 2026-08-19), multi-arch manifest `sha256:a5d806990a0f8cde29a4b696644e1660bc07a858b7aa92332682b67b754068ce`, AMD64 image digest `sha256:82cf429ffea07bdb30d3f8bf14e9e97a0a7186b0864ec4250b680b3c0c302d2b`. The newer bundle is flattened, includes its hashed OpenH264 WASM asset and decoder hook, and includes later WebRTC control-stream handling. This is evidence for a targeted client-runtime correction, not proof of end-to-end success.
+- Tracked source change: `dashboard/moonlight_orchestrator.py` now defaults to the AMD64 digest-pinned `v3.0.0-prerelease.4` image. The existing `EPICVM_MOONLIGHT_IMAGE` override and explicit digest validation remain intact.
+- Rollback for the retained instance is the captured `/opt/epicvm/moonlight-instances/gaming-gpup-pilot-03/docker-compose.yml` image line and the previous digest `sha256:694ca7e33266a56bf4c8bb29cb916b0927f126578dae4cf0710a881efce6564b`; the server volume and VM/VHDX/GPU state are not part of this change.
+- Next intended action: run the focused Moonlight orchestrator tests, synchronize the tracked source, update only the retained Moonlight image through its existing compose project, verify application-level host/apps and real browser pixels/input, and restore the old image if startup, routing, or stream verification regresses.
+- This narrows the remaining fault below public routing and WebRTC negotiation, at the guest display/capture/encoder output or an equivalent black-frame condition. `console-verify` was intentionally not called because the required visual and input evidence is absent.
