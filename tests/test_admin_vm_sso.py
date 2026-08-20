@@ -93,7 +93,7 @@ def test_forward_auth_preflights_scoped_moonlight_host_request(monkeypatch, tmp_
     )
 
     assert response.status_code == 200
-    assert calls == [("gaming-gpup-pilot-03", "epic-pc", True, 90.0)]
+    assert calls == [("gaming-gpup-pilot-03", "epic-pc", True, 150.0)]
 
 
 def test_remote_console_entry_renders_retry_page_before_moonlight_is_ready(monkeypatch, tmp_path):
@@ -225,8 +225,11 @@ def test_guest_network_recovery_worker_repairs_with_new_verified_address(monkeyp
         {"guest_username": "operator", "guest_password": "transient-password", "reverify": True},
     )
     assert any(item[0] == "repair_staged" and item[2]["guest_ip"] == "100.83.6.72" for item in calls)
-    assert any(item[0] == "console_complete" for item in calls)
-    assert module._CONSOLE_RETRY_TASKS[task_key]["status"] == "ready"
+    assert not any(item[0] == "console_complete" for item in calls)
+    task = module._CONSOLE_RETRY_TASKS[task_key]
+    assert task["status"] == "pending_visual"
+    assert task["routeReady"] is True
+    assert task["visualValidationRequired"] is True
     assert "transient-password" not in repr(module._CONSOLE_RETRY_TASKS)
 
 
@@ -283,7 +286,10 @@ def test_guest_network_recovery_worker_revalidates_streaming_failure(monkeypatch
         {"guest_username": "operator", "guest_password": "transient-password", "reverify": True},
     )
     assert any(item[0] == "repair_staged" and item[2]["guest_ip"] == "100.124.226.19" for item in calls)
-    assert module._CONSOLE_RETRY_TASKS[task_key]["status"] == "ready"
+    task = module._CONSOLE_RETRY_TASKS[task_key]
+    assert task["status"] == "pending_visual"
+    assert task["routeReady"] is True
+    assert task["visualValidationRequired"] is True
 
 
 def test_forward_auth_does_not_preflight_unrelated_vm_requests(monkeypatch, tmp_path):

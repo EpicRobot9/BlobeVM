@@ -52,7 +52,7 @@ function Get-EpicVMProvisioningFailureState {
             'sunshine_state_path_failed','sunshine_state_write_failed','sunshine_state_acl_failed',
             'sunshine_firewall_failed','sunshine_service_restart_failed','sunshine_listener_failed',
             'sunshine_verification_failed','powershell_direct_failed','SunshineConfigurationFailed',
-            'guest_credential_rejected','sunshine_setup_unavailable','console_verification_failed','guest_reverification_failed',
+                        'guest_credential_rejected','sunshine_setup_unavailable','console_verification_failed','console_evidence_incomplete','gaming_capture_configuration_required','guest_reverification_failed',
             'console_failed')) { return 'setup_failed:streaming' }
     if ($safeCode -in @('GpuUnavailable','GpuIdentityUnavailable','GpuIdentityAmbiguous','GpuQuotaUnavailable',
             'GpuAdapterCountInvalid','GpuIdentityMismatch','GpuAdapterVerificationFailed','DriverInjectionFailed',
@@ -79,6 +79,18 @@ function Get-EpicVMProvisioningCompletedStages {
 function Test-EpicVMProvisioningEvidence {
     param([Parameter(Mandatory)][object]$Record,[Parameter(Mandatory)][string]$Stage)
     $completed = @(Get-EpicVMProvisioningCompletedStages -Value (Get-EpicVMProperty -Object $Record -Name 'completedStages' -Default @()))
+    # A historical completed stage is not sufficient for the final console
+    # validation gate. Re-evaluate the explicit evidence fields so an old
+    # route/TCP checkpoint can never resurrect a false Gaming ready state.
+    if ($Stage -eq 'stream_validation') {
+        $frame = [bool](Get-EpicVMProperty -Object $Record -Name 'consoleFrameVerified' -Default $false)
+        $keyboard = [bool](Get-EpicVMProperty -Object $Record -Name 'keyboardInputVerified' -Default $false)
+        $mouse = [bool](Get-EpicVMProperty -Object $Record -Name 'mouseInputVerified' -Default $false)
+        if (-not ($frame -and $keyboard -and $mouse)) { return $false }
+        if ([string](Get-EpicVMProperty -Object $Record -Name 'profile' -Default 'standard') -ieq 'gaming' -and
+            -not [bool](Get-EpicVMProperty -Object $Record -Name 'gamingCaptureConfigured' -Default $false)) { return $false }
+        return [bool](Get-EpicVMProperty -Object $Record -Name 'streamValidationVerified' -Default $false)
+    }
     if ($completed -contains $Stage) { return $true }
     switch ($Stage) {
         'claim' { return [bool](Get-EpicVMProperty -Object $Record -Name 'claimConsumed' -Default (Get-EpicVMProperty -Object $Record -Name 'claimUsed' -Default $false)) }
@@ -93,7 +105,6 @@ function Test-EpicVMProvisioningEvidence {
         }
         'gaming_gpu' { return [bool](Get-EpicVMProperty -Object $Record -Name 'gamingGpuValidated' -Default $false) }
         'streaming_setup' { return -not [string]::IsNullOrWhiteSpace([string](Get-EpicVMProperty -Object $Record -Name 'consoleVerifiedAt' -Default '')) }
-        'stream_validation' { return [bool](Get-EpicVMProperty -Object $Record -Name 'streamValidationVerified' -Default $false) }
         default { return $false }
     }
 }
@@ -136,7 +147,9 @@ function Copy-EpicVMProvisioningJobFields {
     param([Parameter(Mandatory)][object]$Source,[Parameter(Mandatory)][object]$Target)
     foreach ($name in @('id','name','profile','state','createdAt','updatedAt','templateVersion','vmId',
             'tailnetIp','tailnetDeviceId','managementTransport','managementReadyAt',
-            'consoleRoutePrefix','consoleVerifiedAt','streamValidationVerified','quarantineUntil',
+                        'consoleRoutePrefix','consoleVerifiedAt','streamValidationVerified',
+                        'consoleFrameVerified','consoleFrameVerifiedAt','keyboardInputVerified','keyboardInputVerifiedAt',
+                        'mouseInputVerified','mouseInputVerifiedAt','gamingCaptureConfigured','gamingCaptureAt','quarantineUntil',
             'errorCode','errorMessage','claimHash','claimExpires','claimUsed','claimConsumed',
             'operationId','completedStages','failureStage','failureDetailCode','guestSetupVerified','retryCount','lastAttemptCode',
             'cpuCount','memoryBytes','diskSizeBytes','gpuPartitionPercent','gpuDeviceIdentity','gamingGpuValidated','gamingValidationAt')) {
@@ -298,9 +311,11 @@ function ConvertTo-EpicVMRedactedJob {
     foreach ($name in @(
         'id', 'name', 'profile', 'state', 'createdAt', 'updatedAt', 'errorCode',
         'errorMessage', 'templateVersion', 'vmId', 'tailnetIp',
-        'tailnetDeviceId', 'managementTransport', 'managementReadyAt',
-        'consoleRoutePrefix', 'consoleVerifiedAt', 'streamValidationVerified',
-        'quarantineUntil', 'operationId', 'claimConsumed', 'completedStages',
+                'tailnetDeviceId', 'managementTransport', 'managementReadyAt',
+                'consoleRoutePrefix', 'consoleVerifiedAt', 'streamValidationVerified',
+                'consoleFrameVerified', 'consoleFrameVerifiedAt', 'keyboardInputVerified', 'keyboardInputVerifiedAt',
+                'mouseInputVerified', 'mouseInputVerifiedAt', 'gamingCaptureConfigured', 'gamingCaptureAt',
+                'quarantineUntil', 'operationId', 'claimConsumed', 'completedStages',
         'failureStage', 'failureDetailCode', 'guestSetupVerified', 'retryCount', 'lastAttemptCode',
         'cpuCount', 'memoryBytes', 'diskSizeBytes', 'gpuPartitionPercent', 'gpuDeviceIdentity',
         'gamingGpuValidated', 'gamingValidationAt'
@@ -335,6 +350,14 @@ function New-EpicVMProvisioningJobObject {
         consoleRoutePrefix = $null
         consoleVerifiedAt = $null
         streamValidationVerified = $false
+        consoleFrameVerified = $false
+        consoleFrameVerifiedAt = $null
+        keyboardInputVerified = $false
+        keyboardInputVerifiedAt = $null
+        mouseInputVerified = $false
+        mouseInputVerifiedAt = $null
+        gamingCaptureConfigured = $false
+        gamingCaptureAt = $null
         quarantineUntil = $null
         errorCode = $null
         errorMessage = $null
@@ -389,8 +412,10 @@ function New-EpicVMProvisioningStore {
             foreach ($name in @(
                 'createdAt', 'updatedAt', 'templateVersion', 'vmId', 'tailnetIp',
                 'tailnetDeviceId', 'managementTransport', 'managementReadyAt',
-                'consoleRoutePrefix', 'consoleVerifiedAt', 'streamValidationVerified',
-                'quarantineUntil', 'errorCode', 'errorMessage',
+                                'consoleRoutePrefix', 'consoleVerifiedAt', 'streamValidationVerified',
+                                'consoleFrameVerified', 'consoleFrameVerifiedAt', 'keyboardInputVerified', 'keyboardInputVerifiedAt',
+                                'mouseInputVerified', 'mouseInputVerifiedAt', 'gamingCaptureConfigured', 'gamingCaptureAt',
+                                'quarantineUntil', 'errorCode', 'errorMessage',
                 'claimHash', 'claimExpires', 'claimUsed', 'claimConsumed', 'operationId',
                 'completedStages', 'failureStage', 'guestSetupVerified', 'retryCount', 'lastAttemptCode',
                 'cpuCount','memoryBytes','diskSizeBytes','gpuPartitionPercent','gpuDeviceIdentity',
@@ -662,6 +687,10 @@ function Invoke-EpicVMProvisioningRecovery {
             $readyStages -contains 'network_setup' -and $readyStages -contains 'management_handoff' -and
             $readyStages -contains 'streaming_setup' -and $readyStages -contains 'stream_validation' -and
             [bool](Get-EpicVMProperty -Object $job -Name 'streamValidationVerified' -Default $false) -and
+            [bool](Get-EpicVMProperty -Object $job -Name 'consoleFrameVerified' -Default $false) -and
+            [bool](Get-EpicVMProperty -Object $job -Name 'keyboardInputVerified' -Default $false) -and
+            [bool](Get-EpicVMProperty -Object $job -Name 'mouseInputVerified' -Default $false) -and
+            (([string](Get-EpicVMProperty -Object $job -Name 'profile' -Default 'standard') -ine 'gaming') -or [bool](Get-EpicVMProperty -Object $job -Name 'gamingCaptureConfigured' -Default $false)) -and
             -not [string]::IsNullOrWhiteSpace([string](Get-EpicVMProperty -Object $job -Name 'consoleVerifiedAt' -Default '')) -and
             (($readyRoute -ceq $expectedReadyRoute) -or ($readyRoute -cmatch $scopedReadyRoutePattern)) -and
             [string](Get-EpicVMProperty -Object $job -Name 'tailnetIp' -Default '') -match '^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.\d{1,3}\.\d{1,3}$'
@@ -1421,6 +1450,9 @@ function Invoke-EpicVMProvisioningGuestRecovery {
     if($parameterCount -ge 8){
         $args += [bool](@($Job.completedStages) -contains 'management_handoff')
     }
+    if($parameterCount -ge 9){
+        $args += [bool]([string](Get-EpicVMProperty -Object $Job -Name 'profile' -Default 'standard') -ieq 'gaming')
+    }
     return & $Invoker @args
 }
 
@@ -1519,6 +1551,17 @@ function Set-EpicVMProvisioningConsoleCredentials {
             $transport=[string](Get-EpicVMProperty -Object $sunshineResult -Name 'managementTransport' -Default '')
             if(-not [string]::IsNullOrWhiteSpace($transport)){$Job.managementTransport=$transport}
             if([bool](Get-EpicVMProperty -Object $sunshineResult -Name 'managementReady' -Default $false)){$Job.managementReadyAt=[DateTime]::UtcNow.ToString('o')}
+            if([string]$Job.profile -ieq 'gaming') {
+                if(-not [bool](Get-EpicVMProperty -Object $sunshineResult -Name 'gamingCaptureConfigured' -Default $false)) {
+                    throw (New-EpicVMProvisioningError -Code 'gaming_capture_configuration_required' -Message 'The Gaming Sunshine capture target was not verified.' -Status 422 -DetailCode 'GAMING_GPU_ENCODER')
+                }
+                $Job.gamingCaptureConfigured=$true
+                $captureAt=[string](Get-EpicVMProperty -Object $sunshineResult -Name 'gamingCaptureAt' -Default '')
+                $Job.gamingCaptureAt=if([string]::IsNullOrWhiteSpace($captureAt)){[DateTime]::UtcNow.ToString('o')}else{$captureAt}
+            }
+        }
+        elseif([string]$Job.profile -ieq 'gaming') {
+            throw (New-EpicVMProvisioningError -Code 'gaming_capture_configuration_required' -Message 'The Gaming Sunshine capture target was not verified.' -Status 422 -DetailCode 'GAMING_GPU_ENCODER')
         }
         if ($readyReconcile) {
             $Job.state = 'ready'
@@ -1583,7 +1626,7 @@ function Set-EpicVMProvisioningConsoleFailed {
 
 function Complete-EpicVMProvisioningConsole {
     param([Parameter(Mandatory)] [object] $State, [Parameter(Mandatory)] [object] $Job, [Parameter(Mandatory)] [object] $Request)
-    if ($Job.state -notin @('streaming_setup', 'setup_failed:streaming', 'setup_failed:agent_restart')) {
+    if ($Job.state -notin @('streaming_setup', 'setup_failed:streaming', 'setup_failed:agent_restart', 'ready')) {
         throw (New-EpicVMProvisioningError -Code 'console_complete_not_allowed' -Message 'The job is not awaiting console verification.' -Status 409)
     }
     $expectedRoute = '/vm/' + $Job.name + '/'
@@ -1591,8 +1634,17 @@ function Complete-EpicVMProvisioningConsole {
     $scopedRoutePattern = '^/vm/' + [regex]::Escape([string]$Job.name) + '--[a-z0-9][a-z0-9._-]{0,62}/$'
     $routeAllowed = ($route -ceq $expectedRoute) -or ($route -cmatch $scopedRoutePattern)
     $serverVerified = [bool](Get-EpicVMProperty -Object $Request -Name 'guestTcpVerified' -Default $false)
+    $frameVerified = [bool](Get-EpicVMProperty -Object $Request -Name 'videoFrameVerified' -Default (Get-EpicVMProperty -Object $Request -Name 'frameVerified' -Default $false))
+    $keyboardVerified = [bool](Get-EpicVMProperty -Object $Request -Name 'keyboardInputVerified' -Default $false)
+    $mouseVerified = [bool](Get-EpicVMProperty -Object $Request -Name 'mouseInputVerified' -Default $false)
     if (-not $routeAllowed -or -not $serverVerified) {
         throw (New-EpicVMProvisioningError -Code 'console_verification_failed' -Message 'The kvm2 console evidence is incomplete.' -Status 422)
+    }
+    if (-not ($frameVerified -and $keyboardVerified -and $mouseVerified)) {
+        throw (New-EpicVMProvisioningError -Code 'console_evidence_incomplete' -Message 'Rendered video, keyboard, and mouse evidence are required before readiness.' -Status 422)
+    }
+    if ([string]$Job.profile -ieq 'gaming' -and -not [bool](Get-EpicVMProperty -Object $Job -Name 'gamingCaptureConfigured' -Default $false)) {
+        throw (New-EpicVMProvisioningError -Code 'gaming_capture_configuration_required' -Message 'The Gaming Sunshine capture target was not verified.' -Status 422 -DetailCode 'GAMING_GPU_ENCODER')
     }
     $Job.state = 'streaming_setup'
     $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
@@ -1607,8 +1659,15 @@ function Complete-EpicVMProvisioningConsole {
         Save-EpicVMProvisioningStore -Store $State.Provisioning
         throw (New-EpicVMProvisioningError -Code 'guest_reverification_failed' -Message 'Guest verification failed.' -Status 422)
     }
+    $now = [DateTime]::UtcNow.ToString('o')
     $Job.consoleRoutePrefix = $route
-    $Job.consoleVerifiedAt = [DateTime]::UtcNow.ToString('o')
+    $Job.consoleVerifiedAt = $now
+    $Job.consoleFrameVerified = $true
+    $Job.consoleFrameVerifiedAt = $now
+    $Job.keyboardInputVerified = $true
+    $Job.keyboardInputVerifiedAt = $now
+    $Job.mouseInputVerified = $true
+    $Job.mouseInputVerifiedAt = $now
     $Job.streamValidationVerified = $true
     $Job.completedStages = @(Get-EpicVMProvisioningCompletedStages -Value (@($Job.completedStages) + @('streaming_setup','stream_validation')))
     $Job.state = 'ready'
@@ -1617,7 +1676,7 @@ function Complete-EpicVMProvisioningConsole {
     $Job.lastAttemptCode = $null
     $Job.errorCode = $null
     $Job.errorMessage = $null
-    $Job.updatedAt = [DateTime]::UtcNow.ToString('o')
+    $Job.updatedAt = $now
     Save-EpicVMProvisioningStore -Store $State.Provisioning
 }
 

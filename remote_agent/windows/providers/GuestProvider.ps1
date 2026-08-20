@@ -1336,7 +1336,8 @@ function Invoke-EpicVMSunshineConfiguration {
         [Parameter(Mandatory)][string]$SunshinePassword,
         [AllowNull()][string]$GuestAddress='',
         [AllowNull()][scriptblock]$ManagementCheckpoint=$null,
-        [bool]$ManagementHandoffAlreadyVerified=$false
+        [bool]$ManagementHandoffAlreadyVerified=$false,
+        [bool]$IsGaming=$false
     )
     if($GuestUsername -notmatch '^[A-Za-z][A-Za-z0-9._-]{2,31}$' -or [string]::IsNullOrEmpty($GuestPassword) -or [string]::IsNullOrEmpty($SunshineUsername) -or [string]::IsNullOrEmpty($SunshinePassword)){
         throw (New-EpicVMHyperVError -Code 'InvalidInput' -Message 'Guest and Sunshine credentials are required.')
@@ -1506,7 +1507,19 @@ function Invoke-EpicVMSunshineConfiguration {
         if(-not [bool](Get-EpicVMHyperVValue -Object $readiness -Name 'ok' -Default $false)){
             throw 'EPICVM_SUNSHINE_LISTENER_FAILED'
         }
-        return [ordered]@{ok=$true;managementTransport='tailscale_winrm';managementReady=$true;managementPort=$managementPort;managementUseSsl=$managementUseSsl;serviceRunning=[bool](Get-EpicVMHyperVValue -Object $result -Name 'serviceRunning' -Default $false);listener=$true;credentialsConfigured=$true;firewallScoped=[bool](Get-EpicVMHyperVValue -Object $result -Name 'firewallScoped' -Default $false)}
+        $gamingCaptureConfigured=$false
+        $gamingCaptureAt=$null
+        if($IsGaming){
+            $gamingValidation=Invoke-EpicVMHyperVGamingGuestValidation -Provider $Provider -Name $VmName -GuestUsername $GuestUsername -GuestPassword $GuestPassword -GuestAddress $GuestAddress
+            $gamingPayload=Get-EpicVMHyperVValue -Object $gamingValidation -Name 'validation' -Default $gamingValidation
+            $renderFrameOk=[bool](Get-EpicVMHyperVValue -Object $gamingPayload -Name 'renderFrameOk' -Default $false)
+            $encoderOk=[bool](Get-EpicVMHyperVValue -Object $gamingPayload -Name 'sunshineEncoderOk' -Default $false)
+            if(-not $renderFrameOk){ throw (New-EpicVMHyperVError -Code 'sunshine_verification_failed' -Message 'The Gaming capture target did not produce a usable GPU frame.' -DetailCode 'GAMING_GPU_FRAME') }
+            if(-not $encoderOk){ throw (New-EpicVMHyperVError -Code 'sunshine_verification_failed' -Message 'The Gaming capture target did not verify AMD hardware encoding.' -DetailCode 'GAMING_GPU_ENCODER') }
+            $gamingCaptureConfigured=$true
+            $gamingCaptureAt=[DateTime]::UtcNow.ToString('o')
+        }
+        return [ordered]@{ok=$true;managementTransport='tailscale_winrm';managementReady=$true;managementPort=$managementPort;managementUseSsl=$managementUseSsl;serviceRunning=[bool](Get-EpicVMHyperVValue -Object $result -Name 'serviceRunning' -Default $false);listener=$true;credentialsConfigured=$true;firewallScoped=[bool](Get-EpicVMHyperVValue -Object $result -Name 'firewallScoped' -Default $false);gamingCaptureConfigured=$gamingCaptureConfigured;gamingCaptureAt=$gamingCaptureAt}
     }catch{
         # Remoting can wrap a guest throw in a generic ErrorRecord. Scan only
         # the bounded, allowlisted marker text; never return or log the raw

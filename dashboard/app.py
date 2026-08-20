@@ -208,6 +208,10 @@ def _safe_provisioning_job(job: object) -> dict:
         'cpuCount', 'memoryBytes', 'diskSizeBytes', 'gpuPartitionPercent',
         'gpuDeviceIdentity', 'gamingGpuValidated', 'gamingValidationAt',
         'gamingCaptureConfigured', 'gamingCaptureAt',
+        'consoleFrameVerified', 'consoleFrameVerifiedAt',
+        'keyboardInputVerified', 'keyboardInputVerifiedAt',
+        'mouseInputVerified', 'mouseInputVerifiedAt',
+        'consoleVisualValidationPending',
     )
     return {key: job[key] for key in allowed if key in job and job[key] is not None}
 
@@ -398,16 +402,24 @@ def _prune_console_retry_tasks(now=None):
         stale = [
             key for key, task in _CONSOLE_RETRY_TASKS.items()
             if isinstance(task, dict)
-            and task.get('status') in ('ready', 'failed')
+            and task.get('status') in ('pending_visual', 'ready', 'failed')
+            and task.get('status') != 'pending'
             and now - float(task.get('finishedAt') or task.get('startedAt') or now) > _CONSOLE_RETRY_TASK_TTL_SECONDS
         ]
         for key in stale:
             _CONSOLE_RETRY_TASKS.pop(key, None)
 
 
-def _set_console_retry_result(key, *, status, operation_id, failure_code=''):
-    """Publish only safe terminal metadata for an async retry."""
+def _set_console_retry_result(key, *, status, operation_id, failure_code='', route_prefix=''):
+    """Publish only safe terminal metadata for an async retry.
+
+    ``pending_visual`` is intentionally distinct from ``ready``: pairing and
+    route setup do not prove that the browser received video or that input
+    reached the guest.  The authenticated console-verify endpoint performs the
+    final agent transition after those browser checks.
+    """
     finished = time.time()
+    normalized_status = status if status in ('pending_visual', 'ready', 'failed') else 'failed'
     with _CONSOLE_RETRY_LOCK:
         current = _CONSOLE_RETRY_TASKS.get(key) or {}
         # Keep the original operation id even if a malformed caller somehow
@@ -415,15 +427,19 @@ def _set_console_retry_result(key, *, status, operation_id, failure_code=''):
         original_operation = str(current.get('operationId') or operation_id)
         current.update({
             'operationId': original_operation,
-            'status': 'ready' if status == 'ready' else 'failed',
+            'status': normalized_status,
             'finishedAt': finished,
         })
-        if status == 'ready':
+        if normalized_status in ('pending_visual', 'ready'):
             current['failureCode'] = ''
             current['routeReady'] = True
+            if route_prefix:
+                current['routePrefix'] = str(route_prefix)
+            current['visualValidationRequired'] = normalized_status == 'pending_visual'
         else:
             current['failureCode'] = _safe_console_retry_code(failure_code)
             current['routeReady'] = False
+            current['visualValidationRequired'] = False
         _CONSOLE_RETRY_TASKS[key] = current
     return current
 
@@ -475,13 +491,14 @@ def _start_remote_moonlight_console_retry(*, host, host_id, job_id, name, guest_
             sunshine_username=sunshine_username,
             sunshine_password=sunshine_password,
         )
-        host.console_complete(
-            job_id,
-            route_prefix=str(started.get('routePrefix') or _remote_console_route_name(name, host_id)),
-            guest_tcp_verified=bool(started.get('guestTcpVerified')),
+        route_prefix = f'/vm/{route_name}/'
+        _set_console_retry_result(
+            key,
+            status='pending_visual',
+            operation_id=operation_id,
+            route_prefix=route_prefix,
         )
-        _set_console_retry_result(key, status='ready', operation_id=operation_id)
-        app.logger.info('EpicVM console retry completed operation=%s status=ready', operation_id)
+        app.logger.info('EpicVM console retry staged operation=%s status=pending_visual route=%s', operation_id, route_prefix)
     except ConsoleOrchestrationError as exc:
         failure_code = _safe_console_retry_code(getattr(exc, 'code', 'console_failed'))
         _set_console_retry_result(key, status='failed', operation_id=operation_id, failure_code=failure_code)
@@ -663,14 +680,14 @@ def _start_remote_moonlight_console_repair(*, host, host_id, job_id, name, guest
                 status=502,
                 code='console_verification_failed',
             )
-        if current_state != 'ready':
-            host.console_complete(
-                job_id,
-                route_prefix=str(started.get('routePrefix') or _remote_console_route_name(name, host_id)),
-                guest_tcp_verified=bool(started.get('guestTcpVerified')),
-            )
-        _set_console_retry_result(key, status='ready', operation_id=operation_id)
-        app.logger.info('EpicVM console repair completed operation=%s status=ready', operation_id)
+        route_prefix = f'/vm/{route_name}/'
+        _set_console_retry_result(
+            key,
+            status='pending_visual',
+            operation_id=operation_id,
+            route_prefix=route_prefix,
+        )
+        app.logger.info('EpicVM console repair staged operation=%s status=pending_visual route=%s', operation_id, route_prefix)
     except ConsoleOrchestrationError as exc:
         failure_code = _safe_console_retry_code(getattr(exc, 'code', 'console_failed'))
         _set_console_retry_result(key, status='failed', operation_id=operation_id, failure_code=failure_code)
@@ -758,14 +775,14 @@ def _start_remote_guest_network_recovery(*, host, host_id, job_id, name,
                 status=502,
                 code='console_verification_failed',
             )
-        if credential_state != 'ready':
-            host.console_complete(
-                job_id,
-                route_prefix=str(started.get('routePrefix') or _remote_console_route_name(name, host_id)),
-                guest_tcp_verified=bool(started.get('guestTcpVerified')),
-            )
-        _set_console_retry_result(key, status='ready', operation_id=operation_id)
-        app.logger.info('EpicVM guest network recovery completed operation=%s status=ready', operation_id)
+        route_prefix = f'/vm/{route_name}/'
+        _set_console_retry_result(
+            key,
+            status='pending_visual',
+            operation_id=operation_id,
+            route_prefix=route_prefix,
+        )
+        app.logger.info('EpicVM guest network recovery staged operation=%s status=pending_visual route=%s', operation_id, route_prefix)
     except ConsoleOrchestrationError as exc:
         failure_code = _safe_console_retry_code(getattr(exc, 'code', 'network_recovery_failed'))
         _set_console_retry_result(key, status='failed', operation_id=operation_id, failure_code=failure_code)
@@ -5795,6 +5812,14 @@ def api_provisioning_job_status(job_id):
                         'consoleRepairOutcome': 'ready',
                         'consoleOperationId': pending['operationId'],
                     })
+                elif task_status == 'pending_visual':
+                    status['job'].update({
+                        'consoleRepairPending': False,
+                        'consoleRepairOutcome': 'pending_visual',
+                        'consoleVisualValidationPending': True,
+                        'consoleRoutePrefix': str(pending.get('routePrefix') or status['job'].get('consoleRoutePrefix') or ''),
+                        'consoleOperationId': pending['operationId'],
+                    })
             elif pending.get('autonomous'):
                 status['job'].update({
                     'autonomousPending': task_status == 'pending',
@@ -5808,6 +5833,12 @@ def api_provisioning_job_status(job_id):
                     })
                 elif task_status == 'ready':
                     status['job']['autonomousOutcome'] = 'ready'
+                elif task_status == 'pending_visual':
+                    status['job'].update({
+                        'autonomousOutcome': 'pending_visual',
+                        'consoleVisualValidationPending': True,
+                        'consoleRoutePrefix': str(pending.get('routePrefix') or status['job'].get('consoleRoutePrefix') or ''),
+                    })
             elif task_status == 'pending':
                 # The agent may still show setup_failed:streaming until its
                 # credential-bearing request completes. Overlay only safe,
@@ -5834,6 +5865,14 @@ def api_provisioning_job_status(job_id):
                 status['job'].update({
                     'consoleRetryPending': False,
                     'consoleRetryOutcome': 'ready',
+                    'consoleOperationId': pending['operationId'],
+                })
+            elif task_status == 'pending_visual':
+                status['job'].update({
+                    'consoleRetryPending': False,
+                    'consoleRetryOutcome': 'pending_visual',
+                    'consoleVisualValidationPending': True,
+                    'consoleRoutePrefix': str(pending.get('routePrefix') or status['job'].get('consoleRoutePrefix') or ''),
                     'consoleOperationId': pending['operationId'],
                 })
         response = jsonify({'ok': True, 'host_id': host_id, **status})
@@ -5907,12 +5946,23 @@ def api_provisioning_job_claim(job_id):
         started = orchestrator.start_staged(name)
         if _moonlight_console(orchestrator):
             started = orchestrator.pair_staged(name, sunshine_username=sunshine_username, sunshine_password=sunshine_password)
-        result = host.console_complete(
-            job_id,
-            route_prefix=str(started.get('routePrefix') or plan.route_prefix),
-            guest_tcp_verified=bool(started.get('guestTcpVerified')),
-        )
-        response = jsonify({'ok': True, 'host_id': host_id, **result})
+        route_prefix = str(plan.route_prefix)
+        guest_tcp_verified = bool(started.get('guestTcpVerified'))
+        status_result = host.provisioning_status(job_id) if hasattr(host, 'provisioning_status') else {}
+        pending_job = status_result.get('job') if isinstance(status_result, dict) else None
+        safe_job = _safe_provisioning_job(pending_job if isinstance(pending_job, dict) else job)
+        safe_job.update({
+            'consoleRoutePrefix': route_prefix,
+            'consoleVisualValidationPending': True,
+        })
+        response = jsonify({
+            'ok': True,
+            'host_id': host_id,
+            'pendingVisualValidation': True,
+            'consoleRoutePrefix': route_prefix,
+            'guestTcpVerified': guest_tcp_verified,
+            'job': safe_job,
+        })
         response.headers['Cache-Control'] = 'no-store'
         response.headers['Pragma'] = 'no-cache'
         return response
@@ -5947,6 +5997,79 @@ def api_provisioning_job_claim(job_id):
         # Drop local references after the transport call. The request body is
         # never logged or returned, and the agent owns the one-time verifier.
         username = password = claim_token = sunshine_username = sunshine_password = ''
+
+
+@app.post('/dashboard/api/provisioning-jobs/<job_id>/console-verify')
+@auth_required
+def api_provisioning_job_console_verify(job_id):
+    """Persist readiness only after browser-KVM visual and input evidence."""
+    if not _request_is_https():
+        response = jsonify({'ok': False, 'error': 'Console verification requires HTTPS'})
+        response.headers['Cache-Control'] = 'no-store'
+        return response, 426
+    payload = request.get_json(silent=True) if request.is_json else request.form.to_dict(flat=True)
+    payload = payload if isinstance(payload, dict) else {}
+    host_id = str(payload.get('host_id') or '').strip()
+    route_prefix = str(payload.get('routePrefix') or payload.get('route_prefix') or '').strip()
+    evidence_source = str(payload.get('evidenceSource') or '').strip().lower()
+    if not host_id or not route_prefix:
+        return jsonify({'ok': False, 'error': 'host_id and routePrefix are required'}), 400
+    if evidence_source != 'browser_kvm':
+        return jsonify({'ok': False, 'error': 'browser_kvm evidence is required'}), 422
+    evidence_fields = ('videoFrameVerified', 'keyboardInputVerified', 'mouseInputVerified')
+    if any(payload.get(field) is not True for field in evidence_fields):
+        return jsonify({'ok': False, 'error': 'Rendered video, keyboard, and mouse evidence are required'}), 422
+    if payload.get('guestTcpVerified') is not True:
+        return jsonify({'ok': False, 'error': 'Guest transport evidence is required'}), 422
+    try:
+        host = _vm_host(host_id)
+        if not hasattr(host, 'console_complete') or not hasattr(host, 'provisioning_status'):
+            return jsonify({'ok': False, 'error': 'Console verification is unavailable on this host'}), 409
+        current = host.provisioning_status(job_id)
+        current_job = current.get('job') if isinstance(current, dict) else None
+        if not isinstance(current_job, dict):
+            return jsonify({'ok': False, 'error': 'Provisioning job was not found'}), 404
+        result = host.console_complete(
+            job_id,
+            route_prefix=route_prefix,
+            guest_tcp_verified=True,
+            video_frame_verified=True,
+            keyboard_input_verified=True,
+            mouse_input_verified=True,
+        )
+        task_key = (host_id, str(job_id))
+        with _CONSOLE_RETRY_LOCK:
+            pending = _CONSOLE_RETRY_TASKS.get(task_key)
+        if isinstance(pending, dict):
+            _set_console_retry_result(
+                task_key,
+                status='ready',
+                operation_id=str(pending.get('operationId') or ''),
+                route_prefix=route_prefix,
+            )
+        result_job = result.get('job') if isinstance(result, dict) else None
+        safe_job = _safe_provisioning_job(result_job if isinstance(result_job, dict) else current_job)
+        safe_job['consoleVisualValidationPending'] = False
+        response = jsonify({
+            'ok': True,
+            'host_id': host_id,
+            'visualValidationComplete': True,
+            'consoleRoutePrefix': route_prefix,
+            'job': safe_job,
+        })
+        response.headers['Cache-Control'] = 'no-store'
+        response.headers['Pragma'] = 'no-cache'
+        return response
+    except ConsoleOrchestrationError as exc:
+        response = jsonify({'ok': False, 'error': {'code': str(getattr(exc, 'code', 'console_verification_failed')), 'message': str(exc)}})
+        response.headers['Cache-Control'] = 'no-store'
+        return response, int(getattr(exc, 'status', 422) or 422)
+    except VmHostUnavailable as exc:
+        return _vm_host_error_response(exc)
+    except Exception:
+        response = jsonify({'ok': False, 'error': 'Unable to persist browser-KVM console evidence'})
+        response.headers['Cache-Control'] = 'no-store'
+        return response, 502
 
 
 @app.post('/dashboard/api/provisioning-jobs/<job_id>/retry-console')
@@ -6061,8 +6184,24 @@ def api_provisioning_job_retry_console(job_id):
         started = orchestrator.start_staged(name)
         if _moonlight_console(orchestrator):
             started = orchestrator.pair_staged(name, sunshine_username=sunshine_username, sunshine_password=sunshine_password)
-        result = host.console_complete(job_id, route_prefix=plan.route_prefix, guest_tcp_verified=bool(started.get('guestTcpVerified')))
-        response = jsonify({'ok': True, 'host_id': host_id, **result})
+        route_prefix = str(plan.route_prefix)
+        guest_tcp_verified = bool(started.get('guestTcpVerified'))
+        status_result = host.provisioning_status(job_id) if hasattr(host, 'provisioning_status') else {}
+        pending_job = status_result.get('job') if isinstance(status_result, dict) else None
+        safe_job = _safe_provisioning_job(pending_job if isinstance(pending_job, dict) else job)
+        safe_job.update({
+            'state': 'streaming_setup',
+            'consoleRoutePrefix': route_prefix,
+            'consoleVisualValidationPending': True,
+        })
+        response = jsonify({
+            'ok': True,
+            'host_id': host_id,
+            'pendingVisualValidation': True,
+            'consoleRoutePrefix': route_prefix,
+            'guestTcpVerified': guest_tcp_verified,
+            'job': safe_job,
+        })
         response.headers['Cache-Control'] = 'no-store'
         return response
     except ConsoleOrchestrationError as exc:

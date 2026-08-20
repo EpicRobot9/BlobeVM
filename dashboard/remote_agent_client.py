@@ -327,10 +327,30 @@ class RemoteAgentClient:
         result = self._request("POST", f"/v1/provisioning-jobs/{safe_id}/claim", payload, timeout=self.operation_timeout)
         return result if isinstance(result, dict) else {"ok": True, "job": result}
 
-    def console_complete(self, job_id: str, *, route_prefix: str, guest_tcp_verified: bool) -> dict[str, Any]:
+    def console_complete(
+        self,
+        job_id: str,
+        *,
+        route_prefix: str,
+        guest_tcp_verified: bool,
+        video_frame_verified: bool = False,
+        keyboard_input_verified: bool = False,
+        mouse_input_verified: bool = False,
+    ) -> dict[str, Any]:
         safe_id = quote(str(job_id), safe="")
-        payload = {"routePrefix": str(route_prefix), "guestTcpVerified": bool(guest_tcp_verified)}
-        result = self._request("POST", f"/v1/provisioning-jobs/{safe_id}/console-complete", payload, timeout=self.console_transition_timeout)
+        payload = {
+            "routePrefix": str(route_prefix),
+            "guestTcpVerified": bool(guest_tcp_verified),
+            "videoFrameVerified": bool(video_frame_verified),
+            "keyboardInputVerified": bool(keyboard_input_verified),
+            "mouseInputVerified": bool(mouse_input_verified),
+        }
+        result = self._request(
+            "POST",
+            f"/v1/provisioning-jobs/{safe_id}/console-complete",
+            payload,
+            timeout=self.console_transition_timeout,
+        )
         return result if isinstance(result, dict) else {"ok": True, "job": result}
 
     def console_credentials(
@@ -488,9 +508,25 @@ class RemoteAgentHost:
             # transport text from this credential-bearing request.
             raise self._host_error(exc) from exc
 
-    def console_complete(self, job_id: str, *, route_prefix: str, guest_tcp_verified: bool) -> dict[str, Any]:
+    def console_complete(
+        self,
+        job_id: str,
+        *,
+        route_prefix: str,
+        guest_tcp_verified: bool,
+        video_frame_verified: bool = False,
+        keyboard_input_verified: bool = False,
+        mouse_input_verified: bool = False,
+    ) -> dict[str, Any]:
         try:
-            return self.client.console_complete(job_id, route_prefix=route_prefix, guest_tcp_verified=guest_tcp_verified)
+            return self.client.console_complete(
+                job_id,
+                route_prefix=route_prefix,
+                guest_tcp_verified=guest_tcp_verified,
+                video_frame_verified=video_frame_verified,
+                keyboard_input_verified=keyboard_input_verified,
+                mouse_input_verified=mouse_input_verified,
+            )
         except RemoteAgentError as exc:
             raise self._host_error(exc) from exc
 

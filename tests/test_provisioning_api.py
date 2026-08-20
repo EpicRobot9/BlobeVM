@@ -73,7 +73,14 @@ class FakeRemoteHost:
         }
         return {"ok": True}
 
-    def console_complete(self, job_id, route_prefix, guest_tcp_verified):
+    def console_complete(self, job_id, route_prefix, guest_tcp_verified, **kwargs):
+        self.console_complete_calls = getattr(self, "console_complete_calls", [])
+        self.console_complete_calls.append({
+            "job_id": job_id,
+            "route_prefix": route_prefix,
+            "guest_tcp_verified": guest_tcp_verified,
+            **kwargs,
+        })
         return {"job": {"id": job_id, "name": "alpha", "state": "ready", "consoleRoutePrefix": route_prefix}}
 
     def console_failed(self, job_id, code="console_failed"):
@@ -269,7 +276,10 @@ def test_console_retry_requires_failed_state_and_reentered_credentials(monkeypat
         headers={"Origin": "http://localhost", "X-Forwarded-Proto": "https", "X-CSRF-Token": csrf},
     )
     assert response.status_code == 200
-    assert response.get_json()["job"]["state"] == "ready"
+    body = response.get_json()
+    assert body["pendingVisualValidation"] is True
+    assert body["job"]["state"] == "streaming_setup"
+    assert body["job"]["consoleVisualValidationPending"] is True
     assert "transient-password" not in response.get_data(as_text=True)
 
 
@@ -390,10 +400,12 @@ def test_ready_console_repair_is_async_read_only_and_does_not_expose_password(mo
     deadline = time.time() + 2
     while time.time() < deadline:
         task = module._CONSOLE_RETRY_TASKS.get(("epic-pc", "job-1"))
-        if task and task.get("status") == "ready":
+        if task and task.get("status") == "pending_visual":
             break
         time.sleep(0.01)
-    assert task["status"] == "ready"
+    assert task["status"] == "pending_visual"
+    assert task["routeReady"] is True
+    assert task["visualValidationRequired"] is True
     assert task["kind"] == "repair"
     assert host.failed_codes == []
 
@@ -401,7 +413,8 @@ def test_ready_console_repair_is_async_read_only_and_does_not_expose_password(mo
     assert status.status_code == 200
     status_job = status.get_json()["job"]
     assert status_job["state"] == "ready"
-    assert status_job["consoleRepairOutcome"] == "ready"
+    assert status_job["consoleRepairOutcome"] == "pending_visual"
+    assert status_job["consoleVisualValidationPending"] is True
 
 
 def test_remote_console_worker_rechecks_ready_state_before_credentials(monkeypatch, tmp_path):
@@ -453,7 +466,6 @@ def test_remote_moonlight_retry_returns_pending_and_deduplicates(monkeypatch, tm
     module._default_sunshine_credentials = lambda: ('sun-user', 'sun-password')
     started = threading.Event()
     release = threading.Event()
-    finished = threading.Event()
 
     class PendingHost(FakeRemoteHost):
         def provisioning_status(self, job_id):
@@ -462,10 +474,6 @@ def test_remote_moonlight_retry_returns_pending_and_deduplicates(monkeypatch, tm
         def console_credentials(self, *args, **kwargs):
             started.set()
             release.wait(2)
-
-        def console_complete(self, *args, **kwargs):
-            finished.set()
-            return super().console_complete(*args, **kwargs)
 
     class MoonlightConsole:
         backend = "moonlight"
@@ -517,13 +525,13 @@ def test_remote_moonlight_retry_returns_pending_and_deduplicates(monkeypatch, tm
     assert duplicate.get_json()["error"]["code"] == "console_retry_in_progress"
 
     release.set()
-    assert finished.wait(2)
     deadline = time.time() + 2
     while time.time() < deadline and module._CONSOLE_RETRY_TASKS.get(('epic-pc', 'job-1'), {}).get('status') == 'pending':
         time.sleep(0.01)
     task = module._CONSOLE_RETRY_TASKS[('epic-pc', 'job-1')]
-    assert task['status'] == 'ready'
+    assert task['status'] == 'pending_visual'
     assert task['routeReady'] is True
+    assert task['visualValidationRequired'] is True
     assert task['failureCode'] == ''
 
 
@@ -678,7 +686,10 @@ def test_claim_uses_protected_default_sunshine_credentials(monkeypatch, tmp_path
         headers={'Origin': 'http://localhost', 'X-Forwarded-Proto': 'https', 'X-CSRF-Token': csrf},
     )
     assert response.status_code == 200
-    assert response.get_json()['job']['state'] == 'ready'
+    body = response.get_json()
+    assert body['pendingVisualValidation'] is True
+    assert body['consoleRoutePrefix'] == '/vm/alpha--epic-pc/'
+    assert body['job']['consoleVisualValidationPending'] is True
     assert host.last_console_credentials == {
         'job_id': 'job-1',
         'guest_username': 'chosen-user',
@@ -688,6 +699,66 @@ def test_claim_uses_protected_default_sunshine_credentials(monkeypatch, tmp_path
     }
     assert 'chosen-password' not in response.get_data(as_text=True)
     assert 'sun-default-password' not in response.get_data(as_text=True)
+
+
+def test_console_verify_requires_browser_visual_and_input_evidence(monkeypatch, tmp_path):
+    module = load_app(monkeypatch, tmp_path)
+    attach_host(module)
+    host = module.VM_HOST_REGISTRY.get('epic-pc')
+    host.console_complete_calls = []
+
+    def streaming_status(job_id):
+        return {
+            'job': {
+                'id': job_id,
+                'name': 'alpha',
+                'profile': 'standard',
+                'state': 'streaming_setup',
+                'tailnetIp': '100.111.82.1',
+            }
+        }
+
+    host.provisioning_status = streaming_status
+    module.VM_HOST_REGISTRY.get = lambda host_id='local': host
+    client = authenticated_client(module)
+    csrf = client.get('/dashboard/api/auth/csrf').get_json()['csrfToken']
+    headers = {
+        'Origin': 'http://localhost',
+        'X-Forwarded-Proto': 'https',
+        'X-CSRF-Token': csrf,
+    }
+    base = {
+        'host_id': 'epic-pc',
+        'routePrefix': '/vm/alpha--epic-pc/',
+        'guestTcpVerified': True,
+        'evidenceSource': 'browser_kvm',
+    }
+
+    incomplete = client.post(
+        '/dashboard/api/provisioning-jobs/job-1/console-verify',
+        json=base,
+        headers=headers,
+    )
+    assert incomplete.status_code == 422
+    assert host.console_complete_calls == []
+
+    complete = client.post(
+        '/dashboard/api/provisioning-jobs/job-1/console-verify',
+        json={
+            **base,
+            'videoFrameVerified': True,
+            'keyboardInputVerified': True,
+            'mouseInputVerified': True,
+        },
+        headers=headers,
+    )
+    assert complete.status_code == 200
+    body = complete.get_json()
+    assert body['visualValidationComplete'] is True
+    assert body['job']['consoleVisualValidationPending'] is False
+    assert host.console_complete_calls[-1]['video_frame_verified'] is True
+    assert host.console_complete_calls[-1]['keyboard_input_verified'] is True
+    assert host.console_complete_calls[-1]['mouse_input_verified'] is True
 
 
 def test_automatic_mode_claims_with_protected_defaults_and_returns_no_claim_secret(monkeypatch, tmp_path):
@@ -778,10 +849,12 @@ def test_automatic_mode_claims_with_protected_defaults_and_returns_no_claim_secr
     deadline = time.time() + 2
     while time.time() < deadline:
         task = module._CONSOLE_RETRY_TASKS.get(('epic-pc', 'job-auto'))
-        if task and task.get('status') == 'ready':
+        if task and task.get('status') == 'pending_visual':
             break
         time.sleep(0.01)
-    assert task['status'] == 'ready'
+    assert task['status'] == 'pending_visual'
+    assert task['routeReady'] is True
+    assert task['visualValidationRequired'] is True
     assert host.last_console_credentials == {
         'job_id': 'job-auto',
         'guest_username': 'default-user',

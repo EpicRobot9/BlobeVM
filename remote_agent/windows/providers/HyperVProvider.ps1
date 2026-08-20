@@ -71,7 +71,7 @@ function New-EpicVMHyperVError {
         'SUNSHINE_LISTENER_VERIFY',
         'GAMING_GPU_DEVICE_MISSING', 'GAMING_GPU_DEVICE_ERROR',
         'GAMING_GPU_DRIVER_INJECTION', 'GAMING_GPU_DXDIAG',
-        'GAMING_GPU_WEBGL', 'GAMING_GPU_ENCODER'
+        'GAMING_GPU_WEBGL', 'GAMING_GPU_FRAME', 'GAMING_GPU_ENCODER'
     )
     if ($DetailCode -and $allowedDetails -contains $DetailCode) {
         $exception | Add-Member -MemberType NoteProperty -Name FailureDetailCode -Value $DetailCode -Force
@@ -1084,13 +1084,13 @@ function New-EpicVMHyperVProvider {
     $provider.TestBootstrapGuest = ({ param($Name,$TimeoutSeconds,$PollMilliseconds)
             return Wait-EpicVMGuestBootstrapReady -Provider $provider -Config $provider.Config -VmName $Name -TimeoutSeconds ([int]$TimeoutSeconds) -PollMilliseconds ([int]$PollMilliseconds)
         }.GetNewClosure())
-    $provider.ConfigureSunshine = ({ param($Name,$GuestUsername,$GuestPassword,$SunshineUsername,$SunshinePassword,$GuestAddress,$ManagementCheckpoint,$ManagementHandoffAlreadyVerified)
+    $provider.ConfigureSunshine = ({ param($Name,$GuestUsername,$GuestPassword,$SunshineUsername,$SunshinePassword,$GuestAddress,$ManagementCheckpoint,$ManagementHandoffAlreadyVerified,$IsGaming)
              if($null -ne $ManagementCheckpoint){
                 # The checkpoint callback is invoked only after the verified
                 # WinRM probe and before the credential-bearing Sunshine write.
-                $result = Invoke-EpicVMSunshineConfiguration -Provider $provider -Config $provider.Config -VmName $Name -GuestUsername $GuestUsername -GuestPassword $GuestPassword -SunshineUsername $SunshineUsername -SunshinePassword $SunshinePassword -GuestAddress $GuestAddress -ManagementCheckpoint $ManagementCheckpoint -ManagementHandoffAlreadyVerified ([bool]$ManagementHandoffAlreadyVerified)
+                $result = Invoke-EpicVMSunshineConfiguration -Provider $provider -Config $provider.Config -VmName $Name -GuestUsername $GuestUsername -GuestPassword $GuestPassword -SunshineUsername $SunshineUsername -SunshinePassword $SunshinePassword -GuestAddress $GuestAddress -ManagementCheckpoint $ManagementCheckpoint -ManagementHandoffAlreadyVerified ([bool]$ManagementHandoffAlreadyVerified) -IsGaming ([bool]$IsGaming)
             } else {
-                $result = Invoke-EpicVMSunshineConfiguration -Provider $provider -Config $provider.Config -VmName $Name -GuestUsername $GuestUsername -GuestPassword $GuestPassword -SunshineUsername $SunshineUsername -SunshinePassword $SunshinePassword -GuestAddress $GuestAddress -ManagementHandoffAlreadyVerified ([bool]$ManagementHandoffAlreadyVerified)
+                $result = Invoke-EpicVMSunshineConfiguration -Provider $provider -Config $provider.Config -VmName $Name -GuestUsername $GuestUsername -GuestPassword $GuestPassword -SunshineUsername $SunshineUsername -SunshinePassword $SunshinePassword -GuestAddress $GuestAddress -ManagementHandoffAlreadyVerified ([bool]$ManagementHandoffAlreadyVerified) -IsGaming ([bool]$IsGaming)
             }
             return $result
         }.GetNewClosure())
