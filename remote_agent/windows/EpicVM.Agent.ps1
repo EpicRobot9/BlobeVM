@@ -322,20 +322,67 @@ function Add-EpicVMProvisioningInventoryState {
     return $Vms
 }
 
+function Invalidate-EpicVMGamingConsoleEvidence {
+    param(
+        [Parameter(Mandatory)] [object] $State,
+        [Parameter(Mandatory)] [string] $Name,
+        [Parameter(Mandatory)] [string] $Action
+    )
+    if ($null -eq $State.Provisioning) { return $false }
+    $job = @($State.Provisioning.Jobs.Values | Where-Object {
+        [string](Get-EpicVMProperty -Object $_ -Name 'name' -Default '') -ceq $Name
+    } | Sort-Object updatedAt -Descending | Select-Object -First 1)
+    if ($job.Count -ne 1 -or [string](Get-EpicVMProperty -Object $job[0] -Name 'profile' -Default 'standard') -ine 'gaming') {
+        return $false
+    }
+    if ([string](Get-EpicVMProperty -Object $job[0] -Name 'state' -Default '') -cne 'ready') {
+        return $false
+    }
+
+    # A VM lifecycle transition invalidates browser evidence from the prior
+    # guest session. Keep the retained VM and its capture configuration, but
+    # require the authenticated browser to prove fresh pixels and input again.
+    $job[0].state = 'streaming_setup'
+    $job[0].streamValidationVerified = $false
+    $job[0].consoleFrameVerified = $false
+    $job[0].keyboardInputVerified = $false
+    $job[0].mouseInputVerified = $false
+    $job[0].consoleVerifiedAt = $null
+    $job[0].consoleFrameVerifiedAt = $null
+    $job[0].keyboardInputVerifiedAt = $null
+    $job[0].mouseInputVerifiedAt = $null
+    $job[0].failureStage = $null
+    $job[0].failureDetailCode = $null
+    $job[0].errorCode = $null
+    $job[0].errorMessage = $null
+    $job[0].lastAttemptCode = "vm_${Action}_requires_reverification"
+    $job[0].updatedAt = [DateTime]::UtcNow.ToString('o')
+    $stages = @(Get-EpicVMProvisioningCompletedStages -Value (Get-EpicVMProperty -Object $job[0] -Name 'completedStages' -Default @()))
+    $job[0].completedStages = @($stages | Where-Object { $_ -ne 'stream_validation' })
+    Save-EpicVMProvisioningStore -Store $State.Provisioning
+    return $true
+}
+
 function Invoke-EpicVMProviderAction {
     param(
+        [Parameter(Mandatory)] [object] $State,
         [Parameter(Mandatory)] [object] $Provider,
         [Parameter(Mandatory)] [string] $Action,
         [Parameter(Mandatory)] [string] $Name,
         [AllowNull()] [object] $Request = @{}
     )
+    $result = $null
     switch ($Action.ToLowerInvariant()) {
-        'start' { return (& $Provider.StartVM $Name) }
-        'stop' { return (& $Provider.StopVM $Name) }
-        'restart' { return (& $Provider.RestartVM $Name) }
-        'delete' { return (& $Provider.DeleteVM $Name) }
+        'start' { $result = & $Provider.StartVM $Name }
+        'stop' { $result = & $Provider.StopVM $Name }
+        'restart' { $result = & $Provider.RestartVM $Name }
+        'delete' { $result = & $Provider.DeleteVM $Name }
         default { throw "Unsupported VM action: $Action" }
     }
+    if ($Action.ToLowerInvariant() -in @('start', 'stop', 'restart')) {
+        [void](Invalidate-EpicVMGamingConsoleEvidence -State $State -Name $Name -Action $Action.ToLowerInvariant())
+    }
+    return $result
 }
 
 function Invoke-EpicVMApiRequest {
@@ -572,7 +619,7 @@ function Invoke-EpicVMApiRequest {
                 return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok = $true; logs = ''; supported = $false })
             }
             if ($Method -eq 'POST' -and $segments.Count -eq 4 -and $segments[3] -in @('start', 'stop', 'restart')) {
-                $result = Invoke-EpicVMProviderAction -Provider $State.Provider -Action $segments[3] -Name $name
+                $result = Invoke-EpicVMProviderAction -State $State -Provider $State.Provider -Action $segments[3] -Name $name
                 return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok = $true; vm = $result })
             }
             if ($Method -eq 'POST' -and $segments.Count -eq 4 -and $segments[3] -eq 'gpu-partition') {
@@ -599,11 +646,11 @@ function Invoke-EpicVMApiRequest {
             # already-installed clients; new clients use the documented REST
             # lifecycle paths above and DELETE /v1/vms/{name}.
             if ($Method -eq 'POST' -and $segments.Count -eq 5 -and $segments[3] -eq 'actions') {
-                $result = Invoke-EpicVMProviderAction -Provider $State.Provider -Action $segments[4] -Name $name
+                $result = Invoke-EpicVMProviderAction -State $State -Provider $State.Provider -Action $segments[4] -Name $name
                 return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok = $true; vm = $result })
             }
             if ($Method -eq 'DELETE' -and $segments.Count -eq 3) {
-                $result = Invoke-EpicVMProviderAction -Provider $State.Provider -Action 'delete' -Name $name
+                $result = Invoke-EpicVMProviderAction -State $State -Provider $State.Provider -Action 'delete' -Name $name
                 return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok = $true; vm = $result })
             }
         }

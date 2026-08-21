@@ -79,6 +79,40 @@ Describe 'EpicVM agent capabilities and routing' {
         $delete.Body.ok | Should -BeTrue
     }
 
+    It 'invalidates stale Gaming visual and input evidence after a VM lifecycle transition' {
+        $config = Get-EpicVMDefaultConfig
+        $config.Provider = 'Mock'
+        $config.ProvisioningStatePath = Join-Path $TestDrive 'lifecycle-jobs.json'
+        $lifecycleState = New-EpicVMAgentState -Config $config -Token 'test-secret-token' -Provider (New-TestProvider)
+        $job = New-EpicVMProvisioningJobObject -Id 'gaming-lifecycle-job' -Name 'alpha' -Profile 'gaming' -State 'ready'
+        $job.claimConsumed = $true
+        $job.claimUsed = $true
+        $job.vmId = 'c7fd609d-5850-4f03-9a58-b425d8696711'
+        $job.tailnetIp = '100.111.87.90'
+        $job.consoleRoutePrefix = '/vm/alpha--epic-pc/'
+        $job.consoleVerifiedAt = [DateTime]::UtcNow.ToString('o')
+        $job.consoleFrameVerified = $true
+        $job.keyboardInputVerified = $true
+        $job.mouseInputVerified = $true
+        $job.streamValidationVerified = $true
+        $job.gamingCaptureConfigured = $true
+        $job.completedStages = @('claim','guest_setup','network_setup','management_handoff','gaming_gpu','streaming_setup','stream_validation')
+        $lifecycleState.Provisioning.Jobs[$job.id] = $job
+
+        $response = Invoke-EpicVMApiRequest -State $lifecycleState -Method 'POST' -Path '/v1/vms/alpha/restart' -Headers @{ Authorization = 'Bearer test-secret-token' }
+
+        $response.StatusCode | Should -Be 200
+        $job.state | Should -Be 'streaming_setup'
+        $job.streamValidationVerified | Should -BeFalse
+        $job.consoleFrameVerified | Should -BeFalse
+        $job.keyboardInputVerified | Should -BeFalse
+        $job.mouseInputVerified | Should -BeFalse
+        $job.consoleVerifiedAt | Should -BeNullOrEmpty
+        $job.completedStages | Should -Not -Contain 'stream_validation'
+        $job.gamingCaptureConfigured | Should -BeTrue
+        (Get-Content -LiteralPath $config.ProvisioningStatePath -Raw) | Should -Match 'vm_restart_requires_reverification'
+    }
+
     It 'validates VM names against the public contract' {
         $longName = ('a' * 63) -join ''
         foreach ($name in @('alpha', 'dev.box-01', $longName)) {
