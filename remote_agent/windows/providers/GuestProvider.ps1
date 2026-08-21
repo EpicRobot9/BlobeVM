@@ -1132,11 +1132,16 @@ function Get-EpicVMSunshineConfigurationScript {
             $acl=Get-Acl -LiteralPath $statePath
             $acl.SetAccessRuleProtection($true,$false)
             @($acl.Access)|ForEach-Object{[void]$acl.RemoveAccessRule($_)}
-            $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new('SYSTEM','Read','Allow'))
+            # Sunshine owns this credential state and must be able to update it
+            # during startup/session handling. Read-only ACLs make the service
+            # report "Couldn't write sunshine_state.json" after a reboot.
+            $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new('SYSTEM','Modify','Allow'))
             $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new('Administrators','Read','Allow'))
             $serviceAccount=[string]$service.StartName
-            if($serviceAccount -and $serviceAccount -notin @('LocalSystem','NT AUTHORITY\LocalSystem','LocalService','NT AUTHORITY\LocalService','NetworkService','NT AUTHORITY\NetworkService') -and $serviceAccount -match '^(NT SERVICE\\|[A-Za-z0-9_.-]+\\)'){
-                $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($serviceAccount,'Read','Allow'))
+            if($serviceAccount -ieq 'LocalService'){$serviceAccount='NT AUTHORITY\LocalService'}
+            elseif($serviceAccount -ieq 'NetworkService'){$serviceAccount='NT AUTHORITY\NetworkService'}
+            if($serviceAccount -and $serviceAccount -notin @('LocalSystem','NT AUTHORITY\LocalSystem') -and $serviceAccount -match '^(NT SERVICE\\|NT AUTHORITY\\(LocalService|NetworkService)$|[A-Za-z0-9_.-]+\\)'){
+                $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($serviceAccount,'Modify','Allow'))
             }
             Set-Acl -LiteralPath $statePath -AclObject $acl
         } catch { throw 'EPICVM_SUNSHINE_STATE_ACL_FAILED' }

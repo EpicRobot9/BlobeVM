@@ -176,6 +176,12 @@ Describe 'PowerShell Direct guest provider' {
         $text | Should -Match '\[IO\.Path\]::GetFileName\(\[string\]\$_\) -ieq ''sunshine\.exe'''
     }
 
+    It 'grants Sunshine write access to its credential state file' {
+        $text = Get-Content (Join-Path $windowsRoot 'providers/GuestProvider.ps1') -Raw
+        $text | Should -Match "SYSTEM','Modify','Allow"
+        $text | Should -Match "serviceAccount,'Modify','Allow"
+    }
+
     It 'keeps an injected management boundary authoritative' {
         $script:managementCalls = @()
         $script:directCalls = @()
