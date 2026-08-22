@@ -6177,6 +6177,43 @@ def api_provisioning_job_console_verify(job_id):
         return jsonify({'ok': False, 'error': 'Rendered video, keyboard, and mouse evidence are required'}), 422
     if payload.get('guestTcpVerified') is not True:
         return jsonify({'ok': False, 'error': 'Guest transport evidence is required'}), 422
+    # Quantified frame evidence replaces trust-me booleans. A stream that
+    # never delivered a first frame (or delivered frozen/black frames) must
+    # not be able to persist Gaming or standard readiness.
+    frame_metrics = payload.get('frameMetrics')
+    if not isinstance(frame_metrics, dict):
+        return jsonify({'ok': False, 'error': {'code': 'frame_metrics_required', 'message': 'Quantified frame metrics are required for readiness.'}}), 422
+
+    def _metric(name):
+        try:
+            return float(frame_metrics.get(name))
+        except (TypeError, ValueError):
+            return None
+
+    non_black = _metric('nonblackFraction')
+    mean_luma = _metric('meanLuma')
+    std_dev = _metric('stdDev')
+    frame_delta = _metric('decodedFramesDelta')
+    duration_ms = _metric('durationMs')
+    if None in (non_black, mean_luma, std_dev, frame_delta, duration_ms):
+        return jsonify({'ok': False, 'error': {'code': 'frame_metrics_invalid', 'message': 'Frame metrics are incomplete.'}}), 422
+    failures = []
+    if non_black < 0.60:
+        failures.append('nonblackFraction below 0.60 (black or near-uniform video)')
+    if mean_luma < 12.0:
+        failures.append('meanLuma below 12 (black frame)')
+    if mean_luma > 252.0:
+        failures.append('meanLuma above 252 (blank white frame)')
+    if std_dev < 8.0:
+        failures.append('stdDev below 8 (frozen placeholder video)')
+    if frame_delta < 3:
+        failures.append('decodedFramesDelta below 3 (video not advancing)')
+    if duration_ms < 1500:
+        failures.append('durationMs below 1500 (evidence window too short)')
+    if failures:
+        response = jsonify({'ok': False, 'error': {'code': 'frame_evidence_rejected', 'message': '; '.join(failures)}})
+        response.headers['Cache-Control'] = 'no-store'
+        return response, 422
     try:
         host = _vm_host(host_id)
         if not hasattr(host, 'console_complete') or not hasattr(host, 'provisioning_status'):
@@ -6390,6 +6427,70 @@ def api_provisioning_job_retry_console(job_id):
         return response, 502
     finally:
         username = password = sunshine_username = sunshine_password = ''
+
+
+@app.post('/dashboard/api/provisioning-jobs/<job_id>/restart-session')
+@auth_required
+def api_provisioning_job_restart_session(job_id):
+    """Bounded stream-start recovery for a black first-frame session.
+
+    The pinned Moonlight server intermittently answers a session start with
+    ``control: the control stream hasn't successfully connected yet`` and then
+    delivers no video; the client stays black while every health probe stays
+    green.  This endpoint restarts only the console container so the next
+    browser attempt gets a fresh WebRTC endpoint.  It never mutates VM, guest,
+    claim, or readiness evidence: a restarted session still has to produce
+    real frame, keyboard, and mouse proof before the job may become ready.
+    """
+    if not _request_is_https():
+        response = jsonify({'ok': False, 'error': 'Session restart requires HTTPS'})
+        response.headers['Cache-Control'] = 'no-store'
+        return response, 426
+    payload = request.get_json(silent=True) if request.is_json else request.form.to_dict(flat=True)
+    payload = payload if isinstance(payload, dict) else {}
+    host_id = str(payload.get('host_id') or '').strip()
+    route_prefix = str(payload.get('routePrefix') or payload.get('route_prefix') or '').strip()
+    if not host_id or not route_prefix:
+        return jsonify({'ok': False, 'error': 'host_id and routePrefix are required'}), 400
+    orchestrator = _console_orchestrator()
+    try:
+        host = _vm_host(host_id)
+        current = host.provisioning_status(job_id)
+        job = current.get('job') if isinstance(current, dict) else None
+        if not isinstance(job, dict):
+            return jsonify({'ok': False, 'error': 'Provisioning job was not found'}), 404
+        name = str(job.get('name') or '')
+        if hasattr(orchestrator, 'restart_session'):
+            route_name = _remote_console_route_name(name, host_id) if getattr(host, 'kind', 'local') == 'remote' else name
+            result = orchestrator.restart_session(name, route_name=route_name)
+        else:
+            raise ConsoleOrchestrationError(
+                'Stream restart is unavailable on this backend.',
+                status=503,
+                code='restart_session_unavailable',
+            )
+        status_result = host.provisioning_status(job_id) if hasattr(host, 'provisioning_status') else {}
+        fresh_job = status_result.get('job') if isinstance(status_result, dict) else None
+        safe_job = _safe_provisioning_job(fresh_job if isinstance(fresh_job, dict) else job)
+        response = jsonify({
+            'ok': True,
+            'host_id': host_id,
+            'consoleRoutePrefix': route_prefix,
+            'job': safe_job,
+            **result,
+        })
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+    except ConsoleOrchestrationError as exc:
+        response = jsonify({'ok': False, 'error': {'code': str(getattr(exc, 'code', 'restart_session_failed')), 'message': str(exc)}})
+        response.headers['Cache-Control'] = 'no-store'
+        return response, int(getattr(exc, 'status', 502) or 502)
+    except VmHostUnavailable as exc:
+        return _vm_host_error_response(exc)
+    except Exception:
+        response = jsonify({'ok': False, 'error': 'Unable to restart the streaming session'})
+        response.headers['Cache-Control'] = 'no-store'
+        return response, 502
 
 
 @app.post('/dashboard/api/provisioning-jobs/<job_id>/repair-console')

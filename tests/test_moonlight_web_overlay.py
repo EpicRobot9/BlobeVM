@@ -14,22 +14,45 @@ spec.loader.exec_module(patch_stream)
 
 def test_enet_close_guard_patches_the_pinned_bundle_once(tmp_path):
     bundle = tmp_path / "stream.js"
-    bundle.write_text("prefix" + patch_stream.OLD + "suffix", encoding="utf-8")
+    play_gate = patch_stream.WATCHDOG_ANCHOR
+    bundle.write_text(
+        "prefix" + play_gate + "middle" + play_gate + "suffix" + patch_stream.OLD + "tail",
+        encoding="utf-8",
+    )
 
     assert patch_stream.patch_file(bundle) is True
     patched = bundle.read_text(encoding="utf-8")
     assert patch_stream.OLD not in patched
     assert patch_stream.NEW in patched
     assert "readyState" in patched
+    # The stream-start watchdog must arm on both video sink classes.
+    assert patched.count(patch_stream.WATCHDOG_PATCHED) == 2
+    assert "function epicvmArmFrameWatchdog" in patched
 
     # A second build step is harmless and does not duplicate the overlay.
     assert patch_stream.patch_file(bundle) is False
     assert bundle.read_text(encoding="utf-8") == patched
 
 
+def test_stream_start_watchdog_arms_on_single_sink_bundles(tmp_path):
+    """Some builds ship one video sink; the overlay must tolerate 1 or 2."""
+    bundle = tmp_path / "stream.js"
+    bundle.write_text(
+        "prefix" + patch_stream.WATCHDOG_ANCHOR + "suffix" + patch_stream.OLD + "tail",
+        encoding="utf-8",
+    )
+
+    assert patch_stream.patch_file(bundle) is True
+    patched = bundle.read_text(encoding="utf-8")
+    assert patched.count(patch_stream.WATCHDOG_PATCHED) == 1
+
+
 def test_enet_close_guard_handles_read_only_bundle_mode(tmp_path):
     bundle = tmp_path / "stream.js"
-    bundle.write_text("prefix" + patch_stream.OLD + "suffix", encoding="utf-8")
+    bundle.write_text(
+        "prefix" + patch_stream.WATCHDOG_ANCHOR + patch_stream.OLD + "suffix",
+        encoding="utf-8",
+    )
     bundle.chmod(0o444)
 
     assert patch_stream.patch_file(bundle) is True

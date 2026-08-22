@@ -134,8 +134,8 @@ Describe 'EpicVM provisioning safety' {
             videoFrameVerified=$true
             keyboardInputVerified=$true
             mouseInputVerified=$true
+            frameMetrics=@{nonblackFraction=0.74;meanLuma=40.5;stdDev=41.2;decodedFramesDelta=150;durationMs=5000}
         }
-        $job.failureStage | Should -BeNullOrEmpty
         $job.failureDetailCode | Should -BeNullOrEmpty
         $job.lastAttemptCode | Should -BeNullOrEmpty
         $job.errorCode | Should -BeNullOrEmpty
@@ -247,6 +247,7 @@ Describe 'EpicVM provisioning safety' {
             videoFrameVerified=$true
             keyboardInputVerified=$true
             mouseInputVerified=$true
+            frameMetrics=@{nonblackFraction=0.74;meanLuma=40.5;stdDev=41.2;decodedFramesDelta=150;durationMs=5000}
         }
         $job.state | Should -Be 'ready'
         $job.consoleFrameVerified | Should -BeTrue
@@ -273,6 +274,7 @@ Describe 'EpicVM provisioning safety' {
             videoFrameVerified=$true
             keyboardInputVerified=$true
             mouseInputVerified=$true
+            frameMetrics=@{nonblackFraction=0.74;meanLuma=40.5;stdDev=41.2;decodedFramesDelta=150;durationMs=5000}
         }
         $job.state | Should -Be 'ready'
         $job.consoleRoutePrefix | Should -Be '/vm/alpha--epic-pc/'
@@ -910,5 +912,96 @@ Describe 'EpicVM Gaming provisioning contract' {
         $job.failureDetailCode | Should -Be 'GAMING_GPU_ENCODER'
         $job.completedStages | Should -Not -Contain 'gaming_gpu'
         $job.state | Should -Not -Be 'streaming_setup'
+    }
+
+    It 'rejects console completion when frame metrics are missing (false-ready guard)' {
+        $config=Get-EpicVMDefaultConfig
+        $config.EnableGamingProvisioning=$true
+        $config.ProvisioningStatePath=Join-Path $TestDrive 'frame-metrics-missing.json'
+        $provider=New-ProvisioningTestProvider
+        $provider | Add-Member NoteProperty VerifyGuest { param($name,$ip) $true }
+        $state=New-EpicVMAgentState -Config $config -Token 'agent-token' -Provider $provider
+        $job=New-EpicVMProvisioningJobObject -Id 'frame-metrics-missing' -Name 'metrics-missing' -Profile 'gaming' -State 'streaming_setup'
+        $job.claimConsumed=$true
+        $job.claimUsed=$true
+        $job.gamingCaptureConfigured=$true
+        $job.completedStages=@('claim','guest_setup','network_setup','management_handoff','gaming_gpu')
+        $state.Provisioning.Jobs[$job.id]=$job
+
+        { Complete-EpicVMProvisioningConsole -State $state -Job $job -Request @{
+            routePrefix='/vm/metrics-missing--epic-pc/'
+            guestTcpVerified=$true
+            videoFrameVerified=$true
+            keyboardInputVerified=$true
+            mouseInputVerified=$true
+        } } | Should -Throw
+
+        $job.state | Should -Not -Be 'ready'
+        $job.streamValidationVerified | Should -BeFalse
+    }
+
+    It 'rejects console completion with black or frozen frame metrics (false-ready guard)' {
+        $config=Get-EpicVMDefaultConfig
+        $config.EnableGamingProvisioning=$true
+        $config.ProvisioningStatePath=Join-Path $TestDrive 'frame-metrics-black.json'
+        $provider=New-ProvisioningTestProvider
+        $provider | Add-Member NoteProperty VerifyGuest { param($name,$ip) $true }
+        $state=New-EpicVMAgentState -Config $config -Token 'agent-token' -Provider $provider
+        $job=New-EpicVMProvisioningJobObject -Id 'frame-metrics-black' -Name 'metrics-black' -Profile 'gaming' -State 'streaming_setup'
+        $job.claimConsumed=$true
+        $job.claimUsed=$true
+        $job.gamingCaptureConfigured=$true
+        $job.completedStages=@('claim','guest_setup','network_setup','management_handoff','gaming_gpu')
+        $state.Provisioning.Jobs[$job.id]=$job
+
+        { Complete-EpicVMProvisioningConsole -State $state -Job $job -Request @{
+            routePrefix='/vm/metrics-black--epic-pc/'
+            guestTcpVerified=$true
+            videoFrameVerified=$true
+            keyboardInputVerified=$true
+            mouseInputVerified=$true
+            frameMetrics=@{nonblackFraction=0.0;meanLuma=0.0;stdDev=0.0;decodedFramesDelta=0;durationMs=20000}
+        } } | Should -Throw
+
+        $job.state | Should -Not -Be 'ready'
+        $job.streamValidationVerified | Should -BeFalse
+    }
+
+    It 'accepts console completion with real frame evidence and reaches ready' {
+        $config=Get-EpicVMDefaultConfig
+        $config.EnableGamingProvisioning=$true
+        $config.ProvisioningStatePath=Join-Path $TestDrive 'frame-metrics-good.json'
+        $provider=New-ProvisioningTestProvider
+        $provider | Add-Member NoteProperty VerifyGuest { param($name,$ip) $true }
+        $state=New-EpicVMAgentState -Config $config -Token 'agent-token' -Provider $provider
+        $job=New-EpicVMProvisioningJobObject -Id 'frame-metrics-good' -Name 'metrics-good' -Profile 'gaming' -State 'streaming_setup'
+        $job.claimConsumed=$true
+        $job.claimUsed=$true
+        $job.gamingCaptureConfigured=$true
+        $job.completedStages=@('claim','guest_setup','network_setup','management_handoff','gaming_gpu')
+        $state.Provisioning.Jobs[$job.id]=$job
+
+        Complete-EpicVMProvisioningConsole -State $state -Job $job -Request @{
+            routePrefix='/vm/metrics-good--epic-pc/'
+            guestTcpVerified=$true
+            videoFrameVerified=$true
+            keyboardInputVerified=$true
+            mouseInputVerified=$true
+            frameMetrics=@{nonblackFraction=0.7452;meanLuma=40.76;stdDev=41.2;decodedFramesDelta=169;durationMs=5000}
+        }
+
+        $job.state | Should -Be 'ready'
+        $job.streamValidationVerified | Should -BeTrue
+        $job.keyboardInputVerified | Should -BeTrue
+        $job.mouseInputVerified | Should -BeTrue
+    }
+
+    It 'selects the gaming capture configuration only for gaming Sunshine setup' {
+        $guestText = Get-Content (Join-Path $windowsRoot 'providers' 'GuestProvider.ps1') -Raw
+        $guestText | Should -Match 'function Get-EpicVMGamingSunshineCaptureScript'
+        $guestText | Should -Match 'Get-EpicVMSunshineConfigurationScript -ForGaming \(\[bool\]\$IsGaming\)'
+        $guestText | Should -Match 'output_name = Virtual Display'
+        $guestText | Should -Match 'AutoAdminLogon'
+        $guestText | Should -Match 'Root\\MttVDD'
     }
 }

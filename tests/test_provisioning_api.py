@@ -749,6 +749,13 @@ def test_console_verify_requires_browser_visual_and_input_evidence(monkeypatch, 
             'videoFrameVerified': True,
             'keyboardInputVerified': True,
             'mouseInputVerified': True,
+            'frameMetrics': {
+                'nonblackFraction': 0.74,
+                'meanLuma': 40.5,
+                'stdDev': 41.2,
+                'decodedFramesDelta': 150,
+                'durationMs': 5000,
+            },
         },
         headers=headers,
     )

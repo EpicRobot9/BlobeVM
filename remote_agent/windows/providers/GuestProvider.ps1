@@ -463,7 +463,13 @@ function Invoke-EpicVMManagementTransportOnce {
         'EPICVM_SUNSHINE_LISTENER_FAILED',
         'EPICVM_SUNSHINE_VERIFICATION_FAILED',
         'EPICVM_GAMING_GPU_VALIDATION_FAILED',
-        'EPICVM_GAMING_ENCODER_UNAVAILABLE'
+        'EPICVM_GAMING_ENCODER_UNAVAILABLE',
+        'EPICVM_CAPTURE_INVALID_INPUT',
+        'EPICVM_CAPTURE_VDD_INF_MISSING',
+        'EPICVM_CAPTURE_VDD_INSTALL_FAILED',
+        'EPICVM_CAPTURE_VDD_DEVICE_NOT_OK',
+        'EPICVM_CAPTURE_NEFCON_MISSING',
+        'EPICVM_CAPTURE_STAGING_FAILED'
     )
     $transportScript={
         param($Target,$GuestCredential,$GuestScript,$GuestArguments,$TargetPort,$Ssl,$SafeMarkers)
@@ -558,6 +564,7 @@ function Invoke-EpicVMManagementTransportOnce {
         $nestedStage=[string](Get-EpicVMHyperVValue -Object $resultValue -Name 'failureDetailCode' -Default '')
         if($nestedMarker -and $safeGuestMarkers -contains $nestedMarker){return (ConvertTo-EpicVMDirectResult -Result $resultValue)}
         if($nestedStage -like 'SUNSHINE_*'){return (ConvertTo-EpicVMDirectResult -Result $resultValue)}
+        if($nestedStage -like 'CAPTURE_*'){return (ConvertTo-EpicVMDirectResult -Result $resultValue)}
         if($pipeline.HadErrors){
             $marker=Get-EpicVMPowerShellDirectSafeMarker -Records @($pipeline.Streams.Error)+@($transportOutput)
             if($null -ne $marker){throw $marker}
@@ -1026,6 +1033,8 @@ function Invoke-EpicVMGuestConfiguration {
 }
 
 function Get-EpicVMSunshineConfigurationScript {
+    param([bool]$ForGaming)
+    if ($ForGaming) { return (Get-EpicVMGamingSunshineCaptureScript) }
     return {
         param($SunshineUsername,$SunshinePassword,$ServiceName,$ExpectedVersion,$StatePaths)
         $ErrorActionPreference='Stop'
@@ -1178,12 +1187,250 @@ function Get-EpicVMSunshineConfigurationScript {
                 'EPICVM_SUNSHINE_FIREWALL_FAILED',
                 'EPICVM_SUNSHINE_SERVICE_RESTART_FAILED',
                 'EPICVM_SUNSHINE_LISTENER_FAILED',
+                'EPICVM_CAPTURE_INVALID_INPUT','EPICVM_CAPTURE_VDD_INF_MISSING',
+                'EPICVM_CAPTURE_VDD_INSTALL_FAILED','EPICVM_CAPTURE_VDD_DEVICE_NOT_OK',
+                'EPICVM_CAPTURE_NEFCON_MISSING',
                 'EPICVM_SUNSHINE_VERIFICATION_FAILED'
             )
             $message=@([string](Get-EpicVMHyperVValue -Object $_.Exception -Name 'Message' -Default ''),[string]$_.ToString()) -join ' '
             $reportedMarker=$null
             foreach($candidate in $safeMarkers){if($message -match [regex]::Escape($candidate)){$reportedMarker=$candidate;break}}
             [ordered]@{ok=$false;failureDetailCode=$sunshineStage;safeMarker=$reportedMarker}
+        }
+    }
+}
+
+function Get-EpicVMGamingCaptureStageScript {
+    # Guest-side staging for the gaming capture artifacts. Each call writes
+    # one chunk file plus a manifest entry; when all parts of an artifact are
+    # present the reassembled archive is verified by length. Idempotent:
+    # rewriting any part replaces it atomically (write-then-rename).
+    return {
+        param($ArtifactName,$TotalParts,$PartIndex,$TotalBase64Length,$Chunk)
+        $ErrorActionPreference='Stop'
+        $stageRoot=Join-Path $env:ProgramData 'EpicVM\capture'
+        New-Item -ItemType Directory -Path $stageRoot -Force | Out-Null
+        $partsDir=Join-Path $stageRoot (Join-Path ([string]$ArtifactName) 'parts')
+        New-Item -ItemType Directory -Path $partsDir -Force | Out-Null
+        if([string]::IsNullOrEmpty([string]$Chunk)){throw 'EPICVM_CAPTURE_STAGING_FAILED'}
+        $tmp=Join-Path $partsDir ("part-{0}.tmp" -f $PartIndex)
+        $final=Join-Path $partsDir ("part-{0}.b64" -f $PartIndex)
+        [IO.File]::WriteAllText($tmp,[string]$Chunk,[Text.Encoding]::ASCII)
+        Move-Item -LiteralPath $tmp -Destination $final -Force
+        $present=@(Get-ChildItem -LiteralPath $partsDir -Filter 'part-*.b64' -ErrorAction SilentlyContinue)
+        if($present.Count -lt [int]$TotalParts){
+            return [ordered]@{ok=$true;artifact=[string]$ArtifactName;received=$present.Count;of=[int]$TotalParts;complete=$false}
+        }
+        # All parts present: verify combined length, then assemble.
+        $combined=-join ($present | Sort-Object { [int]($_.BaseName -replace 'part-','') } | ForEach-Object { [IO.File]::ReadAllText($_.FullName) })
+        if($combined.Length -ne [int]$TotalBase64Length){throw 'EPICVM_CAPTURE_STAGING_FAILED'}
+        $zipPath=Join-Path $stageRoot ([string]$ArtifactName + '.zip')
+        $zipTmp=Join-Path $stageRoot ([string]$ArtifactName + '.zip.tmp')
+        [IO.File]::WriteAllBytes($zipTmp,[Convert]::FromBase64String($combined))
+        Move-Item -LiteralPath $zipTmp -Destination $zipPath -Force
+        foreach($p in $present){Remove-Item -LiteralPath $p.FullName -Force -ErrorAction SilentlyContinue}
+        return [ordered]@{ok=$true;artifact=[string]$ArtifactName;complete=$true;bytes=((Get-Item -LiteralPath $zipPath).Length)}
+    }
+}
+
+function Get-EpicVMGamingSunshineCaptureScript {
+    # Gaming guests run headless: GPU-P exposes no active console monitor, so
+    # Sunshine has no display to capture and streams black frames. This script
+    # installs the cached Virtual Display Driver (nefcon), pins an
+    # IddSampleDriver-style output_name so Sunshine captures that virtual
+    # monitor, configures Windows auto-logon for the provisioned guest user so
+    # a real desktop session exists, and verifies the resulting state. It runs
+    # inside the guest via the management transport with elevated rights.
+    return {
+        param($SunshineUsername,$SunshinePassword,$ServiceName,$ExpectedVersion,$StatePaths,
+              $GuestUsername,$GuestPassword)
+        $ErrorActionPreference='Stop'
+        function Set-EpicVMGamingCaptureStage { param([Parameter(Mandatory)][string]$Stage) return $Stage }
+        $captureStage=Set-EpicVMGamingCaptureStage 'CAPTURE_INPUT_VALIDATION'
+        try {
+        if([string]::IsNullOrWhiteSpace([string]$SunshineUsername) -or [string]::IsNullOrEmpty([string]$SunshinePassword)){throw 'EPICVM_CAPTURE_INVALID_INPUT'}
+        if([string]::IsNullOrWhiteSpace([string]$GuestUsername) -or [string]::IsNullOrEmpty([string]$GuestPassword)){throw 'EPICVM_CAPTURE_INVALID_INPUT'}
+
+        $captureStage=Set-EpicVMGamingCaptureStage 'CAPTURE_STAGING'
+        $stageRoot=Join-Path $env:ProgramData 'EpicVM\capture'
+        New-Item -ItemType Directory -Path $stageRoot -Force | Out-Null
+        $vddZip=Join-Path $stageRoot 'vdd.zip'
+        $nefconZip=Join-Path $stageRoot 'nefcon.zip'
+        if(-not (Test-Path -LiteralPath $vddZip -PathType Leaf)){throw 'EPICVM_CAPTURE_STAGING_FAILED'}
+        if(-not (Test-Path -LiteralPath $nefconZip -PathType Leaf)){throw 'EPICVM_CAPTURE_STAGING_FAILED'}
+
+        $captureStage=Set-EpicVMGamingCaptureStage 'CAPTURE_VDD_INSTALL'
+        Expand-Archive -LiteralPath $vddZip -DestinationPath (Join-Path $stageRoot 'vdd') -Force
+        $vddInf=@(Get-ChildItem -LiteralPath (Join-Path $stageRoot 'vdd') -Recurse -Filter '*.inf' | Select-Object -First 1)
+        if($vddInf.Count -eq 0){throw 'EPICVM_CAPTURE_VDD_INF_MISSING'}
+        $nefconHome=Join-Path $stageRoot 'nefcon'
+        Expand-Archive -LiteralPath $nefconZip -DestinationPath $nefconHome -Force
+        # The VDD catalog is signed by SignPath Foundation; a fresh guest does
+        # not yet trust that publisher, and pnputil rejects the package until
+        # it does. Import the signing cert into LocalMachine trust first
+        # (idempotent), then install through pnputil, which both stages the
+        # package in the driver store and binds it to the device node.
+        $vddCatalog=@(Get-ChildItem -LiteralPath (Join-Path $stageRoot 'vdd') -Recurse -Filter '*.cat' | Select-Object -First 1)
+        if($vddCatalog.Count -gt 0){
+            $signature=Get-AuthenticodeSignature -LiteralPath $vddCatalog[0].FullName
+            if($null -ne $signature -and $null -ne $signature.SignerCertificate){
+                foreach($storeName in @('TrustedPublisher','TrustedPeople')){
+                    try{
+                        $store=[Security.Cryptography.X509Certificates.X509Store]::new($storeName,'LocalMachine')
+                        $store.Open('ReadWrite')
+                        try{ $store.Add($signature.SignerCertificate) } finally { $store.Close() }
+                    }catch{}
+                }
+            }
+        }
+        # Create the ROOT device node first so pnputil binds the driver to a
+        # persistent virtual display instead of waiting for a hardware match.
+        $nefconc=@(Get-ChildItem -LiteralPath $nefconHome -Recurse -Filter 'nefconc.exe' | Where-Object { $_.DirectoryName -match 'x64' } | Select-Object -First 1)
+        if($nefconc.Count -eq 0){$nefconc=@(Get-ChildItem -LiteralPath $nefconHome -Recurse -Filter 'nefconc.exe' | Select-Object -First 1)}
+        if($nefconc.Count -gt 0){
+            & $nefconc[0].FullName --create-device-node --hardware-id 'Root\MttVDD' --class-name Display --class-guid '{4d36e968-e325-11ce-bfc1-08002be10318}' 2>&1 | Out-Null
+        }
+        $pnputilExit=-1
+        try {
+            $pnputilOutput=& pnputil.exe /add-driver "$($vddInf[0].FullName)" /install 2>&1
+            $pnputilExit=$LASTEXITCODE
+        } catch { $pnputilExit=-1 }
+        if($pnputilExit -ne 0){
+            # Legacy fallback: nefconw GUI-subsystem binary. Its exit code is
+            # unreliable, so only accept success if the PnP device settles.
+            $nefconw=@(Get-ChildItem -LiteralPath $nefconHome -Recurse -Filter 'nefconw.exe' | Where-Object { $_.DirectoryName -match 'x64' } | Select-Object -First 1)
+            if($nefconw.Count -eq 0){$nefconw=@(Get-ChildItem -LiteralPath $nefconHome -Recurse -Filter 'nefconw.exe' | Select-Object -First 1)}
+            if($nefconw.Count -gt 0){
+                & $nefconw[0].FullName create 'Root\MttVDD' --inf-path $vddInf[0].FullName 2>&1 | Out-Null
+                if($LASTEXITCODE -ne 0){
+                    & $nefconw[0].FullName update 'Root\MttVDD' --inf-path $vddInf[0].FullName 2>&1 | Out-Null
+                }
+            }
+        }
+        # Wait for the PnP device to settle in an OK state.
+        $vddDeadline=[DateTime]::UtcNow.AddSeconds(60)
+        do {
+            $vddDevice=Get-PnpDevice -FriendlyName '*Virtual Display*' -ErrorAction SilentlyContinue |
+                Where-Object { $_.InstanceId -like 'ROOT\MttVDD*' } | Select-Object -First 1
+            if($null -eq $vddDevice){
+                $vddDevice=Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { ($_.InstanceId -like 'ROOT\MttVDD*') -or ($_.InstanceId -eq 'ROOT\DISPLAY\0000' -and $_.FriendlyName -match 'Virtual Display') } | Select-Object -First 1
+            }
+            if($null -ne $vddDevice -and [string]$vddDevice.Status -ieq 'OK'){ $deviceOk=$true; break }
+            Start-Sleep -Milliseconds 500
+        } while([DateTime]::UtcNow -lt $vddDeadline)
+        if(-not $deviceOk){ throw 'EPICVM_CAPTURE_VDD_DEVICE_NOT_OK' }
+
+        # Sunshine must capture the virtual output by name; otherwise it falls
+        # back to whatever default output exists and can pick a black target.
+        $captureStage=Set-EpicVMGamingCaptureStage 'CAPTURE_SUNSHINE_CONF'
+        $sunshineServiceCim=Get-CimInstance Win32_Service -Filter ("Name='" + ([string]$ServiceName).Replace("'","''") + "'") -ErrorAction SilentlyContinue
+        if($null -eq $sunshineServiceCim){throw 'EPICVM_SUNSHINE_SERVICE_MISSING'}
+        $servicePath=[string]$sunshineServiceCim.PathName
+        if($servicePath -match '^"([^"]+)"'){$servicePath=$Matches[1]}elseif($servicePath -match '^([^ ]+)'){$servicePath=$Matches[1]}
+        $serviceDirectory=Split-Path -Parent $servicePath
+        $mainExe=Join-Path (Split-Path -Parent $serviceDirectory) 'sunshine.exe'
+        if(-not (Test-Path -LiteralPath $mainExe -PathType Leaf)){
+            $mainExe=Join-Path $serviceDirectory 'sunshine.exe'
+            if(-not (Test-Path -LiteralPath $mainExe -PathType Leaf)){throw 'EPICVM_SUNSHINE_EXECUTABLE_MISSING'}
+        }
+        $installedVersion=[string]([Diagnostics.FileVersionInfo]::GetVersionInfo($mainExe).ProductVersion)
+        if(-not [string]::IsNullOrWhiteSpace([string]$ExpectedVersion) -and $installedVersion -cne [string]$ExpectedVersion){throw 'EPICVM_SUNSHINE_VERSION_MISMATCH'}
+        $sunshineRoot=Split-Path -Parent $serviceDirectory
+        $configDir=Join-Path $sunshineRoot 'config'
+        if(-not (Test-Path -LiteralPath $configDir)){New-Item -ItemType Directory -Path $configDir -Force | Out-Null}
+        $confPath=Join-Path $configDir 'sunshine.conf'
+        $confLines=@(
+            'output_name = Virtual Display',
+            'capture = ddx',
+            'encoder = nvenc amf enc qsv software',
+            'min_log_level = 1'
+        )
+        Set-Content -LiteralPath $confPath -Value $confLines -Encoding ASCII
+
+        $captureStage=Set-EpicVMGamingCaptureStage 'CAPTURE_CREDENTIALS_AND_LOGON'
+        # Reuse the proven credential-state write from the standard flow.
+        $stateCandidates=@()
+        foreach($configured in @($StatePaths)){if(-not [string]::IsNullOrWhiteSpace([string]$configured)){$stateCandidates+=[string]$configured}}
+        $derivedState=Join-Path $configDir 'sunshine_state.json'
+        $statePath=$derivedState
+        foreach($candidate in $stateCandidates){
+            $parent=Split-Path -Parent ([string]$candidate)
+            if((Test-Path -LiteralPath ([string]$candidate) -PathType Leaf) -or (Test-Path -LiteralPath $parent -PathType Container)){ $statePath=[string]$candidate; break }
+        }
+        $stateParent=Split-Path -Parent $statePath
+        if(-not (Test-Path -LiteralPath $stateParent)){New-Item -ItemType Directory -Path $stateParent -Force | Out-Null}
+        # A prior capture run locks the state file to SYSTEM-only. This retry
+        # runs as the guest user over WinRM, so reset the ACL before writing
+        # (take ownership, grant Administrators full control, then rewrite).
+        if(Test-Path -LiteralPath $statePath -PathType Leaf){
+            try{
+                & takeown.exe /F "$statePath" /A 2>&1 | Out-Null
+                & icacls.exe "$statePath" /grant "*S-1-5-32-544:(F)" 2>&1 | Out-Null
+                Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
+            }catch{}
+        }
+        $saltBytes=New-Object byte[] 16
+        try{
+            $rng=[Security.Cryptography.RandomNumberGenerator]::Create()
+            try{ $rng.GetBytes($saltBytes) } finally { $rng.Dispose() }
+            $salt=([BitConverter]::ToString($saltBytes)-replace '-','').ToLowerInvariant()
+            $sha=[Security.Cryptography.SHA256]::Create()
+            try{
+                $digest=$sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(([string]$SunshinePassword)+$salt))
+                [Array]::Reverse($digest)
+            } finally { $sha.Dispose() }
+            $passwordHash=([BitConverter]::ToString($digest)-replace '-','').ToUpperInvariant()
+            $record=[ordered]@{username=[string]$SunshineUsername;salt=$salt;password=$passwordHash}
+            Set-Content -LiteralPath $statePath -Value ($record|ConvertTo-Json -Depth 4 -Compress) -Encoding UTF8
+            $acl=Get-Acl -LiteralPath $statePath
+            $acl.SetAccessRuleProtection($true,$false)
+            @($acl.Access)|ForEach-Object{[void]$acl.RemoveAccessRule($_)}
+            $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new('SYSTEM','Modify','Allow'))
+            $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new('Administrators','Read','Allow'))
+            Set-Acl -LiteralPath $statePath -AclObject $acl
+        } finally { [Array]::Clear($saltBytes,0,$saltBytes.Length) }
+
+        # A real desktop session requires a logged-in interactive user.
+        $lsaPath='HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+        Set-ItemProperty -Path $lsaPath -Name 'AutoAdminLogon' -Value '1' -Type String
+        Set-ItemProperty -Path $lsaPath -Name 'DefaultUserName' -Value ([string]$GuestUsername) -Type String
+        Set-ItemProperty -Path $lsaPath -Name 'DefaultDomainName' -Value '.' -Type String
+        Set-ItemProperty -Path $lsaPath -Name 'DefaultPassword' -Value ([string]$GuestPassword) -Type String
+        Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name 'LocalAccountTokenFilterPolicy' -Value 1 -Type DWord
+
+        $captureStage=Set-EpicVMGamingCaptureStage 'CAPTURE_FIREWALL_CONFIG'
+        Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object { [string]$_.DisplayName -match '(?i)Sunshine' } | Disable-NetFirewallRule -ErrorAction SilentlyContinue
+        Get-NetFirewallRule -Name 'EpicVM-Sunshine-Tailscale-TCP','EpicVM-Sunshine-Tailscale-UDP' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+        New-NetFirewallRule -Name 'EpicVM-Sunshine-Tailscale-TCP' -DisplayName 'EpicVM Sunshine (Tailscale TCP)' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 47984,47989,47990,48010 -RemoteAddress '100.64.0.0/10' -Profile Any -EdgeTraversalPolicy Block | Out-Null
+        New-NetFirewallRule -Name 'EpicVM-Sunshine-Tailscale-UDP' -DisplayName 'EpicVM Sunshine (Tailscale UDP)' -Direction Inbound -Action Allow -Protocol UDP -LocalPort 47998,47999,48000,48002 -RemoteAddress '100.64.0.0/10' -Profile Any -EdgeTraversalPolicy Block | Out-Null
+
+        $captureStage=Set-EpicVMGamingCaptureStage 'CAPTURE_SERVICE_RESTART'
+        try { Set-Service -Name $ServiceName -StartupType Automatic -ErrorAction Stop; Restart-Service -Name $ServiceName -Force -ErrorAction Stop } catch { throw 'EPICVM_SUNSHINE_SERVICE_RESTART_FAILED' }
+        $listenerDeadline=[DateTime]::UtcNow.AddSeconds(45)
+        $running=$false;$listener=$false
+        while([DateTime]::UtcNow -lt $listenerDeadline){
+            $current=Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+            $running=$null -ne $current -and [string]$current.Status -eq 'Running'
+            $listener=$null -ne (Get-NetTCPConnection -LocalPort 47990 -State Listen -ErrorAction SilentlyContinue)
+            if($running -and $listener){break}
+            Start-Sleep -Milliseconds 500
+        }
+        if(-not $running -or -not $listener){throw 'EPICVM_SUNSHINE_LISTENER_FAILED'}
+        Remove-Item -LiteralPath $vddZip,$nefconZip -Force -ErrorAction SilentlyContinue
+        [ordered]@{ok=$true;vddInstalled=$deviceOk;captureConfWritten=(Test-Path -LiteralPath $confPath);autoLogonConfigured=$true;serviceRunning=$running;listener=$listener}
+        } catch {
+            $message=@([string]$_.Exception.Message,[string]$_.ToString()) -join ' '
+            $safeMarkers=@(
+                'EPICVM_CAPTURE_INVALID_INPUT','EPICVM_CAPTURE_VDD_INF_MISSING',
+                'EPICVM_CAPTURE_STAGING_FAILED',
+                'EPICVM_CAPTURE_VDD_INSTALL_FAILED','EPICVM_CAPTURE_VDD_DEVICE_NOT_OK',
+                'EPICVM_CAPTURE_NEFCON_MISSING','EPICVM_SUNSHINE_SERVICE_MISSING',
+                'EPICVM_SUNSHINE_EXECUTABLE_MISSING','EPICVM_SUNSHINE_VERSION_MISMATCH',
+                'EPICVM_SUNSHINE_SERVICE_RESTART_FAILED','EPICVM_SUNSHINE_LISTENER_FAILED'
+            )
+            $reportedMarker=$null
+            foreach($candidate in $safeMarkers){if($message -match [regex]::Escape($candidate)){$reportedMarker=$candidate;break}}
+            [ordered]@{ok=$false;failureDetailCode=$captureStage;safeMarker=$reportedMarker}
         }
     }
 }
@@ -1348,7 +1595,7 @@ function Invoke-EpicVMSunshineConfiguration {
         throw (New-EpicVMHyperVError -Code 'InvalidInput' -Message 'Guest and Sunshine credentials are required.')
     }
     $credential=$null
-    $sunshineScript=Get-EpicVMSunshineConfigurationScript
+    $sunshineScript=Get-EpicVMSunshineConfigurationScript -ForGaming ([bool]$IsGaming)
     $serviceName=[string](Get-EpicVMHyperVValue -Object $Config -Name 'SunshineServiceName' -Default 'SunshineService')
     $expectedVersion=[string](Get-EpicVMHyperVValue -Object $Config -Name 'SunshineVersion' -Default '2026.516.143833')
     $statePaths=@(Get-EpicVMHyperVValue -Object $Config -Name 'SunshineStatePaths' -Default @('C:\Program Files\Sunshine\config\sunshine_state.json','C:\ProgramData\Sunshine\config\sunshine_state.json'))
@@ -1498,9 +1745,57 @@ function Invoke-EpicVMSunshineConfiguration {
         # so it gets an explicit bounded operation window and no automatic
         # replay of the credential-bearing script.
         $sunshineStage='SUNSHINE_CONFIG_WRITE'
-        $result=Invoke-EpicVMManagementTransport -Provider $Provider -Address $GuestAddress -Credential $credential -Script $sunshineScript -ArgumentList @($SunshineUsername,$SunshinePassword,$serviceName,$expectedVersion,$statePaths) -TimeoutSeconds 75 -RetryCount 0
+        # The gaming capture path stages the cached Virtual Display Driver and
+        # nefcon installers into the guest BEFORE the credential-bearing
+        # script. Guests have no internet access by design, and a single
+        # ~3 MB remoting argument exceeds the guest's default WSMan envelope,
+        # so each archive is shipped in envelope-safe chunks that the guest
+        # reassembles; every call is idempotent (parts are replaced whole).
+        if($IsGaming){
+            $cacheRoot=Join-Path ([string](Get-EpicVMHyperVValue -Object $Config -Name 'AgentDataRoot' -Default 'C:\ProgramData\EpicVM')) 'cache'
+            $vddZipPath=Join-Path $cacheRoot 'VirtualDisplayDriver-25.7.23\VirtualDisplayDriver-x86.Driver.Only.zip'
+            $nefconZipPath=Join-Path $cacheRoot 'NefCon-1.14.0\nefcon_v1.14.0.zip'
+            if(-not ((Test-Path -LiteralPath $vddZipPath -PathType Leaf) -and (Test-Path -LiteralPath $nefconZipPath -PathType Leaf))){
+                throw (New-EpicVMHyperVError -Code 'gaming_capture_payload_unavailable' -Message 'The cached virtual display driver packages are unavailable for the Gaming capture configuration.' -DetailCode 'GAMING_GPU_FRAME')
+            }
+            $stageScript=Get-EpicVMGamingCaptureStageScript
+            foreach($pair in @(@('vdd',$vddZipPath),@('nefcon',$nefconZipPath))){
+                $artifactName=[string]$pair[0]
+                $bytes=[IO.File]::ReadAllBytes([string]$pair[1])
+                try {
+                    $b64=[Convert]::ToBase64String($bytes)
+                    # The guest's WSMan MaxEnvelopeSizekb is 500 KB and the
+                    # whole SOAP envelope must fit, so keep each request far
+                    # below that ceiling. 200 KB of base64 per call keeps the
+                    # total envelope under ~300 KB after script/overhead.
+                    $chunkSize=200000
+                    $totalParts=[Math]::Ceiling($b64.Length / [double]$chunkSize)
+                    for($part=0;$part -lt $totalParts;$part++){
+                        $start=$part*$chunkSize
+                        $length=[Math]::Min($chunkSize,$b64.Length-$start)
+                        $piece=$b64.Substring($start,$length)
+                        $sunshineStage='CAPTURE_STAGING'
+                        $staged=Invoke-EpicVMManagementTransport -Provider $Provider -Address $GuestAddress -Credential $credential -Script $stageScript -ArgumentList @($artifactName,[int]$totalParts,[int]$part,[int]$b64.Length,$piece) -TimeoutSeconds 60 -RetryCount 0
+                        $stagedStage=[string](Get-EpicVMHyperVValue -Object $staged -Name 'failureDetailCode' -Default '')
+                        if($stagedStage -like 'CAPTURE_*'){$sunshineStage=$stagedStage}
+                        if(-not [bool](Get-EpicVMHyperVValue -Object $staged -Name 'ok' -Default $false)){
+                            throw 'EPICVM_CAPTURE_STAGING_FAILED'
+                        }
+                    }
+                } finally { [Array]::Clear($bytes,0,$bytes.Length) }
+            }
+        }
+        $sunshineArguments=@($SunshineUsername,$SunshinePassword,$serviceName,$expectedVersion,$statePaths)
+        $sunshineTimeout=75
+        if($IsGaming){
+            $sunshineArguments=@($SunshineUsername,$SunshinePassword,$serviceName,$expectedVersion,$statePaths,$GuestUsername,$GuestPassword)
+            # Driver installation plus device settle exceeds the standard
+            # window; keep it explicit and bounded.
+            $sunshineTimeout=240
+        }
+        $result=Invoke-EpicVMManagementTransport -Provider $Provider -Address $GuestAddress -Credential $credential -Script $sunshineScript -ArgumentList $sunshineArguments -TimeoutSeconds $sunshineTimeout -RetryCount 0
         $reportedStage=[string](Get-EpicVMHyperVValue -Object $result -Name 'failureDetailCode' -Default '')
-        $reportedStages=@('SUNSHINE_INPUT_VALIDATION','SUNSHINE_SERVICE_DISCOVERY','SUNSHINE_SERVICE_CIM_QUERY','SUNSHINE_EXECUTABLE_RESOLVE','SUNSHINE_VERSION_VERIFY','SUNSHINE_STATE_PATH','SUNSHINE_STATE_WRITE','SUNSHINE_STATE_ACL','SUNSHINE_FIREWALL_CONFIG','SUNSHINE_SERVICE_RESTART','SUNSHINE_LISTENER_VERIFY')
+        $reportedStages=@('SUNSHINE_INPUT_VALIDATION','SUNSHINE_SERVICE_DISCOVERY','SUNSHINE_SERVICE_CIM_QUERY','SUNSHINE_EXECUTABLE_RESOLVE','SUNSHINE_VERSION_VERIFY','SUNSHINE_STATE_PATH','SUNSHINE_STATE_WRITE','SUNSHINE_STATE_ACL','SUNSHINE_FIREWALL_CONFIG','SUNSHINE_SERVICE_RESTART','SUNSHINE_LISTENER_VERIFY','CAPTURE_INPUT_VALIDATION','CAPTURE_STAGING','CAPTURE_VDD_INSTALL','CAPTURE_SUNSHINE_CONF','CAPTURE_CREDENTIALS_AND_LOGON','CAPTURE_FIREWALL_CONFIG','CAPTURE_SERVICE_RESTART')
         if($reportedStages -contains $reportedStage){$sunshineStage=$reportedStage}
         if(-not [bool](Get-EpicVMHyperVValue -Object $result -Name 'ok' -Default $false) -or -not [bool](Get-EpicVMHyperVValue -Object $result -Name 'listener' -Default $false)){
             throw 'EPICVM_SUNSHINE_VERIFICATION_FAILED'
@@ -1560,6 +1855,12 @@ function Invoke-EpicVMSunshineConfiguration {
             'EPICVM_SUNSHINE_FIREWALL_FAILED'='sunshine_firewall_failed'
             'EPICVM_SUNSHINE_SERVICE_RESTART_FAILED'='sunshine_service_restart_failed'
             'EPICVM_SUNSHINE_LISTENER_FAILED'='sunshine_listener_failed'
+            'EPICVM_CAPTURE_INVALID_INPUT'='sunshine_invalid_input'
+            'EPICVM_CAPTURE_VDD_INF_MISSING'='gaming_capture_vdd_failed'
+            'EPICVM_CAPTURE_VDD_INSTALL_FAILED'='gaming_capture_vdd_failed'
+            'EPICVM_CAPTURE_VDD_DEVICE_NOT_OK'='gaming_capture_vdd_failed'
+            'EPICVM_CAPTURE_NEFCON_MISSING'='gaming_capture_vdd_failed'
+            'EPICVM_CAPTURE_STAGING_FAILED'='gaming_capture_vdd_failed'
             'EPICVM_SUNSHINE_VERIFICATION_FAILED'='sunshine_verification_failed'
             'EPICVM_POWERSHELL_DIRECT_READINESS_FAILED'='powershell_direct_failed'
             'EPICVM_POWERSHELL_DIRECT_TIMEOUT'='powershell_direct_failed'

@@ -542,4 +542,20 @@ Describe 'PowerShell Direct guest provider' {
         $text | Should -Match 'if\(\$disposePipeline -and \$null -ne \$pipeline\)'
     }
 
+    It 'stages gaming capture artifacts in envelope-safe chunks, not one remoting argument' {
+        # Regression: shipping ~3 MB of base64 through a single WinRM argument
+        # exceeds the guest's default WSMan MaxEnvelopeSizekb and fails the
+        # streaming stage opaquely. The payload must be chunk-staged first.
+        $text = Get-Content (Join-Path $windowsRoot 'providers/GuestProvider.ps1') -Raw
+        $text | Should -Match 'Get-EpicVMGamingCaptureStageScript'
+        $text | Should -Match '\$chunkSize=200000'
+        $text | Should -Not -Match '\$VddZipBase64'
+        $guestStage = (Get-EpicVMGamingCaptureStageScript).ToString()
+        # The guest staging script must reassemble atomically and verify length.
+        $guestStage | Should -Match 'part-\{0\}\.b64'
+        $guestStage | Should -Match 'Move-Item -LiteralPath \$tmp -Destination \$final -Force'
+        $guestStage | Should -Match 'EPICVM_CAPTURE_STAGING_FAILED'
+        $guestStage | Should -Match '\$combined\.Length -ne \[int\]\$TotalBase64Length'
+    }
+
 }

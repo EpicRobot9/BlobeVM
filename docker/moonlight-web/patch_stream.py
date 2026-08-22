@@ -19,20 +19,76 @@ from pathlib import Path
 OLD = 'for(;r=this.controlStream.pollPacket();)console.debug(r.contents,"enet send"),this.channel.send(r.contents);'
 NEW = 'for(;r=this.controlStream.pollPacket();){if(!this.channel||"open"!=this.channel.readyState)return;console.debug(r.contents,"enet send"),this.channel.send(r.contents)}'
 
+# Stream-start stall watchdog.  The pinned server can answer a session start
+# with "control: the control stream hasn't successfully connected yet" and
+# never deliver a first video frame; the client previously stayed black
+# forever with no recovery.  The watchdog waits for the first decoded video
+# frame after the WebRTC peer connects; if none arrives within the deadline
+# it reloads the page exactly once so the orchestrator's session resume path
+# builds a fresh stream instead of presenting a permanent black client.
+# The play gate lives inside the video sink class methods, so the watchdog
+# call is inserted at the start of the method body (valid class-body syntax).
+WATCHDOG_ANCHOR = 'onUserInteraction(){this.videoElement.paused&&this.videoElement.play()'
+WATCHDOG_PATCHED = 'onUserInteraction(){epicvmArmFrameWatchdog(this);this.videoElement.paused&&this.videoElement.play()'
+WATCHDOG_SOURCE = (
+    'function epicvmArmFrameWatchdog(sink){'
+    'if(sink.__epicvmWatchdog)return;sink.__epicvmWatchdog=!0;'
+    'let frames=sink.videoElement.getVideoPlaybackQuality?sink.videoElement.getVideoPlaybackQuality().totalVideoFrames:(sink.videoElement.webkitDecodedFrameCount||0);'
+    'const started=Date.now();'
+    'const timer=setInterval(()=>{'
+    'try{'
+    'const now=sink.videoElement.getVideoPlaybackQuality?sink.videoElement.getVideoPlaybackQuality().totalVideoFrames:(sink.videoElement.webkitDecodedFrameCount||0);'
+    'if(now>frames){clearInterval(timer);return}'
+    'if(Date.now()-started<20000)return;'
+    'clearInterval(timer);'
+    'if(window.__epicvmStreamReloaded){console.warn("epicvm stream watchdog: first frame still missing after one reload; leaving session for orchestrator recovery");return}'
+    'window.__epicvmStreamReloaded=!0;'
+    'console.warn("epicvm stream watchdog: no first video frame; reloading once for a fresh stream");'
+    'window.location.reload();'
+    '}catch(e){clearInterval(timer)}'
+    '},1000);'
+    '};'
+)
+
 
 def patch_file(path: str | Path) -> bool:
     target = Path(path)
     text = target.read_text(encoding="utf-8")
-    if NEW in text and OLD not in text:
-        return False
+    changed = False
     count = text.count(OLD)
-    if count != 1:
+    if count == 1:
+        text = text.replace(OLD, NEW, 1)
+        changed = True
+    elif count == 0 and NEW not in text:
         raise RuntimeError(
             f"expected exactly one pinned Moonlight ENet poll loop in {target}, found {count}"
         )
-    patched = text.replace(OLD, NEW, 1)
-    if NEW not in patched or OLD in patched:
-        raise RuntimeError(f"Moonlight ENet close-race patch verification failed for {target}")
+    # The patched form replaces each play-gate opening, so an already-patched
+    # bundle has zero raw anchors left but one or two patched markers.
+    anchor_count = text.count(WATCHDOG_ANCHOR)
+    patched_gate_count = text.count(WATCHDOG_PATCHED)
+    if anchor_count > 0:
+        # The pinned bundle ships identical video sink classes for the
+        # software and hardware renderer paths; arm the watchdog on each.
+        if anchor_count not in (1, 2) or patched_gate_count != 0:
+            raise RuntimeError(
+                f"unexpected video play gate layout in {target}: {anchor_count} anchors / {patched_gate_count} patched"
+            )
+        text = text.replace(WATCHDOG_ANCHOR, WATCHDOG_PATCHED)
+        if WATCHDOG_SOURCE not in text:
+            text = WATCHDOG_SOURCE + text
+        changed = True
+    elif patched_gate_count in (1, 2) and WATCHDOG_SOURCE in text:
+        pass
+    else:
+        raise RuntimeError(
+            f"Moonlight stream-start watchdog anchor missing in {target}; the pinned bundle changed"
+        )
+    if not changed:
+        return False
+    if NEW not in text or OLD in text or WATCHDOG_PATCHED not in text or WATCHDOG_SOURCE not in text:
+        raise RuntimeError(f"Moonlight stream patch verification failed for {target}")
+    patched = text
     mode = stat.S_IMODE(target.stat().st_mode)
     fd, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent, text=True)
     try:

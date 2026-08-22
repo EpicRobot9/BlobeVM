@@ -20,7 +20,10 @@ $script:EpicVMProvisioningFailureDetailCodes = @(
     'SUNSHINE_STATE_PATH',
     'SUNSHINE_STATE_WRITE', 'SUNSHINE_STATE_ACL',
     'SUNSHINE_FIREWALL_CONFIG', 'SUNSHINE_SERVICE_RESTART',
-    'SUNSHINE_LISTENER_VERIFY',
+    'SUNSHINE_LISTENER_VERIFY', 'CAPTURE_INPUT_VALIDATION',
+    'CAPTURE_STAGING', 'CAPTURE_VDD_INSTALL', 'CAPTURE_SUNSHINE_CONF',
+    'CAPTURE_CREDENTIALS_AND_LOGON', 'CAPTURE_FIREWALL_CONFIG',
+    'CAPTURE_SERVICE_RESTART',
     'GAMING_GPU_DEVICE_MISSING', 'GAMING_GPU_DEVICE_ERROR',
     'GAMING_GPU_DRIVER_INJECTION', 'GAMING_GPU_DXDIAG',
     'GAMING_GPU_WEBGL', 'GAMING_GPU_FRAME', 'GAMING_GPU_ENCODER'
@@ -52,7 +55,8 @@ function Get-EpicVMProvisioningFailureState {
             'sunshine_state_path_failed','sunshine_state_write_failed','sunshine_state_acl_failed',
             'sunshine_firewall_failed','sunshine_service_restart_failed','sunshine_listener_failed',
             'sunshine_verification_failed','powershell_direct_failed','SunshineConfigurationFailed',
-                        'guest_credential_rejected','sunshine_setup_unavailable','console_verification_failed','console_evidence_incomplete','gaming_capture_configuration_required','guest_reverification_failed',
+                        'sunshine_setup_unavailable','console_verification_failed','console_evidence_incomplete','gaming_capture_configuration_required','guest_reverification_failed',
+                        'gaming_capture_vdd_failed',
             'console_failed')) { return 'setup_failed:streaming' }
     if ($safeCode -in @('GpuUnavailable','GpuIdentityUnavailable','GpuIdentityAmbiguous','GpuQuotaUnavailable',
             'GpuAdapterCountInvalid','GpuIdentityMismatch','GpuAdapterVerificationFailed','DriverInjectionFailed',
@@ -1684,6 +1688,26 @@ function Complete-EpicVMProvisioningConsole {
     }
     if (-not ($frameVerified -and $keyboardVerified -and $mouseVerified)) {
         throw (New-EpicVMProvisioningError -Code 'console_evidence_incomplete' -Message 'Rendered video, keyboard, and mouse evidence are required before readiness.' -Status 422)
+    }
+    # Quantified frame evidence: the browser harness must attest measurable
+    # pixels, not just a boolean. A stream that stayed black or frozen must
+    # never flip this job to ready.
+    $metrics = Get-EpicVMProperty -Object $Request -Name 'frameMetrics' -Default $null
+    foreach ($entry in @(
+        @{ Name='nonblackFraction'; Min=0.60 },
+        @{ Name='meanLuma';         Min=12.0 },
+        @{ Name='decodedFramesDelta'; Min=3.0 },
+        @{ Name='durationMs';       Min=1500.0 })) {
+        $raw = Get-EpicVMProperty -Object $metrics -Name $entry.Name -Default $null
+        try { $value = [double]::Parse([string]$raw, [Globalization.CultureInfo]::InvariantCulture) } catch { $value = [double]::NaN }
+        if ([double]::IsNaN($value) -or $value -lt [double]$entry.Min) {
+            throw (New-EpicVMProvisioningError -Code 'frame_evidence_rejected' -Message ("Quantified frame evidence failed the '{0}' readiness threshold." -f $entry.Name) -Status 422)
+        }
+    }
+    $stdRaw = Get-EpicVMProperty -Object $metrics -Name 'stdDev' -Default $null
+    try { $stdDev = [double]::Parse([string]$stdRaw, [Globalization.CultureInfo]::InvariantCulture) } catch { $stdDev = [double]::NaN }
+    if ([double]::IsNaN($stdDev) -or $stdDev -lt 8.0) {
+        throw (New-EpicVMProvisioningError -Code 'frame_evidence_rejected' -Message "Quantified frame evidence failed the 'stdDev' readiness threshold." -Status 422)
     }
     if ([string]$Job.profile -ieq 'gaming' -and -not [bool](Get-EpicVMProperty -Object $Job -Name 'gamingCaptureConfigured' -Default $false)) {
         throw (New-EpicVMProvisioningError -Code 'gaming_capture_configuration_required' -Message 'The Gaming Sunshine capture target was not verified.' -Status 422 -DetailCode 'GAMING_GPU_ENCODER')

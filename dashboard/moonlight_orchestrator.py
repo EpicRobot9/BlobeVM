@@ -896,6 +896,35 @@ networks:
                         pass
             raise
 
+    def restart_session(self, name: str, *, route_name: str | None = None) -> dict[str, Any]:
+        """Bounce the staged Moonlight container to rebuild stream state.
+
+        The pinned Moonlight server can answer a session start with
+        ``control: the control stream hasn't successfully connected yet`` and
+        then never deliver a first video frame; the browser stays black even
+        though the container is healthy.  A bounded container restart gives
+        the next client a fresh WebRTC endpoint without rebuilding the paired
+        bundle or touching VM, guest, or claim state.  This is a stream-start
+        recovery action only: readiness still requires real frame evidence.
+        """
+        safe = validate_vm_name(name)
+        route = validate_vm_name(route_name or safe)
+        plan = self._read_plan(safe)
+        expected_prefix = f"/vm/{route}/"
+        if str(plan.get("routePrefix") or "") != expected_prefix or plan.get("paired") is not True:
+            raise ConsoleOrchestrationError(
+                "The persisted Moonlight bundle does not match the requested route.",
+                status=409,
+                code="moonlight_stale_bundle",
+            )
+        self.stop_staged(safe)
+        self.start_staged(safe)
+        return {
+            "ok": True,
+            "restarted": True,
+            "routePrefix": str(plan.get("routePrefix") or expected_prefix),
+        }
+
     def has_auto_login(self, name: str) -> bool:
         try:
             return bool(self._read_plan(name).get("paired"))
