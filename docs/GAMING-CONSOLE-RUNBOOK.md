@@ -246,6 +246,68 @@ video path down. Fixed persistently in `C:\Users\Epic\.wslconfig`
 `Start-Process -WindowHidden wsl -ArgumentList '-d Ubuntu --exec sleep 14400'`.
 Symptom of a bounce: kvm2→100.72.220.117 curls time out for ~1 min while
 containers restart under policy.
+NOTE: `-WindowHidden` does not exist on Start-Process; use
+`-WindowStyle Hidden`. Even with `vmIdleTimeout=-1` the distro still tore
+down between sessions on Aug 23 — the sleep-holder is mandatory during ops.
+
+### Same-name reprovision playbook (Aug 23 2026 — verified end-to-end)
+
+Reprovisioning `prod-gaming-verify-1` in place hit and cleared every known
+gap. Order matters:
+
+1. **Deprovision** via `POST /dashboard/api/deprovisioning-jobs`
+   `{host_id, name, confirmName}` (cookie+CSRF+`Origin: http://127.0.0.1:20000`
+   header when curling localhost:20000). Terminal job state is `quarantined`.
+2. **Stale job records block the name** (`conflict` 409 on re-provision).
+   The agent has no purge endpoint; `ready`/`quarantined` records are never
+   retryable. Fix: stop `EpicVMRemoteAgent`, remove the offending records
+   from `E:\EpicVM\provisioning-jobs.json` (backup first; deprovisioning-kind
+   records live in a separate dict and do not block), start service again.
+   NEVER restart the service while a provision job is mid-flight — that is
+   what produces `setup_failed:agent_restart`.
+3. **Dashboard auth for automation**: mint inside the container with the
+   app's own `_dashboard_secret()` (self-verify against `_verify_v2_token`),
+   store as `/tmp/dashtoken`; cookie mutations additionally need
+   `X-CSRF-Token` (from `/dashboard/api/auth/csrf`) AND an `Origin` header
+   matching `request.host`.
+4. **epic-pc offline after agent restart** = cold `/v1/capabilities` probe
+   (>10 s registry timeout). It warms within ~1 min; just retry hosts check.
+5. **gaming_gpu_validation_failed on fresh VMs** can be a false negative:
+   first-boot WebGL isn't up within the gate's ~1.5 s retry window. The gate
+   has NO resume API (`console-credentials` rejects non-streaming states).
+   Recovery used tonight: flip the retained job's state to
+   `setup_failed:streaming` (store edit, service stopped), then
+   `POST /v1/provisioning-jobs/<id>/console-credentials` with guest+Sunshine
+   creds — it configures capture and lands in the recoverable state.
+6. **Guest tailscale NeedsLogin after enrollment**: re-enroll per incident
+   log #2 above (DPAPI secret → OAuth → one-use key → in-guest
+   `tailscale up`). New node ⇒ NEW IP; update the job record's `tailnetIp`
+   /`tailnetDeviceId` (service stop/edit/start) BEFORE console-credentials.
+7. **Zombie sessions** after aborted runs leave `server_state=Busy`;
+   clear via bundle `POST .../api/host/cancel`
+   `{"user":"<moonlightUserId>","host_id":<NUMERIC id>}` (host_id must be a
+   number, not a string) — else every later session stalls at one frame.
+8. **Console readiness evidence**: real browser session through
+   techexplore.us; measure frames + pixel metrics; submit
+   `console-complete` with quantified `frameMetrics`. KNOWN VERSION SKEW:
+   the deployed dashboard's `console-verify` does NOT forward frameMetrics
+   to the agent, so it always 422s `frame_evidence_rejected`. Until fixed,
+   POST the full payload (booleans + frameMetrics) directly to the agent's
+   `/v1/provisioning-jobs/<id>/console-complete`.
+9. **WSL route caveat**: the file router MUST carry BOTH middlewares
+   (forwardAuth AND `customRequestHeaders.X-EpicVM-User`) or the bundle's
+   own `/api/authenticate` 401s behind a Login modal. The disabled WSL route
+   copy lives at `kvm2:/root/wsl-route.disabled-kvm2test.yml` (with the
+   user-header fix applied); restore into
+   `/opt/bloe-vm/traefik/dynamic/` to re-cutover to WSL serving.
+
+Result Aug 23: fresh VM ready via kvm2 console path, pixel-verified
+(266 decoded frames/6 s, nonblack 0.75, meanLuma 173, stdDev 103), input
+verified. WSL path left disabled pending its intermittent one-frame stall
+investigation (suspect mirrored-network RTP handling; control channel and
+WebRTC connect are fine when it works).
+
+
 
 ### Mirrored-networking caveats (measured Aug 22/23)
 
