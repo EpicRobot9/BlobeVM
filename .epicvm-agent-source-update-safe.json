@@ -1,0 +1,26 @@
+{
+  "rollbackAttempted": false,
+  "servicePathPreserved": true,
+  "serviceStatus": "Running",
+  "installedHashes": {
+    "EpicVM.Agent.ps1": "b6bec352a47336adf67416b28188c8ceebeba593eed6fc9e9355394f9bf96e22",
+    "Provisioning.ps1": "796bb4dff98ce005e5677b67e3a41af5f8123a938fe91ce592f73fa00af13068",
+    "providers\\HyperVProvider.ps1": "38df60d8ac00be942850d6618d04369812acf7c9b99ba816456bf945391831e7",
+    "providers\\GuestProvider.ps1": "27dbf0e77886e93bb3835a68067d9fd22968694769b5542f524f8188a3cca3b8",
+    "providers\\TailscaleProvider.ps1": "1e9a8feee26709bf0eef0ea5a67afb64b0221b146ef29376fc01a1301d11ce9a",
+    "providers\\GamingGpuPProvider.ps1": "578b2b52635c3e7af0944eaa5f13013d2ef48f7afee431cba9af39de26caef3f"
+  },
+  "serviceIdentity": "LocalSystem",
+  "healthVerified": true,
+  "ok": true,
+  "tokenFilePreserved": true,
+  "hashesMatch": true,
+  "sourceHashes": {
+    "EpicVM.Agent.ps1": "b6bec352a47336adf67416b28188c8ceebeba593eed6fc9e9355394f9bf96e22",
+    "Provisioning.ps1": "796bb4dff98ce005e5677b67e3a41af5f8123a938fe91ce592f73fa00af13068",
+    "providers\\HyperVProvider.ps1": "38df60d8ac00be942850d6618d04369812acf7c9b99ba816456bf945391831e7",
+    "providers\\GuestProvider.ps1": "27dbf0e77886e93bb3835a68067d9fd22968694769b5542f524f8188a3cca3b8",
+    "providers\\TailscaleProvider.ps1": "1e9a8feee26709bf0eef0ea5a67afb64b0221b146ef29376fc01a1301d11ce9a",
+    "providers\\GamingGpuPProvider.ps1": "578b2b52635c3e7af0944eaa5f13013d2ef48f7afee431cba9af39de26caef3f"
+  }
+}

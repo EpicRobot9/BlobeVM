@@ -1,0 +1,9 @@
+﻿{
+    "ok":  false,
+    "service":  "vmicvmsession",
+    "before":  "Stopped",
+    "after":  null,
+    "startAttempted":  true,
+    "startResult":  null,
+    "errorCode":  "service_start_failed"
+}
