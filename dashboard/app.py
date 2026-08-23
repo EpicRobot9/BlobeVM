@@ -4968,6 +4968,143 @@ def dashboard_vm_favicon(name):
     return '', 302, {'Location': '/dashboard/favicon.ico', 'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0', 'Pragma': 'no-cache', 'Expires': '0'}
 
 
+# --- Console launch preference (Steam Big Picture) -------------------------
+def _get_console_bp_pref(name: str) -> bool:
+    try:
+        cfg = _load_dashboard_settings()
+        m = cfg.get('vm_console_bigpicture')
+        if isinstance(m, dict):
+            v = m.get(str(name or '').strip().lower())
+            if v is not None:
+                return bool(v)
+    except Exception:
+        pass
+    return True
+
+
+def _set_console_bp_pref(name: str, enabled: bool):
+    cfg = _load_dashboard_settings()
+    m = cfg.get('vm_console_bigpicture')
+    if not isinstance(m, dict):
+        m = {}
+    m[str(name or '').strip().lower()] = bool(enabled)
+    cfg['vm_console_bigpicture'] = m
+    _save_dashboard_settings(cfg)
+
+
+def _console_app_ids(name: str, host_id: str):
+    """Best-effort {title: app_id} from the guest Sunshine via bundle backends."""
+    orch = _console_orchestrator()
+    route_name = _remote_console_route_name(name, host_id)
+    prefix = f'/vm/{route_name}/'
+    bases = []
+    try:
+        ext = _external_base_url() or request.url_root.rstrip('/')
+        pub = ext.rstrip('/') + prefix.rstrip('/')
+        exp = int(time.time() + 600)
+        dash_cookie = 'Dashboard-Auth=' + _sign_v2_token(f'{exp}:{os.urandom(8).hex()}')
+        if pub:
+            bases.append((pub, {'Cookie': dash_cookie}))
+    except Exception:
+        pass
+    for candidate in dict.fromkeys([route_name, str(name or '').strip().lower()]):
+        try:
+            bases.append(orch._container_url(candidate, prefix))
+            break
+        except Exception:
+            continue
+    try:
+        listed = orch.command_runner(['docker', 'ps', '--filter',
+                                      f'label=com.epicvm.vm.name={name}',
+                                      '--format', '{{.ID}}'],
+                                     check=True, capture_output=True, text=True)
+        cid = str(getattr(listed, 'stdout', '') or '').split()
+        if cid:
+            inspected = orch.command_runner(['docker', 'inspect', cid[0]],
+                                            check=True, capture_output=True, text=True)
+            recs = json.loads(str(getattr(inspected, 'stdout', '') or '[]'))
+            nets = ((recs[0] if recs else {}).get('NetworkSettings') or {}).get('Networks') or {}
+            proxy_name = str(getattr(orch, 'proxy_network', '') or 'proxy')
+            ip = str((nets.get(proxy_name) or {}).get('IPAddress') or '')
+            if not ip:
+                for net in nets.values():
+                    ip = str((net or {}).get('IPAddress') or '')
+                    if ip:
+                        break
+            if ip:
+                bases.append(f'http://{ip}:8080{prefix}')
+    except Exception:
+        pass
+
+    host_qs = ''
+    try:
+        datafile = os.path.join(orch._instance_root(name), 'server', 'data.json')
+        with open(datafile, 'r', encoding='utf-8') as fh:
+            dj = json.load(fh)
+        hosts = (dj.get('hosts') or {})
+        if isinstance(hosts, dict) and hosts:
+            host_qs = '?host_id=' + str(next(iter(hosts)))
+    except Exception:
+        pass
+
+    out = {}
+    last_err = ''
+    for entry in bases:
+        try:
+            base, extra_headers = (entry if isinstance(entry, tuple) else (entry, {}))
+            url = base.rstrip('/') + '/api/apps' + host_qs
+            headers = {'X-EpicVM-User': str(name)}
+            headers.update(extra_headers or {})
+            resp = orch._http('GET', url, headers=headers, timeout=30)
+            raw = resp.read()
+            data = json.loads(raw.decode('utf-8') if isinstance(raw, bytes) else raw)
+            for a in (data.get('apps') or []):
+                aid = a.get('app_id') or a.get('id')
+                title = str(a.get('title') or '')
+                if aid is not None and title:
+                    try:
+                        out[title] = int(aid)
+                    except (TypeError, ValueError):
+                        continue
+            if out:
+                return out
+        except Exception as exc:
+            last_err = f'{type(exc).__name__}: {str(exc)[:80]}'
+    print(f'[console-apps] no apps for {name}: {last_err}', flush=True)
+    return out
+
+
+@app.get('/portal/api/vm/<name>/console-apps')
+def portal_console_apps(name):
+    gate = _enforce_vm_user_access(name)
+    if gate is not None:
+        return gate
+    host_id = request.args.get('host_id', 'epic-pc').strip() or 'epic-pc'
+    apps = _console_app_ids(name, host_id)
+    return jsonify({'ok': True,
+                    'apps': [{'title': t, 'app_id': i} for t, i in apps.items()]})
+
+
+@app.get('/portal/api/vm/<name>/console-pref')
+def portal_console_pref_get(name):
+    gate = _enforce_vm_user_access(name)
+    if gate is not None:
+        return gate
+    return jsonify({'ok': True, 'bigpicture': _get_console_bp_pref(name)})
+
+
+@app.post('/portal/api/vm/<name>/console-pref')
+def portal_console_pref_set(name):
+    gate = _enforce_vm_user_access(name)
+    if gate is not None:
+        return gate
+    payload = request.get_json(silent=True) or {}
+    if 'bigpicture' not in payload:
+        return jsonify({'ok': False, 'error': 'bigpicture is required'}), 400
+    _set_console_bp_pref(name, bool(payload.get('bigpicture')))
+    return jsonify({'ok': True, 'bigpicture': bool(payload.get('bigpicture'))})
+
+
 @app.get('/EpicVM/vm/<name>/')
 def epicvm_vm_wrapper(name):
     """Console wrapper served directly under the /EpicVM namespace (the VM detail URL opens the actual console)."""
@@ -5031,6 +5168,25 @@ def dashboard_vm_wrapper(name):
                                 'consoleAvailable': False,
                         }
                 url = ''
+                # Steam launch-mode preference: deep-link straight into
+                # stream.html with the preferred appId.
+                try:
+                        if url and '?host_id=' in url and remote_running:
+                                ids = _console_app_ids(name, host_id)
+                                bp = _get_console_bp_pref(name)
+                                want = 'Steam Big Picture' if bp else 'Steam'
+                                aid = ids.get(want)
+                                if aid is None and ids:
+                                        for t, i in ids.items():
+                                                if 'steam' in t.lower():
+                                                        aid = i
+                                                        break
+                                if aid is not None:
+                                        root_part, hid_part = url.split('?host_id=', 1)
+                                        url = f'{root_part.rstrip("/")}/stream.html?host_id={hid_part}&appId={aid}'
+                                        initial_status['url'] = url
+                except Exception:
+                        pass
         else:
                 url = _build_vm_embed_url(name) or ''
                 # Keep the page-render path bounded. Optimizer/docker metadata
@@ -5058,6 +5214,7 @@ def dashboard_vm_wrapper(name):
                 js_url = json.dumps(url)
                 js_name = json.dumps(name)
                 js_status = json.dumps(initial_status)
+                js_bp = json.dumps(_get_console_bp_pref(name))
         except Exception:
                 js_title = '"%s"' % (title.replace('"','\"'))
                 js_fav = '"%s"' % (fav_url.replace('"','\"'))
@@ -5158,6 +5315,7 @@ def dashboard_vm_wrapper(name):
             <iframe id="vmframe" class="vm-iframe" src="about:blank" data-vm-src=__JS_URL__ style="display:none" scrolling="no" sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-pointer-lock allow-popups"></iframe>
             <script>
               window.__VM_WRAPPER_INIT = { vmname: __JS_NAME__, vmurl: __JS_URL__, initialStatus: __JS_STATUS__ };
+              window.__VM_WRAPPER_BP = __JS_BP__;
               window.__VM_WRAPPER_FAVICON = __JS_FAVICON__;
               (function(){
                 try {
@@ -5187,7 +5345,7 @@ def dashboard_vm_wrapper(name):
         </body>
     </html>
     '''
-        page = tmpl.replace('__TITLE__', title).replace('__FAV__', fav_link).replace('__JS_URL__', js_url).replace('__JS_NAME__', js_name).replace('__JS_FAVICON__', json.dumps(fav_url)).replace('__JS_STATUS__', js_status).replace('__ASSET_VER__', asset_ver)
+        page = tmpl.replace('__TITLE__', title).replace('__FAV__', fav_link).replace('__JS_URL__', js_url).replace('__JS_NAME__', js_name).replace('__JS_FAVICON__', json.dumps(fav_url)).replace('__JS_STATUS__', js_status).replace('__JS_BP__', js_bp).replace('__ASSET_VER__', asset_ver)
         resp = Response(page, mimetype='text/html')
         resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
         resp.headers['Pragma'] = 'no-cache'

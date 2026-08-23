@@ -142,6 +142,25 @@
       setLogoutBusy(false);
     }
 
+    const bpMode = !!window.__VM_WRAPPER_BP;
+    async function setSteamMode(mode){
+      try {
+        const res = await fetch(`/portal/api/vm/${encodeURIComponent(init.vmname)}/console-pref`, {
+          method:'POST', headers:{'Content-Type':'application/json'}, credentials:'same-origin',
+          body: JSON.stringify({ bigpicture: mode === 'bp' })
+        });
+        if(!res.ok){
+          const b = await res.json().catch(()=>({}));
+          throw new Error(b.error || ('HTTP ' + res.status));
+        }
+        window.location.reload();
+      } catch (e) {
+        setActionTone('err');
+        setActionMsg('Could not save Steam launch mode: ' + String(e));
+        setPanelOpen(true); setPanelMounted(true);
+      }
+    }
+
     React.useEffect(()=>{
       let cancelled = false;
       async function check(){
@@ -210,6 +229,19 @@
             React.createElement('button', { className:'btn btn-secondary', onClick: ()=>{ window.location.href = '/portal'; } }, 'Open Portal'),
             React.createElement('button', { className:'btn btn-secondary', onClick: logoutPortal, disabled: logoutBusy }, logoutBusy ? 'Logging out…' : 'Log out'),
             React.createElement('button', { className:'btn btn-ghost', onClick: closePanel }, 'Close')
+          ),
+          React.createElement('div', { style:{marginTop:'12px'} },
+            React.createElement('div', { style:{fontSize:'12px', color:'#9db0d1', marginBottom:'6px'} }, 'Steam launch mode'),
+            React.createElement('div', { className:'vm-controls-row' },
+              React.createElement('button', {
+                className: ('btn ' + (bpMode ? 'btn-primary' : 'btn-secondary')),
+                onClick: ()=>setSteamMode('bp'), disabled: bpMode, title:'Launch Steam in Big Picture mode'
+              }, 'Big Picture'),
+              React.createElement('button', {
+                className: ('btn ' + (!bpMode ? 'btn-primary' : 'btn-secondary')),
+                onClick: ()=>setSteamMode('win'), disabled: !bpMode, title:'Launch Steam in windowed mode'
+              }, 'Windowed')
+            )
           ),
           actionMsg ? React.createElement('div', { className:`vm-toast ${actionTone}` }, actionMsg) : null
         ) : null
