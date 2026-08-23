@@ -117,89 +117,113 @@ as `X-CSRF-Token`. Mutating endpoints also require
 rendering the live stream. Fabricated metrics are the exact defect this
 system was rebuilt to reject. If the stream is black, fix the stream.
 
-## WSL-bundle video path (Aug 22 2026 cutover — PREPARED, NOT LIVE)
-
-Intended topology once the cutover is re-attempted and verified:
+## WSL-bundle video path (Aug 23 2026 — LIVE, pixel-verified)
 
 ```
 browser ──https──> Cloudflare ──> kvm2 Traefik (auth chain unchanged)
-                                      │ file-provider router
-                                      │   epicvm-gaming-verify-1-wsl.yml
+                                      │ file-provider router (prio 650)
+                                      │   /opt/bloe-vm/traefik/dynamic/
+                                      │     epicvm-gaming-verify-1-wsl.yml
                                       ▼
                         http://100.72.220.117:18080  (WSL bundle, host-net)
-                                      │ Moonlight (TCP+UDP)
+                                      │ Moonlight RTSP+ENet+media (tailnet)
                                       ▼
-                     Sunshine on prod-gaming-verify-1 (Hyper-V, this PC)
-                        100.109.155.25  ports 47984/47989/47990
+              Sunshine on prod-gaming-verify-1 (Hyper-V, this PC)
+                 100.74.55.92  ports 47984/47989/47990/48010 + UDP 47998-48000
+                 (IP changed from 100.109.155.25 after a tailscale re-enroll;
+                  both bundles' server/data.json were updated to match)
 
 Remote users: WebRTC falls back to TURN on kvm2.
-  turn:72.60.29.204:3478 (public) / turn:100.89.87.98:3478 (tailnet)
-  relay range 49160-49200/udp, long-term creds in kvm2:/root/.turncreds.
-  NOTE: provider firewall currently BLOCKS inbound UDP/TCP 3478 from the
-  internet (works over tailnet). Open 3478 tcp/udp + 49160-49200/udp at
-  the provider before promising remote-user support.
+  turn:100.89.87.98:3478 (tailnet) is the ONLY relay configured in the
+  bundle on purpose: adding turn:72.60.29.204 made ICE gathering stall ~8 s
+  on unreachable candidates, which pushed Moonlight's media pings past
+  Sunshine's Initial-Ping window and black-screened every session.
+  Relay range 49160-49200/udp; long-term creds kvm2:/root/.turncreds.
+  Provider firewall still blocks inbound 3478 tcp/udp + the relay range
+  from the internet — open those before promising off-tailnet support.
 ```
 
-Prepared state (all verified working):
+Live verification (Aug 23 04:5x UTC): public page → forwardauth OK → WHEP
+session up → `videoWidth=1920`, frames 30→201 in 8 s; 8 screenshots over
+~11 s gave nonblack ≥ 0.970, meanLuma ≥ 83.8, stdDev ≥ 45.2 (thresholds
+0.60/12/8) → PASS.
+
+Verified working pieces:
 
 - WSL bundle `epicvm-prod-gaming-verify-1-local-moonlight-web-1` runs with
   `network_mode: host`, HTTP bound directly on `0.0.0.0:18080`
   (`/opt/epicvm/moonlight-instances/prod-gaming-verify-1/docker-compose.yml`;
   pre-change copies in `/root/compose.yml.bak-*` inside WSL).
-  Host networking is required: bridge NAT broke the upstream media leg.
+  Host networking is required for predictable source addressing.
 - Pairing survived the verbatim `server/config.json` + `server/data.json`
-  copy: `/api/host?host_id=3593014841` reports `Paired` without re-pairing.
-- kvm2 Traefik has BOTH providers enabled; the docker-labels router on the
-  old kvm2 bundle (priority 600) and a file router (priority 650) can point
-  at either backend without touching `/opt/blobe-vm` app code. The prepared
-  file-router lives at `kvm2:/root/epicvm-gaming-verify-1-wsl.bak-20260822`.
-- coturn runs on kvm2 (`docker run ... coturn/coturn:latest -n --lt-cred-mech
-  --realm=techexplore.us --min-port=49160 --max-port=49200 --external-ip=
-  72.60.29.204 -u "$TURN_USER:$TURN_PASS"`). Allocation verified with
-  turnutils_uclient through auth + relay echo (0% loss). Maintenance:
+  copy AND a guest reboot: `/api/host?host_id=3593014841` stays `Paired`.
+- kvm2 Traefik runs BOTH providers; docker-labels router on the kvm2-side
+  console container (priority 600) vs file router (650). The file router
+  currently serves prod traffic; its exact copy also lives at
+  `kvm2:/root/epicvm-gaming-verify-1-wsl.yml.bak-20260822`.
+- coturn on kvm2 (`docker run -d --name coturn -p 3478:3478/tcp
+  -p 3478:3478/udp -p 49160-49200:49160-49200/udp coturn/coturn:latest -n
+  --lt-cred-mech --realm=techexplore.us --min-port=49160 --max-port=49200
+  --external-ip=72.60.29.204 --listening-ip=0.0.0.0 --no-cli
+  -u "$TURN_USER:$TURN_PASS"`). Auth + relay echo verified 0% loss via
+  turnutils_uclient/turnutils_peer inside the container. Maintenance:
   `ssh kvm2 'docker restart coturn'`; rotate creds by editing
-  `/root/.turncreds` then recreating the container with the new `-u`.
-- WSL bundle `server/config.json` ice_servers carry STUN + the two TURN URLs.
+  `/root/.turncreds` then recreating the container.
 
-### Rollback (one command, any time)
+### Rollback (one command)
 
 ```
 ssh kvm2 'rm -f /opt/bloe-vm/traefik/dynamic/epicvm-gaming-verify-1-wsl.yml'
 ```
 
-Traefik watches `/dynamic`; the docker-labels router on the old kvm2 bundle
-(`epicvm-prod-gaming-verify-1-moonlight-moonlight-web-1`, left running)
-takes over immediately. Re-cutover = copy the backup yml back into
-`/opt/blobe-vm/traefik/dynamic/`.
+Traefik watches `/dynamic`; the docker-labels router takes over instantly
+(the kvm2-side console project is now `prod-gaming-verify-1` with container
+`prod-gaming-verify-1-moonlight-web-1` after the Aug 23 repair re-stage).
+Re-cutover = copy `/root/epicvm-gaming-verify-1-wsl.yml.bak-20260822` back
+into `/opt/bloe-vm/traefik/dynamic/`.
 
-### Why the Aug 22 cutover attempt stopped (blocker, not rollback-worthy)
+### Guest-side incident log (Aug 23) — read before touching the VM
 
-End-to-end test got as far as: page loads via public chain → forwardauth OK
-→ WHEP POST accepted → browser ICE **connected** (host + TURN-relay
-candidates both worked). Then zero RTP: the bundle never logged
-"received first video packet" from Sunshine, while the identical session
-through the OLD kvm2 bundle received exactly one packet and froze.
-`server_state` stuck `Busy` / `current_game:<id>` after dead sessions;
-cleared with
+1. **Zombie sessions**: aborted sessions leave Sunshine `Busy` /
+   `current_game:<id>` and every later launch fails ("Failed to start the
+   specified application" or rtsp 500). Clear with
 
-```
-curl -X POST -H 'X-EpicVM-User: prod-gaming-verify-1' \
-  -H 'Content-Type: application/json' \
-  -d '{"user":"<moonlightUserId>","host_id":3593014841}' \
-  http://<bundle>:8080/vm/prod-gaming-verify-1--epic-pc/api/host/cancel
-```
+   ```
+   curl -X POST -H 'X-EpicVM-User: prod-gaming-verify-1' \
+     -H 'Content-Type: application/json' \
+     -d '{"user":"<moonlightUserId>","host_id":3593014841}' \
+     http://<bundle>:18080/vm/prod-gaming-verify-1--epic-pc/api/host/cancel
+   ```
 
-After the cancel, Sunshine launched Desktop again but still delivered no
-media to the WSL bundle. Suspected guest-side Sunshine/capture degradation
-(needs an agent-side Sunshine service restart or guest reboot — agent token
-is deliberately not accessible to ops shells). Do NOT reboot the guest
-casually: a guest restart invalidates the Moonlight client certificate and
-triggers the repair/re-pair flow.
+2. **Tailscale logout**: the guest tailnet node dropped to NeedsLogin
+   (adapter Up but no 100.x IP) → total media loss while TCP probes kept
+   half-working during the transition. Re-enroll without the agent:
+   decrypt `C:\ProgramData\EpicVM\agent\tailscale-oauth.dpapi`
+   (LocalMachine DPAPI), mint a one-use key
+   (`POST /api/v2/oauth/token` then `POST /api/v2/tailnet/-/keys` with
+   tag epicvm-guest), then run INSIDE the guest
+   `tailscale up --auth-key <key> --hostname prod-gaming-verify-1
+   --unattended=true --accept-dns=false --reset`.
+   A logout wipes node identity → NEW tailscale IP (was
+   100.109.155.25 → now 100.74.55.92). Update BOTH bundles'
+   `server/data.json` host address afterwards and restart them.
+3. **Guest firewall**: media pings need UDP 47998/48000 inbound. Added
+   rules `EpicVM Sunshine Tailnet Range UDP/TCP` (47984-48010 from
+   100.64.0.0/10) inside the guest alongside the provisioning defaults.
+4. **Wedged capture/display**: after repeated crashes the VDD desktop fell
+   back to 800×600 and h264_amf entered an encoder create-loop (one frame
+   then freeze). A **guest VM restart** (dashboard
+   `POST /dashboard/api/restart/<name>` → agent lifecycle) cleared it;
+   pairing SURVIVED the reboot. If pairing ever drops,
+   `POST /dashboard/api/provisioning-jobs/<job_id>/repair-console`
+   (job `477ed0d485f44e19903dd777a2fbf507`) re-stages and re-pairs — note
+   it re-creates the kvm2 console under compose project
+   `prod-gaming-verify-1` and may leave it Created-but-not-started; start
+   with `docker compose -p prod-gaming-verify-1 up -d --wait`.
 
 App-ID note for this VM's Sunshine: only `Desktop` (881448767) launches.
-`Steam Big Picture` (1093255277) exists but its launch fails with
-"Failed to start the specified application"; legacy id `570` does NOT exist
-on this host.
+`Steam Big Picture` (1093255277) exists but fails with "Failed to start the
+specified application"; legacy id `570` does NOT exist on this host.
 
 ### WSL availability hazard (operational)
 
@@ -210,10 +234,13 @@ video path down. Fixed persistently in `C:\Users\Epic\.wslconfig`
 Symptom of a bounce: kvm2→100.72.220.117 curls time out for ~1 min while
 containers restart under policy.
 
-### Mirrored-networking caveat (measured Aug 22)
+### Mirrored-networking caveats (measured Aug 22/23)
 
-Inbound UDP to WSL listeners works when targeted at the tailnet IP
-(100.72.220.117) but NOT at other host IPs (e.g. LAN 192.168.1.178):
-kvm2→100.72.220.117:48000 delivers; kvm2→192.168.1.178:48000 times out.
-Any component that advertises a non-tailnet host IP for return traffic will
-black-hole. Keep everything pinned to `WEBRTC_NAT_1TO1_HOST=100.72.220.117`.
+- Inbound UDP to WSL listeners works when targeted at the tailnet IP
+  (100.72.220.117) but NOT at other host IPs (e.g. LAN 192.168.1.178):
+  kvm2→100.72.220.117:48000 delivers; kvm2→192.168.1.178:48000 times out.
+  Any component advertising a non-tailnet host IP for return traffic will
+  black-hole. Keep everything pinned to
+  `WEBRTC_NAT_1TO1_HOST=100.72.220.117`.
+- WSL `/proc/net/tcp` does not show mirrored connections reliably; use
+  Windows-side `Get-NetTCPConnection`/pktmon or WSL tcpdump on eth1.
