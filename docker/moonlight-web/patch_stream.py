@@ -50,6 +50,37 @@ WATCHDOG_SOURCE = (
     '};'
 )
 
+# Auto-arm stall recovery.  The click-armed watchdog above never fires for
+# headless/automation clients or for users who never interact before the
+# stream wedges (observed as Sunshine logging UDP "actively refused" while
+# the client sits at one decoded frame).  This installer watches the video
+# element directly: once a stream has produced frames and then stops
+# advancing for 20s - or never produced its first frame within 20s of being
+# sized - it reloads exactly once, mirroring the manual watchdog.
+AUTO_WATCHDOG_ANCHOR = 'window.requestAnimationFrame(()=>{'
+AUTO_WATCHDOG_SOURCE = (
+    'window.epicvmInstallAutoWatchdog=function(){'
+    'if(window.__epicvmAutoWatchdogInstalled)return;window.__epicvmAutoWatchdogInstalled=!0;'
+    'let lastFrames=-1;let lastChange=Date.now();'
+    'setInterval(()=>{'
+    'try{'
+    'const v=document.querySelector("video");'
+    'if(!v||!v.videoWidth){lastChange=Date.now();return}'
+    'const q=v.getVideoPlaybackQuality?v.getVideoPlaybackQuality():null;'
+    'const f=q?q.totalVideoFrames:(v.webkitDecodedFrameCount||0);'
+    'if(f!==lastFrames){lastFrames=f;lastChange=Date.now();return}'
+    'if(Date.now()-lastChange<20000)return;'
+    'if(window.__epicvmStreamReloaded){console.warn("epicvm auto-watchdog: still stalled after reload; leaving session for orchestrator recovery");return}'
+    'window.__epicvmStreamReloaded=!0;'
+    'console.warn("epicvm auto-watchdog: stream stalled; reloading once for a fresh session");'
+    'window.location.reload();'
+    '}catch(e){}'
+    '},1000);'
+    '};'
+    'window.epicvmInstallAutoWatchdog();'
+    'window.requestAnimationFrame(()=>{'
+)
+
 
 def patch_file(path: str | Path) -> bool:
     target = Path(path)
@@ -84,9 +115,23 @@ def patch_file(path: str | Path) -> bool:
         raise RuntimeError(
             f"Moonlight stream-start watchdog anchor missing in {target}; the pinned bundle changed"
         )
+    # Auto-watchdog: install once per stream.js.  Idempotent on re-runs.
+    if AUTO_WATCHDOG_ANCHOR in text and AUTO_WATCHDOG_SOURCE not in text:
+        text = text.replace(AUTO_WATCHDOG_ANCHOR, AUTO_WATCHDOG_SOURCE, 1)
+        changed = True
+    elif AUTO_WATCHDOG_ANCHOR not in text and AUTO_WATCHDOG_SOURCE not in text:
+        raise RuntimeError(
+            f"auto-watchdog anchor missing in {target}; the pinned bundle changed"
+        )
     if not changed:
         return False
-    if NEW not in text or OLD in text or WATCHDOG_PATCHED not in text or WATCHDOG_SOURCE not in text:
+    if (
+        NEW not in text
+        or OLD in text
+        or WATCHDOG_PATCHED not in text
+        or WATCHDOG_SOURCE not in text
+        or AUTO_WATCHDOG_SOURCE not in text
+    ):
         raise RuntimeError(f"Moonlight stream patch verification failed for {target}")
     patched = text
     mode = stat.S_IMODE(target.stat().st_mode)
