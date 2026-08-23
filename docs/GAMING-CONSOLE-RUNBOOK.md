@@ -221,9 +221,22 @@ into `/opt/bloe-vm/traefik/dynamic/`.
    `prod-gaming-verify-1` and may leave it Created-but-not-started; start
    with `docker compose -p prod-gaming-verify-1 up -d --wait`.
 
-App-ID note for this VM's Sunshine: only `Desktop` (881448767) launches.
-`Steam Big Picture` (1093255277) exists but fails with "Failed to start the
-specified application"; legacy id `570` does NOT exist on this host.
+App-ID note for this VM's Sunshine: `Desktop` (881448767) and
+`Steam Big Picture` (1093255277) both stream. BP required: installing Steam
+in the guest (`SteamSetup.exe /S`), setting its app cmd to the REAL exe —
+`"C:\Program Files (x86)\Steam\steam.exe" -bigpicture` (quoted; protocol
+URLs like `steam://open/...` cannot be spawned by Sunshine, and an unquoted
+spaced path fails with Permission denied) — AND an active console session:
+Sunshine spawns apps into the console session, so a headless VM at the
+lock screen fails with "Permission denied". Keep the session alive with
+`tscon <id> /dest:console` after connecting it via PS-Direct/quser.
+
+Public TURN status: coturn is configured and verified server-side, but the
+provider firewall drops ALL inbound except 22/80/443 (verified on-wire:
+zero packets reach eth0 on other ports). Open 3478 tcp/udp + 49160-49200/udp
+in the provider console; the bundle will then relay for off-tailnet users.
+Do NOT add unreachable TURN URLs to ice_servers — each dead candidate adds
+~4 s of ICE gathering delay that breaks the media-ping window.
 
 ### WSL availability hazard (operational)
 
