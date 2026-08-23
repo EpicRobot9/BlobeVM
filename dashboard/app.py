@@ -2937,7 +2937,7 @@ def _portal_vm_payload(name: str):
     return vm
 
 def _state_dir():
-    return os.environ.get('BLOBEDASH_STATE', '/opt/blobe-vm')
+    return os.environ.get('BLOBEDASH_STATE', '/opt/bloe-vm')
 
 def _repo_manager_path():
     # Fallback path to the repo-managed CLI inside the mounted state dir
