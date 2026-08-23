@@ -134,13 +134,13 @@ browser ──https──> Cloudflare ──> kvm2 Traefik (auth chain unchanged
                   both bundles' server/data.json were updated to match)
 
 Remote users: WebRTC falls back to TURN on kvm2.
-  turn:100.89.87.98:3478 (tailnet) is the ONLY relay configured in the
-  bundle on purpose: adding turn:72.60.29.204 made ICE gathering stall ~8 s
-  on unreachable candidates, which pushed Moonlight's media pings past
-  Sunshine's Initial-Ping window and black-screened every session.
-  Relay range 49160-49200/udp; long-term creds kvm2:/root/.turncreds.
-  Provider firewall still blocks inbound 3478 tcp/udp + the relay range
-  from the internet — open those before promising off-tailnet support.
+  turn:72.60.29.204:3478 (public) AND turn:100.89.87.98:3478 (tailnet) are
+  both configured in the bundle's ice_servers; provider firewall now allows
+  inbound 3478 tcp/udp (verified via authenticated allocation from WSL).
+  Relay range 49160-49200/udp published on kvm2 docker.
+  Long-term creds: kvm2:/root/.turncreds. Maintenance:
+  `ssh kvm2 'docker restart coturn'`; rotate creds by editing
+  /root/.turncreds then recreating the container with the new -u.
 ```
 
 Live verification (Aug 23 04:5x UTC): public page → forwardauth OK → WHEP
@@ -231,12 +231,12 @@ Sunshine spawns apps into the console session, so a headless VM at the
 lock screen fails with "Permission denied". Keep the session alive with
 `tscon <id> /dest:console` after connecting it via PS-Direct/quser.
 
-Public TURN status: coturn is configured and verified server-side, but the
-provider firewall drops ALL inbound except 22/80/443 (verified on-wire:
-zero packets reach eth0 on other ports). Open 3478 tcp/udp + 49160-49200/udp
-in the provider console; the bundle will then relay for off-tailnet users.
-Do NOT add unreachable TURN URLs to ice_servers — each dead candidate adds
-~4 s of ICE gathering delay that breaks the media-ping window.
+Public TURN status: provider firewall was opened Aug 23 (3478 tcp/udp
+reachable; authenticated allocation verified from an external vantage).
+Keep the "don't add unreachable TURN candidates" rule in mind for ANY
+future relay: dead candidates add ~4 s of ICE gathering delay each, which
+pushes Moonlight's media pings past Sunshine's Initial-Ping window and
+black-screens sessions.
 
 ### WSL availability hazard (operational)
 
