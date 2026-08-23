@@ -116,3 +116,104 @@ as `X-CSRF-Token`. Mutating endpoints also require
 `console-complete` frame metrics must come from an actual browser session
 rendering the live stream. Fabricated metrics are the exact defect this
 system was rebuilt to reject. If the stream is black, fix the stream.
+
+## WSL-bundle video path (Aug 22 2026 cutover — PREPARED, NOT LIVE)
+
+Intended topology once the cutover is re-attempted and verified:
+
+```
+browser ──https──> Cloudflare ──> kvm2 Traefik (auth chain unchanged)
+                                      │ file-provider router
+                                      │   epicvm-gaming-verify-1-wsl.yml
+                                      ▼
+                        http://100.72.220.117:18080  (WSL bundle, host-net)
+                                      │ Moonlight (TCP+UDP)
+                                      ▼
+                     Sunshine on prod-gaming-verify-1 (Hyper-V, this PC)
+                        100.109.155.25  ports 47984/47989/47990
+
+Remote users: WebRTC falls back to TURN on kvm2.
+  turn:72.60.29.204:3478 (public) / turn:100.89.87.98:3478 (tailnet)
+  relay range 49160-49200/udp, long-term creds in kvm2:/root/.turncreds.
+  NOTE: provider firewall currently BLOCKS inbound UDP/TCP 3478 from the
+  internet (works over tailnet). Open 3478 tcp/udp + 49160-49200/udp at
+  the provider before promising remote-user support.
+```
+
+Prepared state (all verified working):
+
+- WSL bundle `epicvm-prod-gaming-verify-1-local-moonlight-web-1` runs with
+  `network_mode: host`, HTTP bound directly on `0.0.0.0:18080`
+  (`/opt/epicvm/moonlight-instances/prod-gaming-verify-1/docker-compose.yml`;
+  pre-change copies in `/root/compose.yml.bak-*` inside WSL).
+  Host networking is required: bridge NAT broke the upstream media leg.
+- Pairing survived the verbatim `server/config.json` + `server/data.json`
+  copy: `/api/host?host_id=3593014841` reports `Paired` without re-pairing.
+- kvm2 Traefik has BOTH providers enabled; the docker-labels router on the
+  old kvm2 bundle (priority 600) and a file router (priority 650) can point
+  at either backend without touching `/opt/blobe-vm` app code. The prepared
+  file-router lives at `kvm2:/root/epicvm-gaming-verify-1-wsl.bak-20260822`.
+- coturn runs on kvm2 (`docker run ... coturn/coturn:latest -n --lt-cred-mech
+  --realm=techexplore.us --min-port=49160 --max-port=49200 --external-ip=
+  72.60.29.204 -u "$TURN_USER:$TURN_PASS"`). Allocation verified with
+  turnutils_uclient through auth + relay echo (0% loss). Maintenance:
+  `ssh kvm2 'docker restart coturn'`; rotate creds by editing
+  `/root/.turncreds` then recreating the container with the new `-u`.
+- WSL bundle `server/config.json` ice_servers carry STUN + the two TURN URLs.
+
+### Rollback (one command, any time)
+
+```
+ssh kvm2 'rm -f /opt/bloe-vm/traefik/dynamic/epicvm-gaming-verify-1-wsl.yml'
+```
+
+Traefik watches `/dynamic`; the docker-labels router on the old kvm2 bundle
+(`epicvm-prod-gaming-verify-1-moonlight-moonlight-web-1`, left running)
+takes over immediately. Re-cutover = copy the backup yml back into
+`/opt/blobe-vm/traefik/dynamic/`.
+
+### Why the Aug 22 cutover attempt stopped (blocker, not rollback-worthy)
+
+End-to-end test got as far as: page loads via public chain → forwardauth OK
+→ WHEP POST accepted → browser ICE **connected** (host + TURN-relay
+candidates both worked). Then zero RTP: the bundle never logged
+"received first video packet" from Sunshine, while the identical session
+through the OLD kvm2 bundle received exactly one packet and froze.
+`server_state` stuck `Busy` / `current_game:<id>` after dead sessions;
+cleared with
+
+```
+curl -X POST -H 'X-EpicVM-User: prod-gaming-verify-1' \
+  -H 'Content-Type: application/json' \
+  -d '{"user":"<moonlightUserId>","host_id":3593014841}' \
+  http://<bundle>:8080/vm/prod-gaming-verify-1--epic-pc/api/host/cancel
+```
+
+After the cancel, Sunshine launched Desktop again but still delivered no
+media to the WSL bundle. Suspected guest-side Sunshine/capture degradation
+(needs an agent-side Sunshine service restart or guest reboot — agent token
+is deliberately not accessible to ops shells). Do NOT reboot the guest
+casually: a guest restart invalidates the Moonlight client certificate and
+triggers the repair/re-pair flow.
+
+App-ID note for this VM's Sunshine: only `Desktop` (881448767) launches.
+`Steam Big Picture` (1093255277) exists but its launch fails with
+"Failed to start the specified application"; legacy id `570` does NOT exist
+on this host.
+
+### WSL availability hazard (operational)
+
+WSL idle-shutdown (default `vmIdleTimeout` 60 s) stops docker and takes the
+video path down. Fixed persistently in `C:\Users\Epic\.wslconfig`
+(`[wsl2] vmIdleTimeout=-1`). During ops sessions also keep a holder:
+`Start-Process -WindowHidden wsl -ArgumentList '-d Ubuntu --exec sleep 14400'`.
+Symptom of a bounce: kvm2→100.72.220.117 curls time out for ~1 min while
+containers restart under policy.
+
+### Mirrored-networking caveat (measured Aug 22)
+
+Inbound UDP to WSL listeners works when targeted at the tailnet IP
+(100.72.220.117) but NOT at other host IPs (e.g. LAN 192.168.1.178):
+kvm2→100.72.220.117:48000 delivers; kvm2→192.168.1.178:48000 times out.
+Any component that advertises a non-tailnet host IP for return traffic will
+black-hole. Keep everything pinned to `WEBRTC_NAT_1TO1_HOST=100.72.220.117`.
