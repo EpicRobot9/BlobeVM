@@ -209,3 +209,64 @@ portal /console-apps → bundle GET /api/apps (proxied to Sunshine)
   real evidence arrived — behavior verified, not weakened.
 - Rollback: deprovision job `94ca9d2c…` quarantined; template untouched.
 - Next: Phase 4 (shared game storage foundation).
+
+---
+
+## Phase 4 — Shared Game Storage Foundation
+
+- Code/revision: `production@6a65cb6` + `scripts/Attach-EpicVMSharedGames.ps1` (new)
+- What changed:
+  - **Design chosen**: host-local SMB library, read-only game content,
+    per-VM mutable state stays on guest-local disks (inherently isolated).
+    Dynamic attach — no reprovisioning or template rebuild needed for new
+    games; catalog consumers use UNC paths.
+  - Host: `E:\EpicVM\shared-games\{games\,catalog.json}`; SMB share
+    `EpicVMGames$` (read: `epicvm-games` local user + admin full); firewall
+    `EpicVM-Games-SMB` (445/tcp from 100.64.0.0/10); share password at
+    `C:\ProgramData\EpicVM\agent\games-share.token` (admin-only ACL);
+    `guest-cred.ps1` helper (fetches guest creds from kvm2 defaults).
+  - `scripts/Attach-EpicVMSharedGames.ps1 -VmName <vm>`: idempotent PS-Direct
+    attach — stores share credential in the guest vault (cmdkey), maps P:
+    (best-effort), enables autologon, registers a logon re-attach Run key.
+  - **Bugs found & fixed**:
+    - Agent `Provisioning.ps1`: standard-profile jobs crashed
+      `InvalidInput` in preclaim — `Get-EpicVMProperty` returns a property's
+      null value instead of the default, so null spec fields cast to 0.
+      Fixed with explicit null coalescing; deployed to the live agent.
+    - `Restart-VM -Force` is a hard power-cut: registry lazy-flushes
+      (5 s+) are lost, which masqueraded as "writes reverting across
+      reboots". All guest restarts must be graceful (Stop-VM/Start-VM or
+      in-guest Restart-Computer).
+    - PS-Direct HKCU writes land in a throwaway hive when the console
+      session is not yet active (autologon race) — machine-scope (HKLM) or
+      file-backed state only.
+    - This guest ignores HKLM/HKCU Run keys and Startup-folder scripts at
+      logon entirely (fired-file test proved it) — guest-side autorun is
+      not a viable attach mechanism in the current template.
+  - **Final access design**: UNC + per-user credential vault (cmdkey).
+    Vault credentials are file-backed and session-independent: any session
+    of the guest operator (console included) auto-authenticates UNC access.
+    No drive letter, autorun, or timing dependency.
+- Verification performed:
+  - Both `prod-gaming-verify-1` AND `shared-storage-test-1` (fresh
+    standard-profile VM through the fixed pipeline) read the same shared
+    library; writes to the share are refused (read-only enforced) on both.
+  - **Graceful reboot survival**: full Stop-VM→Start-VM cycle on
+    shared-storage-test-1 → UNC access via vault creds with ZERO re-attach
+    (catalog readable, writes still blocked).
+  - Unmount/cleanup safe (net use /delete + cmdkey /delete verified).
+- PASS/FAIL: PASS
+- Known limitations:
+  - Drive-letter P: in the console session is best-effort (guest autorun
+    mechanisms unreliable in current template); catalog/shortcuts must use
+    UNC paths (`\\100.72.220.117\EpicVMGames$\…`).
+  - `shared-storage-test-1` tailscale needed re-enrollment after reboot
+    (NeedsLogin — unattended flag did not stick on the standard template);
+    gaming VM tailscale survives reboots. Template gap, fix in Phase 6.
+  - Anonymous-read grants were added host-side as a fallback but are
+    unused by the final design (vault creds preferred).
+  - Autologon enablement belongs in guest_setup/template (currently done by
+    the attach script); template gap, fix in Phase 6.
+- Rollback: `Remove-SmbShare EpicVMGames$`; remove host firewall rule;
+  `git revert` the agent fix; guests: `cmdkey /delete:100.72.220.117`.
+- Next: Phase 5 (lightweight shared test game).

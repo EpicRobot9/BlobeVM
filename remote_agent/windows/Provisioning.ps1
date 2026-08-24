@@ -924,9 +924,19 @@ function Start-EpicVMProvisioningJob {
         $manifestPath = [string](Get-EpicVMProperty -Object $State.Config -Name 'TemplateManifestPath' -Default '')
         $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
         $Job.templateVersion = [string]$manifest.templateVersion
-        $cpuCount = [long](Get-EpicVMProperty -Object $Job -Name 'cpuCount' -Default $profile.cpuCount)
-        $memoryBytes = [long](Get-EpicVMProperty -Object $Job -Name 'memoryBytes' -Default $profile.memoryBytes)
-        $diskSizeBytes = [long](Get-EpicVMProperty -Object $Job -Name 'diskSizeBytes' -Default $profile.diskSizeBytes)
+        # Get-EpicVMProperty returns an existing property's value even when
+        # that value is $null, so standard-profile jobs (whose spec fields are
+        # created null) would cast [long]$null = 0 and fail CreateVM
+        # validation. Coalesce null/empty to the profile defaults explicitly.
+        $cpuRaw = Get-EpicVMProperty -Object $Job -Name 'cpuCount' -Default $null
+        if ($null -eq $cpuRaw -or [string]$cpuRaw -eq '') { $cpuRaw = $profile.cpuCount }
+        $memoryRaw = Get-EpicVMProperty -Object $Job -Name 'memoryBytes' -Default $null
+        if ($null -eq $memoryRaw -or [string]$memoryRaw -eq '') { $memoryRaw = $profile.memoryBytes }
+        $diskRaw = Get-EpicVMProperty -Object $Job -Name 'diskSizeBytes' -Default $null
+        if ($null -eq $diskRaw -or [string]$diskRaw -eq '') { $diskRaw = $profile.diskSizeBytes }
+        $cpuCount = [long]$cpuRaw
+        $memoryBytes = [long]$memoryRaw
+        $diskSizeBytes = [long]$diskRaw
         $createRequest = [ordered]@{
             name = $Job.name; profile = $profile.profile; cpuCount = $cpuCount
             memoryBytes = $memoryBytes; diskSizeBytes = $diskSizeBytes
