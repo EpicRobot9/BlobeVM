@@ -104,3 +104,108 @@ portal /console-apps → bundle GET /api/apps (proxied to Sunshine)
 - Rollback point: git `production@5ca4a15`; kvm2 masters dir valid;
   traefik route backup `kvm2:/root/epicvm-gaming-verify-1-wsl.yml.bak-20260822`.
 - Next: Phase 1 (control/media plane verification).
+
+---
+
+## Phase 1 — Control/Media Plane Separation
+
+- Code/revision: `production@b27b22f` (ops-only changes)
+- What changed:
+  - Restored public dashboard routing after the concurrent-session actor
+    quarantined the catch-all: new scoped `epicvm-dashboard.yml`
+    (`PathPrefix(/dashboard|/EpicVM|/portal)` @ priority 600 → blobedash),
+    master copy + self-heal coverage added.
+  - Verified TURN/coturn fallback remains deployed (kvm2 :3478, relay range).
+- Existing components reused: traefik dynamic file provider, self-heal cron,
+  coturn deployment.
+- Verification performed:
+  - `https://techexplore.us/dashboard/api/auth/csrf` → 401 (gated, alive)
+  - `https://techexplore.us/EpicVM/` → 200
+  - Console route (docker-label router, priority 600) serves prod stream
+  - kvm2 authorizes sessions (forwardauth 302 chain observed in blobedash log)
+- PASS/FAIL: PASS (with documented limitation)
+- Evidence: session tool outputs 2026-08-23 21:40–23:00 UTC
+- Known limitations:
+  - **Media path currently kvm2-side** (Sunshine → kvm2 moonlight-web →
+    browser). The host-local WSL bundle exists, is healthy, and is reachable
+    (kvm2→100.72.220.117:18080), but its historical one-frame stall plus the
+    stall root-cause found in Phase 2 (media-port rebind race, fixed via
+    auto-watchdog) mean the WSL cutover is deferred until the fix soaks on
+    the kvm2 path. Per plan §Phase-1 FAIL guidance, the working fallback is
+    retained while migration continues.
+  - kvm2 `/opt/bloe-vm/repo` was destroyed by the concurrent actor; restored
+    via fresh clone from origin.
+- Rollback: `rm /opt/bloe-vm/traefik/dynamic/epicvm-dashboard.yml` (docker
+  labels still route console; dashboard would need the quarantined catch-all
+  restored from `/root/epicvm-dashboard.yml.quarantined-20260823`).
+- Next: Phase 2.
+
+---
+
+## Phase 2 — Host-Local WSL Streaming + Session Hygiene
+
+- Code/revision: `production@2ef042a` (patch_stream.py auto-watchdog)
+- What changed:
+  - **Root-caused the one-frame stall**: after a fast disconnect/reconnect,
+    the bundle's media UDP port is not yet rebound; Sunshine logs
+    `Couldn't receive data from udp socket: actively refused` once per
+    second while the client sits at one decoded frame. The existing
+    click-armed watchdog never fires for headless/no-interaction clients.
+  - `docker/moonlight-web/patch_stream.py`: added an **auto-armed stall
+    watchdog** (video element frame-advance monitor; reloads exactly once
+    after 20 s without progress; idempotent; fails closed if the pinned
+    bundle changes).
+  - Rebuilt overlay image `epicvm/moonlight-web@sha256:c435d20e…6930`,
+    digest-pinned in `/opt/bloe-vm/.env` + staged compose, bundle recreated.
+  - Guest hygiene fixes during recovery: autologon re-asserted,
+    `output_name=Virtual Display` removed from guest sunshine.conf (device
+    name mismatch → black capture; MSI reinstall had reverted the fix).
+- Verification performed:
+  - connect → stream → disconnect(20 s) → reconnect → **PASS ×3**
+    (102/128/128 frames per 6 s, nonblack 0.75 each cycle; third cycle used
+    an aggressive 10 s gap and self-healed without manual reload)
+  - Console session survives disconnects (quser Active throughout)
+  - Probe isolation: bundle `POST /api/host/cancel` returns success and does
+    not hold the encoder (subsequent real connect succeeded)
+- PASS/FAIL: PASS
+- Evidence: browser pixel metrics + Sunshine packet logs (keyboard packets,
+  mouse button packets) + console logs in this session.
+- Known limitations:
+  - Stall self-heal costs one ~20 s reload when it triggers; root fix would
+    rebind the media port server-side inside the pinned image (future work).
+  - WSL path not yet cut over (see Phase 1 limitation).
+- Rollback: revert `2ef042a`, rebuild previous overlay
+  (`epicvm/moonlight-web@sha256:f5f90efd…`), restore
+  `docker-compose.yml.bak-aw1`.
+- Next: Phase 3.
+
+---
+
+## Phase 3 — Real Gaming Readiness Gate
+
+- Code/revision: `production@2ef042a` (no gate code changes — gate exercised
+  end-to-end through production)
+- What changed: full deprovision → reprovision of `prod-gaming-verify-1`
+  through the production APIs after the old guest's Sunshine wedged
+  irreparably (accept-then-close TLS even after fresh reinstall; guest AMD
+  driver state suspected). Store surgery per runbook (removed stale
+  `streaming_setup` record `1db6e47a…`).
+- Existing components reused: entire provisioning pipeline
+  (claim→…→stream_validation), orchestrator staging, repair flows.
+- Verification performed (fresh VM, template v1.1.0, GPU-P 50 % RX 6800 XT):
+  1. stream opens via `https://techexplore.us/vm/prod-gaming-verify-1--epic-pc/` ✔
+  2. non-black pixels: nonblackFraction 0.674–0.75 (≥0.60) ✔
+  3. changing frames: 102–171 decoded per 6–8 s window ✔
+  4. keyboard reaches guest: 80 keyboard packets in Sunshine log ✔
+  5. mouse reaches guest: mouse button press/release packets in log ✔
+  6. disconnect/cleanup succeeds ✔
+  7. reconnect succeeds (3 cycles) ✔
+  - Job `6b94352f…` flipped to `ready` via agent `console-complete` with the
+    real browser frameMetrics (deployed dashboard `console-verify` still has
+    the known frameMetrics-forwarding skew; direct agent POST used).
+- PASS/FAIL: PASS
+- Known limitations: black stream CAN still occur transiently (config
+  regressions, session loss); the gate correctly refused to mark ready until
+  real evidence arrived — behavior verified, not weakened.
+- Rollback: deprovision job `94ca9d2c…` quarantined; template untouched.
+- Next: Phase 4 (shared game storage foundation).
