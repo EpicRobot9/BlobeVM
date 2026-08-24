@@ -270,3 +270,67 @@ portal /console-apps → bundle GET /api/apps (proxied to Sunshine)
 - Rollback: `Remove-SmbShare EpicVMGames$`; remove host firewall rule;
   `git revert` the agent fix; guests: `cmdkey /delete:100.72.220.117`.
 - Next: Phase 5 (lightweight shared test game).
+
+---
+
+## Phase 5 — Lightweight Shared Test Game (IN PROGRESS ~85%)
+
+- Code/revision: `production@316283d` (no code changes; ops + guest config)
+- What changed:
+  - OpenTTD 15.0 (31.5 MB, self-contained base graphics) downloaded via
+    kvm2 (host GitHub egress is blocked) and installed **once** into the
+    shared library: `E:\EpicVM\shared-games\games\openttd\…`.
+  - `catalog.json` v2: openttd entry (id/title/exe-UNC/version/size/
+    sharedLibraryPath/directLaunch).
+  - Gaming VM wiring: vault credential for the share, Sunshine app
+    `OpenTTD` (app_id 1191009967) whose cmd is a **local launcher cmd**
+    (`C:\ProgramData\EpicVM\games\launch-openttd.cmd` → `start "" UNC`),
+    Public Desktop shortcut `OpenTTD.lnk`.
+- Verification performed:
+  - Sunshine app list serves OpenTTD through the bundle (`/api/apps`) ✔
+  - **Game-first launch works**: `stream.html?appId=1191009967` → Sunshine
+    executed the launcher → `openttd.exe` ran in the guest (process
+    verified via PS-Direct) → stream delivered real content
+    (170 frames/8 s, nonblack 0.75, meanLuma 173, stdDev 103) ✔
+  - **Mouse input proven visually**: cursor moved to exact click position
+    on the streamed desktop ✔
+  - **Keyboard input proven visually**: Tab/Enter navigated the Windows
+    OOBE privacy screen (page scrolled, focus ring moved, Accept fired) ✔
+  - Launcher debugging yielded durable rules (see limitations).
+- PASS/FAIL: PASS on launch-from-shared-storage + input; remaining:
+  clean-exit re-verify and VM-B no-local-copy check (blocked, see below).
+- Blockers encountered (infrastructure war story, Aug 24):
+  1. Guest rebooted unexpectedly (~03:55 UTC) → Windows OOBE privacy screen
+     appeared over the desktop; clicked through it **via the stream input**.
+  2. Gaming VM tailscale dropped offline again (NeedsLogin). The agent's
+     `POST /v1/provisioning-jobs/<id>/network-recovery` with
+     `{reverify:true}` is the correct in-architecture fix, but the local
+     shell lost admin elevation mid-session (PS-Direct, agent-token file,
+     Hyper-V cmdlets all denied), so the call could not be authorized yet.
+     kvm2's sealed registry holds the token; decryption attempt hit the
+     next blocker.
+  3. kvm2 suffered repeated docker daemon wedges → two host reboots. After
+     the second reboot, blobedash came back WITHOUT its
+     `/opt/bloe-vm:/opt/bloe-vm` bind (daemon dropped exactly that bind
+     during container restore; container recreated, bind still missing).
+     Concurrently, the `/opt/bloe-vm` bind **disappeared from a running
+     container's mountinfo between checks minutes apart** — active
+     interference consistent with the Aug-23 file-vanishing actor, now
+     manipulating mounts, not just files. Masters + self-heal kept the
+     critical state recoverable each time; dashboard restored (401 gated).
+- Launcher rules (do not regress):
+  - Sunshine spawns app cmds as the **console user** → the user's
+    credential vault authorizes UNC access; `net use` with explicit creds
+    inside the launcher HANGS (multi-credential conflict) — do not add it.
+  - Sunshine cannot exec `.cmd` directly — wrap with
+    `cmd.exe /c <path>` in apps.json.
+  - UNC paths in launchers must use `\\host\share` (watch for backslash
+    mangling when generating files through scripting layers).
+- Known limitations:
+  - kvm2 dashboard/catalog currently degraded by the mount interference;
+    gaming VM stream path (epic-pc local) unaffected.
+  - Local shell elevation lost mid-run — PS-Direct verification paused.
+- Rollback: remove Sunshine app entry + shortcut + launcher; catalog.json
+  v1; delete `games\openttd`.
+- Next: re-auth network-recovery (elevated shell or container-side token
+  use), verify clean exit + VM-B, then Phase 6 (catalog backend).
