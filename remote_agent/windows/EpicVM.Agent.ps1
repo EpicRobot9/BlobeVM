@@ -416,6 +416,32 @@ function Invoke-EpicVMApiRequest {
             if ($null -ne $State.Provisioning) { $vms = @(Add-EpicVMProvisioningInventoryState -State $State -Vms $vms) }
             return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok = $true; vms = $vms })
         }
+        if ($Method -eq 'GET' -and $segments.Count -eq 2 -and $segments[0] -eq 'v1' -and $segments[1] -eq 'games') {
+            $catalogPath = 'E:\EpicVM\shared-games\catalog.json'
+            if (-not (Test-Path -LiteralPath $catalogPath)) {
+                return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok = $true; games = @() })
+            }
+            try {
+                $catalog = Get-Content -LiteralPath $catalogPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                $games = @($catalog.games | ForEach-Object {
+                    $exePath = [string]$_.exe
+                    $available = ($null -ne $exePath -and (Test-Path -LiteralPath $exePath))
+                    [ordered]@{
+                        id = [string]$_.id
+                        title = [string]$_.title
+                        platform = [string]$_.platform
+                        version = [string]$_.version
+                        exe = $exePath
+                        sizeBytes = [long]$_.sizeBytes
+                        available = $available
+                        directLaunch = [bool]($_.directLaunch)
+                    }
+                })
+                return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok = $true; games = $games })
+            } catch {
+                return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok = $true; games = @() })
+            }
+        }
         if ($null -ne $State.Provisioning -and $Method -eq 'POST' -and $normalizedPath -eq '/v1/provisioning-jobs') {
             $request = Get-EpicVMRequestBody -Body $Body
             try { $job = New-EpicVMProvisioningJob -State $State -Request $request }
