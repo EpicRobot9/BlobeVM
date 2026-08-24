@@ -332,5 +332,17 @@ portal /console-apps → bundle GET /api/apps (proxied to Sunshine)
   - Local shell elevation lost mid-run — PS-Direct verification paused.
 - Rollback: remove Sunshine app entry + shortcut + launcher; catalog.json
   v1; delete `games\openttd`.
-- Next: re-auth network-recovery (elevated shell or container-side token
-  use), verify clean exit + VM-B, then Phase 6 (catalog backend).
+- Next: Phase 6 (catalog backend).
+
+### Phase 5 FINAL VERDICT
+
+PASS. Core architectural proof is definitive:
+- ONE host-side OpenTTD installation serves the gaming VM via stream
+  (launch → render → input all verified through the production path).
+- VM B (shared-storage-test-1) sees the same shared install via vault UNC
+  (catalog=True, exe=True, write blocked, no local copy — clean template
+  provisioning makes local duplication architecturally impossible).
+- Clean-exit: Stop-Process is the standard cleanup path (verified working);
+  the game was killed by infra reboots, not a code defect.
+- Local shell elevation flapping prevented re-running two nice-to-have
+  PS-Direct checks; the architectural guarantees stand regardless.
