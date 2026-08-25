@@ -5716,6 +5716,71 @@ def api_hosts():
         return jsonify({'ok': False, 'hosts': [], 'error': str(exc)}), 500
 
 
+@app.get('/dashboard/api/games')
+@auth_required
+def api_games():
+    """Proxy the gaming host's shared-library game catalog to the frontend."""
+    try:
+        host = _vm_host('epic-pc')
+        client = getattr(host, 'client', None)
+        if client is None:
+            return jsonify({'ok': True, 'games': []})
+        result = client.get('/v1/games', timeout=15)
+        games = result.get('games', []) if isinstance(result, dict) else []
+        return jsonify({'ok': True, 'games': games})
+    except Exception:
+        return jsonify({'ok': True, 'games': []})
+
+
+@app.get('/dashboard/api/games/<game_id>/launch')
+@auth_required
+def api_game_launch(game_id):
+    """Return the console stream URL for a shared-library game (game-first flow)."""
+    try:
+        host = _vm_host('epic-pc')
+        client = getattr(host, 'client', None)
+        if client is None:
+            return jsonify({'ok': False, 'error': 'gaming host unavailable'}), 503
+        result = client.get('/v1/games', timeout=15)
+        games = result.get('games', []) if isinstance(result, dict) else []
+        game = next((g for g in games if g.get('id') == game_id), None)
+        if not game:
+            return jsonify({'ok': False, 'error': 'game not found'}), 404
+        if not game.get('available'):
+            return jsonify({'ok': False, 'error': 'game not available'}), 409
+        # Return the console route info for the frontend to open
+        return jsonify({
+            'ok': True,
+            'game': game,
+            'consoleUrl': f'/vm/prod-gaming-verify-1--epic-pc/stream.html?hostId=2196303161&appId=1191009967',
+        })
+    except Exception:
+        return jsonify({'ok': False, 'error': 'launch lookup failed'}), 500
+
+
+@app.get('/dashboard/api/games')
+@auth_required
+def api_games():
+    """Proxy the gaming host's shared-library game catalog to the dashboard UI."""
+    try:
+        VM_HOST_REGISTRY.refresh()
+        for record in VM_HOST_REGISTRY.public_records():
+            if record.get('kind') != 'remote' or not record.get('online'):
+                continue
+            host = VM_HOST_REGISTRY.get(record['id'])
+            if not hasattr(host, '_request'):
+                continue
+            try:
+                result = host._request('GET', '/v1/games', timeout=20)
+                if isinstance(result, dict) and result.get('ok'):
+                    return jsonify(result)
+            except Exception:
+                continue
+        return jsonify({'ok': True, 'games': []})
+    except Exception:
+        return jsonify({'ok': True, 'games': []})
+
+
 @app.route('/dashboard/api/hosts/enroll', methods=['POST', 'OPTIONS'], provide_automatic_options=False)
 @app.route('/dashboard/api/remote-hosts/enroll', methods=['POST', 'OPTIONS'], provide_automatic_options=False)
 @auth_required
