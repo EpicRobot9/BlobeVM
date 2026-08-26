@@ -22,6 +22,7 @@ param(
     [string] $BootstrapUser = 'EpicVMBootstrap',
     [string] $BootstrapCredentialPath = 'C:\ProgramData\EpicVM\agent\bootstrap.dpapi',
     [string] $SunshineVersion = '2026.516.143833',
+    [string] $GuestTimeZoneId = [string][TimeZoneInfo]::Local.Id,
     [switch] $UseCleanTemplateSource,
     [string] $CleanTemplateSourceRoot = 'E:\EpicVM\clean-template-source',
     [int] $BuilderShutdownTimeoutSeconds = 300,
@@ -140,7 +141,7 @@ function Get-EpicVMSourceDisk {
 
 function Get-EpicVMTemplateGuestSanitizer {
     return {
-        param($BootstrapName,$BootstrapPassword,$BootstrapPath,$ExpectedSunshineVersion)
+        param($BootstrapName,$BootstrapPassword,$BootstrapPath,$ExpectedSunshineVersion,$TimeZoneId)
         $ErrorActionPreference='Stop'
         $secure = ConvertTo-SecureString $BootstrapPassword -AsPlainText -Force
         $existingBootstrap = Get-LocalUser -Name $BootstrapName -ErrorAction SilentlyContinue
@@ -210,11 +211,52 @@ function Get-EpicVMTemplateGuestSanitizer {
         Get-Service -Name Tailscale -ErrorAction SilentlyContinue | Stop-Service -Force -ErrorAction SilentlyContinue
         @('Application','System','Setup','Security') | ForEach-Object { Clear-WinEvent -LogName $_ -ErrorAction SilentlyContinue }
         Remove-Item 'C:\Windows\Panther\*','C:\Windows\Temp\*','C:\Windows\Logs\*' -Recurse -Force -ErrorAction SilentlyContinue
+        # Clones re-enter interactive OOBE on first boot because /generalize
+        # resets OOBE state and no answer file exists.  Write one now so the
+        # first boot of every generalized clone auto-completes the remaining
+        # screens instead of needing robot clicks; the sanitized bootstrap
+        # account intentionally stays so PowerShell Direct probing continues.
+        $oobePolicy=New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OOBE' -Force
+        Set-ItemProperty -LiteralPath $oobePolicy.PSPath -Name 'DisablePrivacyExperience' -Value 1 -Type DWord
+        # Time-sync baseline for clones: w32time always-on and the machine
+        # zone pinned to the host zone captured by the builder caller.
+        Set-Service -Name 'w32time' -StartupType Automatic -ErrorAction SilentlyContinue
+        Start-Service -Name 'w32time' -ErrorAction SilentlyContinue
+        if(-not [string]::IsNullOrWhiteSpace([string]$TimeZoneId)){
+            $safeTimeZone=[string]$TimeZoneId -replace '&','&amp;' -replace '<','&lt;' -replace '>','&gt;'
+            try { tzutil.exe /s ([string]$TimeZoneId) } catch { }
+            $unattendXml=@"
+<?xml version="1.0" encoding="utf-8"?>
+<unattend xmlns="urn:schemas-microsoft-com:unattend">
+  <settings pass="specialize">
+    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <ComputerName>*</ComputerName>
+      <CopyProfile>false</CopyProfile>
+      <InputLocale>en-US</InputLocale>
+      <SystemLocale>en-US</SystemLocale>
+      <UILanguage>en-US</UILanguage>
+      <UserLocale>en-US</UserLocale>
+      <TimeZone>$safeTimeZone</TimeZone>
+    </component>
+  </settings>
+  <settings pass="oobeSystem">
+    <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <HideEULAPage>true</HideEULAPage>
+      <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+      <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+      <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+      <ProtectYourPC>3</ProtectYourPC>
+    </component>
+  </settings>
+</unattend>
+"@
+            $unattendXml | Set-Content -LiteralPath (Join-Path $env:SystemRoot 'System32\Sysprep\unattend.xml') -Encoding UTF8
+        }
         # Keep the sanitized bootstrap account available for the first
         # PowerShell Direct probe.  /oobe would stop at interactive Windows
         # setup and make unattended provisioning impossible; generalized
         # clones still receive a fresh machine identity on their first boot.
-        $sysprepProcess=Start-Process -FilePath "$env:SystemRoot\System32\Sysprep\Sysprep.exe" -ArgumentList @('/generalize','/shutdown','/mode:vm') -Wait -PassThru -WindowStyle Hidden
+        $sysprepProcess=Start-Process -FilePath "$env:SystemRoot\System32\Sysprep\Sysprep.exe" -ArgumentList @('/generalize','/shutdown','/mode:vm','/unattend:C:\Windows\System32\Sysprep\unattend.xml') -Wait -PassThru -WindowStyle Hidden
         $sysprepExitCode=$sysprepProcess.ExitCode
         if($sysprepExitCode -ne 0){
             $sysprepErrorPath=Join-Path $env:SystemRoot 'System32\Sysprep\Panther\setuperr.log'
@@ -311,7 +353,7 @@ function Invoke-EpicVMTemplateBuild {
             $bootstrapBstr=[Runtime.InteropServices.Marshal]::SecureStringToBSTR($BootstrapSecret.Password)
             $bootstrapPlain=[Runtime.InteropServices.Marshal]::PtrToStringBSTR($bootstrapBstr)
             try {
-                Invoke-EpicVMTemplateGuestScript -VmName $BuilderName -Credential $SourceCredential -Script $sanitizer -ArgumentList @($BootstrapName,$bootstrapPlain,$BootstrapPath,$SunshineVersion) | Out-Null
+                Invoke-EpicVMTemplateGuestScript -VmName $BuilderName -Credential $SourceCredential -Script $sanitizer -ArgumentList @($BootstrapName,$bootstrapPlain,$BootstrapPath,$SunshineVersion,$GuestTimeZoneId) | Out-Null
                 $guestSanitationCompleted=$true
             }
             catch {
@@ -350,7 +392,7 @@ function Invoke-EpicVMTemplateBuild {
         Copy-Item -LiteralPath $builderDisk -Destination (Join-Path $stageRoot 'win11-25h2.vhdx') -Force -ErrorAction Stop
         $imagePath=Join-Path $stageRoot 'win11-25h2.vhdx'
         $hash=(Get-FileHash -LiteralPath $imagePath -Algorithm SHA256).Hash.ToLowerInvariant()
-        $manifest=[ordered]@{ templateVersion='1.1.0'; name=$TemplateName; build=('win11-25h2-' + (Get-Date).ToUniversalTime().ToString('yyyyMMdd')); windowsBuild='Windows 11 25H2'; sha256=$hash; imagePath=(Join-Path $finalRoot 'win11-25h2.vhdx'); bootstrap='machine-dpapi-encrypted-system-admin'; sunshine='installed'; sunshineVersion=$SunshineVersion; sunshineService='SunshineService'; sunshineCredentials='request-only'; gpu='none'; gpuPartition='none'; diskType='Dynamic'; sourceVm=$SourceName; sysprep='/generalize /shutdown /mode:vm'; network='private-switch'; fullCopy=$true; immutable=$true; sanitation='accounts;profiles;browser-data;logs;tailscale-identity;sunshine-credentials;machine-generalize'; createdAt=[DateTime]::UtcNow.ToString('o') }
+        $manifest=[ordered]@{ templateVersion='1.2.0'; name=$TemplateName; build=('win11-25h2-' + (Get-Date).ToUniversalTime().ToString('yyyyMMdd')); windowsBuild='Windows 11 25H2'; sha256=$hash; imagePath=(Join-Path $finalRoot 'win11-25h2.vhdx'); bootstrap='machine-dpapi-encrypted-system-admin'; sunshine='installed'; sunshineVersion=$SunshineVersion; sunshineService='SunshineService'; sunshineCredentials='request-only'; gpu='none'; gpuPartition='none'; diskType='Dynamic'; sourceVm=$SourceName; sysprep='/generalize /shutdown /mode:vm /unattend'; unattend='oobe-bypass+locale+timezone'; timeZone=$GuestTimeZoneId; network='private-switch'; fullCopy=$true; immutable=$true; sanitation='accounts;profiles;browser-data;logs;tailscale-identity;sunshine-credentials;machine-generalize'; createdAt=[DateTime]::UtcNow.ToString('o') }
         $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $stageRoot 'manifest.json') -Encoding UTF8 -NoNewline
         New-Item -ItemType Directory -Path $OutputRoot -Force | Out-Null
         Move-Item -LiteralPath $stageRoot -Destination $finalRoot -Force
