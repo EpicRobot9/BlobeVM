@@ -424,17 +424,45 @@ function Invoke-EpicVMApiRequest {
             try {
                 $catalog = Get-Content -LiteralPath $catalogPath -Raw -Encoding UTF8 | ConvertFrom-Json
                 $games = @($catalog.games | ForEach-Object {
-                    $exePath = [string]$_.exe
-                    $available = ($null -ne $exePath -and (Test-Path -LiteralPath $exePath))
+                    # Catalog entries are external data and may omit optional
+                    # fields entirely; under StrictMode a bare $_.sizeBytes would
+                    # throw PropertyNotFoundException and silently empty the list.
+                    # Use Get-EpicVMProperty everywhere so a single malformed entry
+                    # can only degrade its own row.
+                    $exePath = [string](Get-EpicVMProperty -Object $_ -Name 'exe' -Default '')
+                    $available = $false
+                    if ($null -ne $exePath -and $exePath -ne '') {
+                        try {
+                            # The catalog stores exe as a UNC (\\host\EpicVMGames$\...). Under
+                            # LocalSystem the agent cannot authenticate to the SMB share, so a
+                            # direct Test-Path throws and would otherwise empty the whole list.
+                            # Resolve the share to its local root when it points at
+                            # this host. The share group must swallow the trailing '$'
+                            # of hidden shares (EpicVMGames$) wholesale; splitting it
+                            # out makes Get-SmbShare look up the wrong name.
+                            $localExePath = $exePath
+                            if ($exePath -match '^\\\\(?<host>[^\\]+)\\(?<share>[^\\]+)\\(?<rest>.*)$') {
+                                $shareRoot = $null
+                                try { $shareRoot = (Get-SmbShare -Name $Matches['share'] -ErrorAction Stop).Path } catch { }
+                                if ($null -ne $shareRoot) { $localExePath = Join-Path $shareRoot $Matches['rest'] }
+                            }
+                            if (Test-Path -LiteralPath $localExePath -ErrorAction SilentlyContinue) { $available = $true }
+                            elseif (Test-Path -LiteralPath $exePath -ErrorAction SilentlyContinue) { $available = $true }
+                        } catch { $available = $false }
+                    }
+                    $rawSize = Get-EpicVMProperty -Object $_ -Name 'sizeBytes' -Default 0
+                    if ($null -eq $rawSize -or ([string]$rawSize) -eq '') { $rawSize = 0 }
+                    $version = [string](Get-EpicVMProperty -Object $_ -Name 'version' -Default '')
+                    $directLaunch = [bool](Get-EpicVMProperty -Object $_ -Name 'directLaunch' -Default $false)
                     [ordered]@{
-                        id = [string]$_.id
-                        title = [string]$_.title
-                        platform = [string]$_.platform
-                        version = [string]$_.version
+                        id = [string](Get-EpicVMProperty -Object $_ -Name 'id' -Default '')
+                        title = [string](Get-EpicVMProperty -Object $_ -Name 'title' -Default '')
+                        platform = [string](Get-EpicVMProperty -Object $_ -Name 'platform' -Default '')
+                        version = $version
                         exe = $exePath
-                        sizeBytes = [long]$_.sizeBytes
+                        sizeBytes = [long]$rawSize
                         available = $available
-                        directLaunch = [bool]($_.directLaunch)
+                        directLaunch = $directLaunch
                     }
                 })
                 return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok = $true; games = $games })
