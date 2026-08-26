@@ -376,6 +376,12 @@ PASS. Core architectural proof is definitive:
 - Bundle tile click => Sunshine launches the game directly:
   stream title `Stream: OpenTTD` (appId 1794454679), game process
   verified in-guest. Same path serves any catalog game.
+- Follow-up fix (2026-08-26 re-verify): the shared baseset shipped only
+  the `orig_*` catalogs without actual graphics sets, so the game booted
+  to a "Missing graphics" prompt. OpenGFX 0.6.1 (ogfx*.grf + opengfx.obg)
+  installed into `games/openttd/openttd-15.0-windows-win64/baseset/` on
+  the share; re-launch via tile now renders the full OpenTTD 15.0 main
+  menu (guest capture). Every VM gets graphics for free from the share.
 
 ### Phase 10 - Shared Game Updates + Version Safety (PASS 2026-08-26)
 - `scripts/Update-EpicVMSharedGame.ps1`: stage -> validate -> atomic
