@@ -414,7 +414,19 @@ Scenarios (A/B/C/D) all exercised this session:
 - C desktop-first: Phase 8 (portal -> desktop -> shortcut -> game).
 - D library lifecycle: Phase 10 update+rollback + Phase 11 multi-VM reads.
 Infra gate: agent health ok, dashboard auth ok, games proxy 200, portal
-wrapper 200, bundle Paired, VM Running. Known follow-ups: guest OOBE
-re-appears after reprovision (template unattend gap); agent games list
-returns empty (catalog population); stream client self-reconnects once
-~2min in (cosmetic); stale tailscale devices accumulate per re-enroll.
+wrapper 200, bundle Paired, VM Running. Known follow-ups and their state:
+
+- agent games list empty -> FIXED 2026-08-26 (`EpicVM.Agent.ps1` resolves
+  catalog UNC exes through the local share root under LocalSystem;
+  strict-mode-safe per-entry isolation). `/v1/games` returns 2/2 available.
+- guest OOBE re-appears after reprovision -> FIXED for future builds:
+  template v1.2.0 ships `C:\Windows\System32\Sysprep\unattend.xml`
+  (specialize locale/timezone + oobeSystem Hide* pages,
+  `DisablePrivacyExperience=1`) and sysprep now passes `/unattend`.
+  Takes effect on the next template rebuild.
+- no guest time baseline -> FIXED with the same template build: w32time
+  pinned Automatic, `tzutil /s <host zone>` baked into every clone;
+  Hyper-V Time Synchronization integration (default-on) keeps drift zero.
+- stream client self-reconnects once ~2min in (cosmetic; open).
+- stale tailscale devices accumulate per re-enroll (open; needs API-key
+  revoke pass on deprovision).
