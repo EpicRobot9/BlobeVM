@@ -419,11 +419,13 @@ wrapper 200, bundle Paired, VM Running. Known follow-ups and their state:
 - agent games list empty -> FIXED 2026-08-26 (`EpicVM.Agent.ps1` resolves
   catalog UNC exes through the local share root under LocalSystem;
   strict-mode-safe per-entry isolation). `/v1/games` returns 2/2 available.
-- guest OOBE re-appears after reprovision -> FIXED for future builds:
-  template v1.2.0 ships `C:\Windows\System32\Sysprep\unattend.xml`
-  (specialize locale/timezone + oobeSystem Hide* pages,
-  `DisablePrivacyExperience=1`) and sysprep now passes `/unattend`.
-  Takes effect on the next template rebuild.
+- guest OOBE re-appears after reprovision -> FIXED and template REBUILT
+  2026-08-26 (`win11-25h2` v1.2.0, sha256 e1d11c8a…, from
+  EpicVM-CleanTemplateSource): ships `unattend.xml` with oobeSystem Hide*
+  pages, `DisablePrivacyExperience=1`, en-US locale,
+  `TimeZone=Eastern Standard Time`. Old image archived as
+  `win11-25h2-prev-20260826`; builder VM/work dirs cleaned. All future
+  provisions from this manifest auto-complete OOBE screens.
 - no guest time baseline -> FIXED with the same template build: w32time
   pinned Automatic, `tzutil /s <host zone>` baked into every clone;
   Hyper-V Time Synchronization integration (default-on) keeps drift zero.
