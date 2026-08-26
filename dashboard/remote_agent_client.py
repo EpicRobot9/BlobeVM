@@ -200,6 +200,14 @@ class RemoteAgentClient:
         result = self._request("GET", "/v1/capabilities")
         return result if isinstance(result, dict) else {}
 
+    def list_games(self) -> list[dict[str, Any]]:
+        """Shared-library game catalog from the host agent."""
+        result = self._request("GET", "/v1/games")
+        games = result.get("games", []) if isinstance(result, dict) else []
+        if not isinstance(games, list):
+            raise RemoteAgentError("remote agent returned an invalid game catalog")
+        return [dict(item) for item in games if isinstance(item, Mapping)]
+
     def list_vms(self) -> list[dict[str, Any]]:
         result = self._request("GET", "/v1/vms")
         if isinstance(result, dict):
@@ -782,6 +790,12 @@ class RemoteAgentHost:
 
     def health(self) -> dict[str, Any]:
         return self._probe(force=True)
+
+    def list_games(self) -> list[dict[str, Any]]:
+        try:
+            return self.client.list_games()
+        except RemoteAgentError as exc:
+            raise self._host_error(exc) from exc
 
     def status(self, name: str) -> dict[str, Any]:
         try:

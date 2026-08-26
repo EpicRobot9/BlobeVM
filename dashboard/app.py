@@ -5724,10 +5724,19 @@ def api_games():
         host = _vm_host('epic-pc')
         if host is None:
             return jsonify({'ok': True, 'games': []})
-        result = host._request('GET', '/v1/games', timeout=15)
-        games = result.get('games', []) if isinstance(result, dict) else []
+        # RemoteAgentHost wraps the raw client: agent calls go through
+        # host.client._request (or the list_games helper), never host itself.
+        if hasattr(host, 'list_games'):
+            games = host.list_games()
+        elif hasattr(host, 'client'):
+            result = host.client._request('GET', '/v1/games', timeout=15)
+            games = result.get('games', []) if isinstance(result, dict) else []
+        else:
+            result = host._request('GET', '/v1/games', timeout=15)
+            games = result.get('games', []) if isinstance(result, dict) else []
         return jsonify({'ok': True, 'games': games})
     except Exception:
+        app.logger.exception("failed to proxy /v1/games from epic-pc")
         return jsonify({'ok': True, 'games': []})
 
 

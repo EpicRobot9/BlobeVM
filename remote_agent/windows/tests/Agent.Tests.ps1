@@ -193,3 +193,42 @@ Describe 'EpicVM agent binding defaults' {
         $download | Should -Match 'RemoteVM'
     }
 }
+
+Describe 'EpicVM agent shared games endpoint' {
+    BeforeAll {
+        $catalogMissingSize = '{"library":"test","version":2,"games":[' +
+            '{"id":"g1","title":"No Size","platform":"windows","version":"1","exe":"C:/definitely/missing/g1.exe"},' +
+            '{"id":"g2","title":"Has Size","platform":"windows","version":"2","exe":"C:/definitely/missing/g2.exe","sizeBytes":123456}]}'
+    }
+
+    It 'returns every catalog entry even when optional fields are missing' {
+        $config = Get-EpicVMDefaultConfig
+        $config.Provider = 'Mock'
+        $config.CatalogPath = Join-Path (Get-PSDrive TestDrive).Root 'catalog.json'
+        Set-Content -LiteralPath $config.CatalogPath -Value $catalogMissingSize -Encoding UTF8
+
+        $state = New-EpicVMAgentState -Config $config -Token 'test-secret-token' -Provider (New-TestProvider)
+        $response = Invoke-EpicVMApiRequest -State $state -Method 'GET' -Path '/v1/games' -Headers @{ Authorization = 'Bearer test-secret-token' }
+
+        $response.StatusCode | Should -Be 200
+        $response.Body.ok | Should -BeTrue
+        $response.Body.games.Count | Should -Be 2
+        $response.Body.games[0].id | Should -Be 'g1'
+        $response.Body.games[0].sizeBytes | Should -Be 0
+        $response.Body.games[0].available | Should -BeFalse
+        $response.Body.games[1].sizeBytes | Should -Be 123456
+    }
+
+    It 'serves an empty list when the catalog file is absent instead of erroring' {
+        $config = Get-EpicVMDefaultConfig
+        $config.Provider = 'Mock'
+        $config.CatalogPath = Join-Path (Get-PSDrive TestDrive).Root 'missing-catalog.json'
+
+        $state = New-EpicVMAgentState -Config $config -Token 'test-secret-token' -Provider (New-TestProvider)
+        $response = Invoke-EpicVMApiRequest -State $state -Method 'GET' -Path '/v1/games' -Headers @{ Authorization = 'Bearer test-secret-token' }
+
+        $response.StatusCode | Should -Be 200
+        $response.Body.ok | Should -BeTrue
+        $response.Body.games | Should -BeNullOrEmpty
+    }
+}

@@ -51,6 +51,7 @@ function Get-EpicVMDefaultConfig {
         Generation = 2
         TemplateManifestPath = 'E:\EpicVM\templates\win11-25h2\manifest.json'
         ProvisioningStatePath = 'E:\EpicVM\provisioning-jobs.json'
+        CatalogPath = 'E:\EpicVM\shared-games\catalog.json'
         GamingVMNames = @('testre')
         GamingGpuDeviceIdentity = 'VEN_1002&DEV_73BF'
         GamingGpuPartitionPercent = 50
@@ -417,7 +418,7 @@ function Invoke-EpicVMApiRequest {
             return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok = $true; vms = $vms })
         }
         if ($Method -eq 'GET' -and $segments.Count -eq 2 -and $segments[0] -eq 'v1' -and $segments[1] -eq 'games') {
-            $catalogPath = 'E:\EpicVM\shared-games\catalog.json'
+            $catalogPath = [string](Get-EpicVMProperty -Object $State.Config -Name 'CatalogPath' -Default 'E:\EpicVM\shared-games\catalog.json')
             if (-not (Test-Path -LiteralPath $catalogPath)) {
                 return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok = $true; games = @() })
             }
