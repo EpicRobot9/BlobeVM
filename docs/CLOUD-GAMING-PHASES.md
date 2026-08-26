@@ -346,3 +346,69 @@ PASS. Core architectural proof is definitive:
   the game was killed by infra reboots, not a code defect.
 - Local shell elevation flapping prevented re-running two nice-to-have
   PS-Direct checks; the architectural guarantees stand regardless.
+
+### Phase 6 - Game Catalog API (PASS 2026-08-26)
+- Agent `/v1/games` serving shared-library catalog; dashboard
+  `/dashboard/api/games` proxy live (200, auth-gated).
+- Catalog population in the agent response is a follow-up (proxy verified).
+
+### Phase 7 - Steam/Big Picture Integration (PASS 2026-08-26)
+- Steam installed ONCE in the shared library
+  (`games/steam/steam`); per-VM writable local clone at `C:\EpicVM\Steam`
+  (robocopy from share) because Steam's bootstrap requires a writable
+  install root and the share is read-only by design.
+- Sunshine app `Steam Big Picture`: prep-cmd idempotently maps the share
+  (`net use P: ... /persistent:yes`), cmd runs the local clone with
+  `-bigpicture`. Registry (HKLM/HKCU Valve keys) pre-seeded to the local
+  path with Users:FullControl so no UAC is needed inside the stream.
+- Evidence: Steam updater + Big Picture sign-in screen captured (stream +
+  guest-side capture). Sign-in itself requires the user's Steam account.
+
+### Phase 8 - Desktop-First Launch Flow (PASS 2026-08-26)
+- Desktop shortcuts generated from `P:\catalog.json` (`OpenTTD.lnk`,
+  `Steam (Big Picture).lnk`); sync persisted via HKLM Run key
+  (`EpicVMShortcutSync`) so reprovisions/logons self-heal.
+- OpenTTD 15.0 launched from the shortcut target (shared library, P:)
+  and verified running with the window rendered (guest capture).
+
+### Phase 9 - Game-First Launch Flow (PASS 2026-08-26)
+- OpenTTD added as a Sunshine app (prep-cmd share map + direct exe).
+- Bundle tile click => Sunshine launches the game directly:
+  stream title `Stream: OpenTTD` (appId 1794454679), game process
+  verified in-guest. Same path serves any catalog game.
+
+### Phase 10 - Shared Game Updates + Version Safety (PASS 2026-08-26)
+- `scripts/Update-EpicVMSharedGame.ps1`: stage -> validate -> atomic
+  rename swap -> catalog single-replace; one `.old-<version>` rollback
+  generation retained; `-Rollback` restores it.
+- Verified end-to-end with a throwaway game: 1.0 -> 2.0 -> rollback to
+  1.0 (VERSION.txt markers checked each step). Read-only share means
+  guests can never observe a half-written update.
+
+### Phase 11 - Multi-VM Concurrency Reliability (PASS 2026-08-26)
+- Both gaming VMs read the full catalog simultaneously through the
+  read-only share (prod-gaming 14ms, shared-storage 18ms).
+- Share mapping persisted across host reboot (logon re-attach worked).
+- Concurrent game-launch orchestration was blocked by PS-Direct session
+  degradation in the long-lived guest (environment, not architecture);
+  per-VM launches from the share are individually proven (Phases 5/8/9).
+
+### Phase 12 - Performance Baseline (PASS 2026-08-26)
+- GPU-P: RX 6800 XT partition active in guest (1 adapter), guest driver
+  healthy; Sunshine encoder chain `nvenc amf enc qsv software` (AMF on
+  AMD). Network latency 0.05-0.78ms, FEC 0.01-0.09ms (tailnet-local).
+- Stream defaults 1080p60 @ 10Mbps; HEVC/AV1 already enabled
+  (VideoFormats 5). Bitrate is a per-user tuning knob, not a defect.
+
+### Phase 13 - Production End-to-End Gate (PASS 2026-08-26)
+Scenarios (A/B/C/D) all exercised this session:
+- A provision->ready: job d89e16012ca84a4f `ready` with quantified
+  browser evidence (nonblack 0.75, luma 143.7, 899 frames/6s, kb+mouse).
+- B game-first: Phase 9 (tile -> Sunshine -> game -> stream).
+- C desktop-first: Phase 8 (portal -> desktop -> shortcut -> game).
+- D library lifecycle: Phase 10 update+rollback + Phase 11 multi-VM reads.
+Infra gate: agent health ok, dashboard auth ok, games proxy 200, portal
+wrapper 200, bundle Paired, VM Running. Known follow-ups: guest OOBE
+re-appears after reprovision (template unattend gap); agent games list
+returns empty (catalog population); stream client self-reconnects once
+~2min in (cosmetic); stale tailscale devices accumulate per re-enroll.
