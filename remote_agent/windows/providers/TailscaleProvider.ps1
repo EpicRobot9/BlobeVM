@@ -329,3 +329,47 @@ function Revoke-EpicVMTailscaleDevice {
     catch { throw (New-EpicVMHyperVError -Code 'tailscale_revoke_failed' -Message 'Tailscale device revocation failed.') }
     finally {$access=$null}
 }
+
+function Get-EpicVMTailscaleStaleDeviceIds {
+    # Pure filter: every device sharing the VM's hostname except the one to
+    # keep. Re-enrolling a VM name leaves the previous enrollment's
+    # control-plane record behind; this selects them for revocation.
+    param([AllowNull()][object[]]$Devices,[Parameter(Mandatory)][string]$VmName,[AllowNull()][string]$KeepDeviceId='')
+    $keep=[string]$KeepDeviceId
+    $stale=@($Devices | Where-Object {
+        [string](Get-EpicVMHyperVValue -Object $_ -Name 'hostname' -Default '') -ceq $VmName
+    } | ForEach-Object {
+        [string](Get-EpicVMHyperVValue -Object $_ -Name 'id' -Default '')
+    } | Where-Object {
+        (-not [string]::IsNullOrWhiteSpace($_)) -and ($_ -cne $keep)
+    })
+    return ,$stale
+}
+
+function Clear-EpicVMTailscaleStaleDevices {
+    # Best-effort sweep: revoke every tailnet device for VmName that is not
+    # KeepDeviceId. Individual deletion failures are reported, never thrown;
+    # callers must be able to finish teardown even when Tailscale is flaky.
+    param([Parameter(Mandatory)][object]$Provider,[Parameter(Mandatory)][string]$VmName,[AllowNull()][string]$KeepDeviceId='',[AllowNull()][string]$AccessToken='')
+    $tailnet=[string](Get-EpicVMHyperVValue -Object $Provider -Name 'TailscaleTailnet' -Default '')
+    if([string]::IsNullOrWhiteSpace($tailnet)){
+        return [ordered]@{ok=$false;skipped='tailnet_not_configured';revoked=@();failed=@()}
+    }
+    $access=[string]$AccessToken
+    if([string]::IsNullOrWhiteSpace($access)){$access=Get-EpicVMTailscaleAccessToken -Provider $Provider}
+    $revoked=@()
+    $failed=@()
+    try {
+        $response=Invoke-EpicVMTailscaleHttp -Provider $Provider -Method 'GET' -Path ('tailnet/' + [Uri]::EscapeDataString($tailnet) + '/devices') -AccessToken $access -TimeoutSeconds 20
+        $devices=@(Get-EpicVMHyperVValue -Object $response -Name 'devices' -Default @())
+        foreach($deviceId in (Get-EpicVMTailscaleStaleDeviceIds -Devices $devices -VmName $VmName -KeepDeviceId ([string]$KeepDeviceId))){
+            try{
+                Invoke-EpicVMTailscaleHttp -Provider $Provider -Method 'DELETE' -Path ('device/' + [Uri]::EscapeDataString($deviceId)) -AccessToken $access -TimeoutSeconds 20 | Out-Null
+                $revoked+=,$deviceId
+            }catch{$failed+=,$deviceId}
+        }
+    } catch {
+        return [ordered]@{ok=($revoked.Count -gt 0);skipped='device_list_unavailable';revoked=@($revoked);failed=@($failed)}
+    } finally {$access=$null}
+    return [ordered]@{ok=$true;skipped='';revoked=@($revoked);failed=@($failed)}
+}

@@ -1072,6 +1072,12 @@ function Invoke-EpicVMProvisioningClaim {
         if ($Job.tailnetIp -notmatch '^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.\d{1,3}\.\d{1,3}$' -or [string]::IsNullOrWhiteSpace($Job.tailnetDeviceId)) {
             throw (New-EpicVMProvisioningError -Code 'tailscale_verification_failed' -Message 'Tailscale enrollment did not return a verified device.' -Status 422)
         }
+        # Re-enrollments of a reused VM name orphan the previous enrollment's
+        # device record; sweep it while keeping the freshly enrolled one.
+        try {
+            $prune = Get-EpicVMProperty -Object $State.Provider -Name 'ClearTailscaleStaleDevices' -Default $null
+            if ($null -ne $prune) { & $prune ([string]$Job.name) ([string]$Job.tailnetDeviceId) | Out-Null }
+        } catch { }
         $managementReady = [bool](Get-EpicVMProperty -Object $tailnet -Name 'managementReady' -Default $false)
         $managementTransport = [string](Get-EpicVMProperty -Object $tailnet -Name 'managementTransport' -Default '')
         if (-not $managementReady -or [string]::IsNullOrWhiteSpace($managementTransport)) {
@@ -1200,6 +1206,12 @@ function Invoke-EpicVMProvisioningGuestRecovery {
         if ($Job.tailnetIp -notmatch '^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.\d{1,3}\.\d{1,3}$' -or [string]::IsNullOrWhiteSpace($Job.tailnetDeviceId)) {
             throw (New-EpicVMProvisioningError -Code 'tailscale_verification_failed' -Message 'Tailscale enrollment did not return a verified device.' -Status 422)
         }
+        # Re-enrollments of a reused VM name orphan the previous enrollment's
+        # device record; sweep it while keeping the freshly enrolled one.
+        try {
+            $prune = Get-EpicVMProperty -Object $State.Provider -Name 'ClearTailscaleStaleDevices' -Default $null
+            if ($null -ne $prune) { & $prune ([string]$Job.name) ([string]$Job.tailnetDeviceId) | Out-Null }
+        } catch { }
         $managementReady = [bool](Get-EpicVMProperty -Object $tailnet -Name 'managementReady' -Default $false)
         $managementTransport = [string](Get-EpicVMProperty -Object $tailnet -Name 'managementTransport' -Default '')
         if (-not $managementReady -or [string]::IsNullOrWhiteSpace($managementTransport)) {
@@ -1797,6 +1809,12 @@ function New-EpicVMDeprovisioningJob {
         if ($null -ne $console -and -not [string]::IsNullOrWhiteSpace($routePrefix)) { & $console $name $confirm $deviceId | Out-Null }
         $revoke = Get-EpicVMProperty -Object $State.Provider -Name 'RevokeTailscale' -Default $null
         if ($null -ne $revoke) { & $revoke $deviceId | Out-Null }
+        # Re-enrollments leave older control-plane records under the same
+        # hostname; sweep them so deprovisioning does not leak devices.
+        try {
+            $prune = Get-EpicVMProperty -Object $State.Provider -Name 'ClearTailscaleStaleDevices' -Default $null
+            if ($null -ne $prune) { & $prune $name $deviceId | Out-Null }
+        } catch { }
         if ([string](Get-EpicVMProperty -Object $vm -Name 'state' -Default '') -ieq 'Running') { & $State.Provider.StopVM $name | Out-Null }
         & $State.Provider.DeleteVM $name | Out-Null
         $quarantine = Get-EpicVMProperty -Object $State.Provider -Name 'QuarantineVM' -Default $null

@@ -705,7 +705,24 @@ function Invoke-EpicVMApiRequest {
                 return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok = $true; vm = $result })
             }
             if ($Method -eq 'DELETE' -and $segments.Count -eq 3) {
+                $tailnetDeviceId = ''
+                try {
+                    $vmRecord = @(& $State.Provider.GetVMs | Where-Object {
+                        [string](Get-EpicVMProperty -Object $_ -Name 'name' -Default '') -ceq $name
+                    }) | Select-Object -First 1
+                    if ($null -ne $vmRecord) { $tailnetDeviceId = [string](Get-EpicVMProperty -Object $vmRecord -Name 'tailnetDeviceId' -Default '') }
+                } catch { }
                 $result = Invoke-EpicVMProviderAction -State $State -Provider $State.Provider -Action 'delete' -Name $name
+                # Best-effort tailnet cleanup: revoke the recorded device and
+                # sweep any stale sibling records left by re-enrollments.
+                try {
+                    if ($tailnetDeviceId) {
+                        $revokeFn = Get-EpicVMProperty -Object $State.Provider -Name 'RevokeTailscale' -Default $null
+                        if ($null -ne $revokeFn) { & $revokeFn $tailnetDeviceId | Out-Null }
+                    }
+                    $pruneFn = Get-EpicVMProperty -Object $State.Provider -Name 'ClearTailscaleStaleDevices' -Default $null
+                    if ($null -ne $pruneFn) { & $pruneFn $name $tailnetDeviceId | Out-Null }
+                } catch { }
                 return ConvertTo-EpicVMJsonResponse -StatusCode 200 -Body ([ordered]@{ ok = $true; vm = $result })
             }
         }

@@ -232,3 +232,64 @@ Describe 'EpicVM agent shared games endpoint' {
         $response.Body.games | Should -BeNullOrEmpty
     }
 }
+
+Describe 'EpicVM tailscale stale device sweep' {
+    BeforeAll {
+        $script:testDevices = @(
+            @{ id = 'dev-old'; hostname = 'reusedvm'; addresses = @('100.64.0.9') },
+            @{ id = 'dev-live'; hostname = 'reusedvm'; addresses = @('100.64.0.10') },
+            @{ id = 'dev-broken'; hostname = 'reusedvm'; addresses = @('100.64.0.11') },
+            @{ id = ''; hostname = 'reusedvm' }
+        )
+    }
+
+    It 'selects only same-hostname records, skipping blanks and the kept device' {
+        $stale = Get-EpicVMTailscaleStaleDeviceIds -Devices $testDevices -VmName 'reusedvm' -KeepDeviceId 'dev-live'
+        $stale | Should -Be 'dev-old','dev-broken'
+    }
+
+    It 'handles null devices and missing hostnames without throwing' {
+        { Get-EpicVMTailscaleStaleDeviceIds -Devices $null -VmName 'x' -KeepDeviceId '' } | Should -Not -Throw
+        Get-EpicVMTailscaleStaleDeviceIds -Devices $null -VmName 'x' -KeepDeviceId '' | Should -BeNullOrEmpty
+    }
+
+    It 'sweeps stale devices via the API and reports failures per device' {
+        $calls = New-Object System.Collections.Generic.List[object]
+        $provider = [pscustomobject]@{
+            TailscaleTailnet = '-'
+            TailscaleOAuthClientId = 'cid'
+            TailscaleOAuthSecretPath = 'unused-path'
+            TailscaleApiBaseUrl = 'https://api.test/api/v2'
+            TailscaleOAuthInvoker = { param($body) @{ access_token = 'token-x' } }
+            TailscaleHttpInvoker = {
+                param($Method, $Url, $Headers, $Body)
+                $calls.Add(@{ Method = $Method; Url = $Url }) | Out-Null
+                if ($Method -eq 'GET') { return @{ devices = $script:testDevices } }
+                if ($Url -like '*device/dev-old*') { return @{ ok = $true } }
+                throw 'tailscale api 500'
+            }
+        }
+        $result = Clear-EpicVMTailscaleStaleDevices -Provider $provider -VmName 'reusedvm' -KeepDeviceId 'dev-live' -AccessToken 'token-x'
+
+        $result.ok | Should -BeTrue
+        $result.skipped | Should -Be ''
+        $result.revoked | Should -Be 'dev-old'
+        $result.failed | Should -Be 'dev-broken'
+        $deletes = @($calls | Where-Object { $_.Method -eq 'DELETE' })
+        $deletes.Count | Should -Be 2
+        (@($deletes | Where-Object { $_.Url -like '*dev-live*' })).Count | Should -Be 0
+    }
+
+    It 'reports a tailnet skip instead of calling the API when unconfigured' {
+        $called = $false
+        $provider = [pscustomobject]@{
+            TailscaleTailnet = ''
+            TailscaleOAuthClientId = ''
+            TailscaleOAuthSecretPath = ''
+            TailscaleHttpInvoker = { param($m,$u,$h,$b) $script:called = $true; return @{} }
+        }
+        $result = Clear-EpicVMTailscaleStaleDevices -Provider $provider -VmName 'x'
+        $result.skipped | Should -Be 'tailnet_not_configured'
+        $called | Should -BeFalse
+    }
+}

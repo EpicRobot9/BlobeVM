@@ -1056,6 +1056,7 @@ function New-EpicVMHyperVProvider {
         EnrollTailscale = $null
         VerifyGuest = $null
         RevokeTailscale = $null
+        ClearTailscaleStaleDevices = $null
         TeardownConsole = $null
         QuarantineVM = $null
     }
@@ -1111,6 +1112,7 @@ function New-EpicVMHyperVProvider {
             return Test-EpicVMGuestRdpReachability -Address ([string]$GuestIp)
         }.GetNewClosure())
     $provider.RevokeTailscale = ({ param($DeviceId) Revoke-EpicVMTailscaleDevice -Provider $provider -DeviceId $DeviceId }.GetNewClosure())
+    $provider.ClearTailscaleStaleDevices = ({ param($VmName, $KeepDeviceId) Clear-EpicVMTailscaleStaleDevices -Provider $provider -VmName $VmName -KeepDeviceId $KeepDeviceId }.GetNewClosure())
     $provider.QuarantineVM = ({ param($Name) Move-EpicVMHyperVQuarantine -Provider $provider -Name $Name }.GetNewClosure())
 
     return $provider
